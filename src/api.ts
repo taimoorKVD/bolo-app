@@ -60,6 +60,7 @@ export const api = {
   clearApiKey: () => call<void>("clear_api_key"),
   listMicrophones: () => call<MicInfo[]>("list_microphones"),
   getMicStatus: () => call<MicStatus>("get_mic_status"),
+  micLevel: () => call<number>("mic_level"),
   dismissError: () => call<void>("dismiss_error"),
   getHistory: () => call<HistoryEntry[]>("get_history"),
   deleteHistoryEntry: (id: string) => call<void>("delete_history_entry", { id }),

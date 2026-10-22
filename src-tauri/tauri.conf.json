@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Cadence",
+  "productName": "Bolo.com",
   "version": "0.1.0",
-  "identifier": "com.cadence.dictation",
+  "identifier": "com.bolo.dictation",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -14,20 +14,20 @@
     "windows": [
       {
         "label": "settings",
-        "title": "Cadence",
+        "title": "Bolo.com",
         "url": "index.html",
         "create": false,
-        "width": 980,
-        "height": 720,
-        "minWidth": 760,
-        "minHeight": 560,
+        "width": 1120,
+        "height": 760,
+        "minWidth": 880,
+        "minHeight": 600,
         "visible": false,
         "center": true,
         "resizable": true
       },
       {
         "label": "overlay",
-        "title": "Cadence",
+        "title": "Bolo.com",
         "url": "index.html?view=overlay",
         "create": false,
         "width": 420,
@@ -59,7 +59,7 @@
       "icons/icon.ico"
     ],
     "shortDescription": "Push-to-talk voice dictation",
-    "longDescription": "Hold a hotkey, speak, and Cadence inserts the transcript at your cursor using Groq Whisper.",
+    "longDescription": "Hold a hotkey, speak, and Bolo.com inserts the transcript at your cursor using Groq Whisper.",
     "category": "Utility",
     "windows": {
       "webviewInstallMode": {

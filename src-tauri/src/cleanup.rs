@@ -63,7 +63,29 @@ pub async fn clean_transcript(
     if transcript.trim().is_empty() {
         return skipped(fallback, "empty");
     }
-    outcome_from_model(transcript, request_cleanup(client, api_key, transcript, tone).await)
+    let first = request_cleanup(client, api_key, transcript, tone, false).await;
+    let first_outcome = outcome_from_model(transcript, first);
+    if first_outcome.used_model {
+        return first_outcome;
+    }
+    // The happy path is one request. A failure gets one simpler retry, and the
+    // stage log keeps both reasons.
+    let second = request_cleanup(client, api_key, transcript, tone, true).await;
+    let second_outcome = outcome_from_model(transcript, second);
+    if second_outcome.used_model {
+        return CleanOutcome {
+            text: second_outcome.text,
+            used_model: true,
+            note: None,
+            why: compact_why(&format!("applied after retry ({})", first_outcome.why)),
+        };
+    }
+    CleanOutcome {
+        text: second_outcome.text,
+        used_model: false,
+        note: second_outcome.note.or(first_outcome.note),
+        why: compact_why(&format!("{}; retry: {}", first_outcome.why, second_outcome.why)),
+    }
 }
 
 fn skipped(text: String, why: &str) -> CleanOutcome {
@@ -79,13 +101,16 @@ fn skipped(text: String, why: &str) -> CleanOutcome {
 fn outcome_from_model(transcript: &str, result: anyhow::Result<String>) -> CleanOutcome {
     let fallback = polish_locally(transcript);
     match result {
-        Ok(cleaned) if accept_cleanup(transcript, &cleaned) => CleanOutcome {
-            text: polish_model_output(&cleaned),
-            used_model: true,
-            note: None,
-            why: "applied".into(),
-        },
         Ok(cleaned) => {
+            let cleaned = salvage_model_text(&cleaned);
+            if accept_cleanup(transcript, &cleaned) {
+                return CleanOutcome {
+                    text: polish_model_output(&cleaned),
+                    used_model: true,
+                    note: None,
+                    why: "applied".into(),
+                };
+            }
             let trimmed = cleaned.trim();
             let why = if trimmed.is_empty() {
                 "rejected empty rewrite".into()
@@ -204,18 +229,64 @@ fn style_line(tone: Tone) -> &'static str {
     }
 }
 
+fn salvage_model_text(value: &str) -> String {
+    let mut text = value.trim().to_string();
+    if text.starts_with("```") {
+        if let Some(newline) = text.find('\n') {
+            text = text[newline + 1..].trim().to_string();
+        }
+        if let Some(fence) = text.rfind("```") {
+            text = text[..fence].trim().to_string();
+        }
+    }
+    text = unwrap_model_text(&text);
+    let lines: Vec<&str> = text.lines().filter(|line| !line.trim().is_empty()).collect();
+    if lines.len() >= 2 && is_preamble(lines[0]) {
+        text = lines[1..].join("\n");
+    }
+    text.trim().to_string()
+}
+
+fn is_preamble(line: &str) -> bool {
+    let lower = line
+        .trim()
+        .trim_end_matches([':', '.', ' '])
+        .to_ascii_lowercase();
+    if lower.chars().count() > 80 {
+        return false;
+    }
+    [
+        "here is",
+        "here's",
+        "edited",
+        "sure",
+        "certainly",
+        "transcript",
+        "corrected",
+        "the edited",
+        "output",
+    ]
+    .iter()
+    .any(|head| lower.starts_with(head))
+}
+
 async fn request_cleanup(
     client: &reqwest::Client,
     api_key: &str,
     transcript: &str,
     tone: Tone,
+    plain: bool,
 ) -> anyhow::Result<String> {
-    let system = format!(
-        "Edit a dictation transcript. Return only the edited words.\n{}\nRemove um and uh. If the speaker says scratch that, no wait, or I mean, keep the correction and drop the words it replaces. Do not add facts or wrap the result in quotes.",
-        style_line(tone)
-    );
+    let system = if plain {
+        "Correct this dictation. Return only the corrected words, with no introduction and no quotes.".to_string()
+    } else {
+        format!(
+            "Edit a dictation transcript. Return only the edited words.\n{}\nRemove um and uh. If the speaker says scratch that, no wait, or I mean, keep the correction and drop the words it replaces. Do not add facts or wrap the result in quotes.",
+            style_line(tone)
+        )
+    };
     let user = transcript.trim();
-    let max_tokens = (transcript.chars().count() as u32 / 2 + 48).clamp(48, 256);
+    let max_tokens = (transcript.chars().count() as u32 / 2 + if plain { 96 } else { 48 }).clamp(48, 320);
     let body = serde_json::json!({
         "model": CLEANUP_MODEL,
         "temperature": 0,
@@ -239,13 +310,38 @@ async fn request_cleanup(
         return Err(anyhow!(groq_error_message(status.as_u16(), &bytes)));
     }
     let parsed: ChatResponse = serde_json::from_str(&bytes).context("cleanup response was not JSON")?;
-    let content = parsed
+    let message = parsed
         .choices
         .into_iter()
         .next()
-        .and_then(|choice| choice.message.content)
+        .map(|choice| choice.message)
         .context("cleanup response had no text")?;
-    Ok(unwrap_model_text(&content))
+    if let Some(text) = message_text(message.content.as_ref()) {
+        return Ok(text);
+    }
+    if let Some(refusal) = message.refusal.filter(|text| !text.trim().is_empty()) {
+        return Err(anyhow!(compact_why(&refusal)));
+    }
+    Err(anyhow!("cleanup response had no text"))
+}
+
+fn message_text(value: Option<&serde_json::Value>) -> Option<String> {
+    let value = value?;
+    match value {
+        serde_json::Value::String(text) => Some(text.clone()),
+        serde_json::Value::Array(parts) => {
+            let mut out = String::new();
+            for part in parts {
+                if let Some(text) = part.as_str() {
+                    out.push_str(text);
+                } else if let Some(text) = part.get("text").and_then(|item| item.as_str()) {
+                    out.push_str(text);
+                }
+            }
+            if out.trim().is_empty() { None } else { Some(out) }
+        }
+        _ => None,
+    }
 }
 
 fn unwrap_model_text(value: &str) -> String {
@@ -291,7 +387,9 @@ struct ChatChoice {
 
 #[derive(Debug, Deserialize)]
 struct ChatMessage {
-    content: Option<String>,
+    content: Option<serde_json::Value>,
+    #[serde(default)]
+    refusal: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -575,6 +673,19 @@ mod tests {
         assert!(outcome.used_model);
         assert_eq!(outcome.why, "applied");
         assert_eq!(outcome.text, "Ship it tomorrow.");
+    }
+
+    #[test]
+    fn preamble_and_fences_still_count_as_applied() {
+        let fenced = outcome_from_model("ship it tomorrow", Ok("```\nShip it tomorrow.\n```".into()));
+        assert!(fenced.used_model, "{}", fenced.why);
+        assert_eq!(fenced.text, "Ship it tomorrow.");
+        let preamble = outcome_from_model(
+            "ship it tomorrow",
+            Ok("Here is the edit:\nShip it tomorrow.".into()),
+        );
+        assert!(preamble.used_model, "{}", preamble.why);
+        assert_eq!(preamble.text, "Ship it tomorrow.");
     }
 
     #[test]

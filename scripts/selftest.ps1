@@ -1,4 +1,4 @@
-# Run Cadence's Windows checks and print a pass/fail report.
+# Run Bolo.com's Windows checks and print a pass/fail report.
 # Live Groq tests run only when GROQ_API_KEY is set in the environment.
 # Each group has its own time limit. A hang is killed so the later groups still run.
 # Usage, from the repo root or from anywhere:
@@ -8,7 +8,7 @@ $ErrorActionPreference = "Continue"
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 
-Write-Host "Cadence self-test"
+Write-Host "Bolo.com self-test"
 Write-Host "Repo: $root"
 if ([string]::IsNullOrWhiteSpace($env:GROQ_API_KEY)) {
     Write-Host "GROQ_API_KEY is not set. Live Whisper, Llama, and latency tests will SKIP. Encode timing still runs."
@@ -20,6 +20,7 @@ if ([string]::IsNullOrWhiteSpace($env:GROQ_API_KEY)) {
 $steps = @(
     @{ Name = "Microphone selection and capture"; Filter = "audio::"; TimeoutSec = 900 },
     @{ Name = "Credential store round trip"; Filter = "credentials::"; TimeoutSec = 180 },
+    @{ Name = "Settings and key carryover from Cadence"; Filter = "carryover::"; TimeoutSec = 180 },
     @{ Name = "Paste into a text control"; Filter = "insert::"; TimeoutSec = 90 },
     @{ Name = "Groq transcription, cleanup, pipeline, and latency"; Filter = "live_tests::"; TimeoutSec = 300 },
     @{ Name = "Other unit tests"; Filter = ""; TimeoutSec = 300 }
@@ -42,7 +43,8 @@ function Invoke-LimitedCargo {
             "--skip", "audio::",
             "--skip", "credentials::",
             "--skip", "insert::",
-            "--skip", "live_tests::"
+            "--skip", "live_tests::",
+            "--skip", "carryover::"
         )
     }
 
@@ -272,7 +274,7 @@ function Invoke-StartupSmoke {
         if (-not $proc.WaitForExit($runLimit * 1000)) {
             $detail = "The bundled app did not report get_settings within ${runLimit}s."
         } elseif (-not (Test-Path $result)) {
-            $detail = "No smoke result (exit $($proc.ExitCode)). Cadence may already be running, or the settings page never invoked get_settings."
+            $detail = "No smoke result (exit $($proc.ExitCode)). Bolo.com may already be running, or the settings page never invoked get_settings."
         } else {
             $raw = [System.IO.File]::ReadAllText($result).Trim()
             if (-not $raw.StartsWith("OK ")) {
@@ -286,6 +288,9 @@ function Invoke-StartupSmoke {
                 }
                 if ($null -eq $detail -and ($settings.cleanupEnabled -ne $true -or $settings.model -ne "whisper-large-v3-turbo")) {
                     $detail = "Unexpected settings: $raw"
+                }
+                if ($null -eq $detail -and $settings.historyEnabled -ne $true) {
+                    $detail = "historyEnabled should stay on when the file omits it: $raw"
                 }
                 if ($null -eq $detail -and $null -ne $settings.microphone) {
                     $detail = "microphone should be null: $raw"

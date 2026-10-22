@@ -41,6 +41,29 @@ const LANGUAGES: Array<[string, string]> = [
   ["th", "Thai"],
 ];
 
+type SectionId =
+  | "general"
+  | "hotkey"
+  | "microphone"
+  | "language"
+  | "cleanup"
+  | "dictionary"
+  | "history"
+  | "privacy"
+  | "about";
+
+const NAV: Array<[SectionId, string, string]> = [
+  ["general", "General", "Account"],
+  ["hotkey", "Hotkey", "Push to talk"],
+  ["microphone", "Microphone", "Input"],
+  ["language", "Language", "Accuracy"],
+  ["cleanup", "Cleanup", "Style"],
+  ["dictionary", "Dictionary", "Names"],
+  ["history", "History", "On this PC"],
+  ["privacy", "Privacy", "Local only"],
+  ["about", "About", "Bolo.com"],
+];
+
 type Draft = {
   settings: Settings;
   keyStatus: ApiKeyStatus;
@@ -54,6 +77,7 @@ type Draft = {
   capturing: boolean;
   live: DictationEvent | null;
   lastError: string | null;
+  section: SectionId;
 };
 
 export type SettingsLoad =
@@ -71,7 +95,7 @@ export async function mountSettings(root: HTMLElement): Promise<SettingsLoad> {
       api.getAppInfo(),
     ]);
     render(root, {
-      settings,
+      settings: { ...settings, historyEnabled: settings.historyEnabled !== false },
       keyStatus,
       mics,
       history,
@@ -87,6 +111,7 @@ export async function mountSettings(root: HTMLElement): Promise<SettingsLoad> {
       capturing: false,
       live: null,
       lastError: info.lastError,
+      section: "general",
     });
     return { ok: true, detail: JSON.stringify(settings) };
   } catch (error) {
@@ -99,8 +124,8 @@ export async function mountSettings(root: HTMLElement): Promise<SettingsLoad> {
 function render(root: HTMLElement, draft: Draft): void {
   root.replaceChildren();
   const shell = el("div", "shell");
-  const rail = buildRail(draft);
-  const main = el("main", "main");
+  const nav = buildNav(draft);
+  const main = el("main", "stage");
   const form = document.createElement("form");
   form.className = "sheet";
   form.addEventListener("submit", (event) => {
@@ -113,17 +138,21 @@ function render(root: HTMLElement, draft: Draft): void {
     ...(alert ? [alert] : []),
     liveBanner(draft),
     listenerBanner(draft),
-    apiSection(draft),
-    hotkeySection(draft),
-    micSection(draft),
-    modelSection(draft),
-    dictionarySection(draft),
-    startupSection(draft),
+    generalPanel(draft),
+    hotkeyPanel(draft),
+    micPanel(draft),
+    languagePanel(draft),
+    cleanupPanel(draft),
+    dictionaryPanel(draft),
+    historyPanel(draft),
+    privacyPanel(draft),
+    aboutPanel(draft),
     saveBar(draft),
   );
-  main.append(form, historySection(draft));
-  shell.append(rail, main);
+  main.append(form);
+  shell.append(nav, main);
   root.append(shell);
+  showSection(form, draft.section);
 
   void onDictation((event) => {
     draft.live = event.phase === "idle" ? null : event;
@@ -137,16 +166,91 @@ function render(root: HTMLElement, draft: Draft): void {
     placeAlert(form, draft);
     const test = document.getElementById("test-record");
     if (test) test.textContent = event.phase === "recording" ? "Stop test" : "Record a test";
-    if (event.phase === "recording") refreshRail(draft);
-    if (event.phase === "done" || event.phase === "idle") {
-      void refreshHistory(draft);
-    }
+    if (event.phase === "done" || event.phase === "idle") void refreshHistory(draft);
+    refreshPills(draft);
   });
-  void onMicStatus((status) => {
-    applyDevices(draft, status.devices);
-  });
+  void onMicStatus((status) => applyDevices(draft, status.devices));
   void watchListener(draft, form);
-  window.addEventListener("cadence-history", () => void refreshHistory(draft));
+  window.addEventListener("bolo-history", () => void refreshHistory(draft));
+  window.setInterval(() => void paintMeter(), 120);
+}
+
+function showSection(form: HTMLElement, id: SectionId): void {
+  for (const panel of form.querySelectorAll<HTMLElement>("[data-panel]")) {
+    panel.hidden = panel.dataset.panel !== id;
+  }
+  for (const button of document.querySelectorAll<HTMLButtonElement>("[data-nav]")) {
+    const on = button.dataset.nav === id;
+    button.classList.toggle("is-on", on);
+    if (on) button.setAttribute("aria-current", "page");
+    else button.removeAttribute("aria-current");
+  }
+}
+
+function buildNav(draft: Draft): HTMLElement {
+  const rail = el("aside", "rail");
+  const brand = el("div", "brand");
+  brand.append(
+    el("p", "eyebrow", "Dictation"),
+    el("h1", "wordmark", "Bolo.com"),
+    el("p", "lede", "Hold a key anywhere in Windows. Speak. Let go. The words land at the cursor."),
+  );
+  const menu = el("nav", "sidenav");
+  menu.setAttribute("aria-label", "Settings");
+  for (const [id, title, hint] of NAV) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "nav-item";
+    button.dataset.nav = id;
+    button.append(el("span", "nav-title", title), el("span", "nav-hint", hint));
+    button.addEventListener("click", () => {
+      draft.section = id;
+      const form = document.querySelector<HTMLElement>(".sheet");
+      if (form) showSection(form, id);
+    });
+    menu.append(button);
+  }
+  const pills = el("div", "pills");
+  pills.append(
+    pill("key", "Key", draft.keyStatus.configured ? draft.keyStatus.hint ?? "Saved" : "Not set", draft.keyStatus.configured ? "good" : "warn"),
+    pill("hotkey", "Hotkey", formatHotkey(draft.settings.hotkey), "neutral"),
+    pill("mic", "Mic", micSummary(draft).value, "neutral"),
+  );
+  rail.append(brand, menu, pills);
+  if (draft.info.platform !== "windows") {
+    rail.append(
+      el(
+        "p",
+        "platform-note",
+        "This session is not Windows. The global hook, Credential Manager, and paste path run on Windows.",
+      ),
+    );
+  }
+  rail.append(el("p", "version", `Version ${draft.info.version}`));
+  return rail;
+}
+
+function pill(name: string, label: string, value: string, tone: string): HTMLElement {
+  const node = el("div", `status-pill tone-${tone}`);
+  node.dataset.pill = name;
+  node.append(el("span", "pill-k", label), el("span", "pill-v", value));
+  return node;
+}
+
+function refreshPills(draft: Draft): void {
+  const key = document.querySelector<HTMLElement>('[data-pill="key"]');
+  const hotkey = document.querySelector<HTMLElement>('[data-pill="hotkey"]');
+  const mic = document.querySelector<HTMLElement>('[data-pill="mic"]');
+  setPill(key, draft.keyStatus.configured ? draft.keyStatus.hint ?? "Saved" : "Not set", draft.keyStatus.configured ? "good" : "warn");
+  setPill(hotkey, formatHotkey(draft.settings.hotkey), "neutral");
+  setPill(mic, micSummary(draft).value, "neutral");
+}
+
+function setPill(node: HTMLElement | null, value: string, tone: string): void {
+  if (!node) return;
+  const text = node.querySelector(".pill-v");
+  if (text) text.textContent = value;
+  node.className = `status-pill tone-${tone}`;
 }
 
 function placeAlert(form: HTMLElement, draft: Draft): void {
@@ -186,50 +290,6 @@ async function watchListener(draft: Draft, form: HTMLElement): Promise<void> {
   }, 250);
 }
 
-function buildRail(draft: Draft): HTMLElement {
-  const rail = el("aside", "rail");
-  rail.append(
-    el("p", "eyebrow", "Dictation"),
-    el("h1", "wordmark", "Cadence"),
-    el(
-      "p",
-      "lede",
-      "Hold a key anywhere in Windows. Speak. Let go. The words land at the cursor.",
-    ),
-  );
-  const list = el("dl", "status-list");
-  list.append(
-    statusRow("API key", draft.keyStatus.configured ? draft.keyStatus.hint ?? "Saved" : "Not set"),
-    statusRow("Hotkey", formatHotkey(draft.settings.hotkey)),
-    statusRow("In use", micSummary(draft).value),
-  );
-  rail.append(list);
-  rail.append(
-    el(
-      "p",
-      "privacy",
-      "Audio is sent to Groq with your key, then discarded. Cadence does not keep the recording.",
-    ),
-  );
-  if (draft.info.platform !== "windows") {
-    rail.append(
-      el(
-        "p",
-        "platform-note",
-        "This session is not Windows. The global hook, Credential Manager, and paste path are implemented for Windows.",
-      ),
-    );
-  }
-  rail.append(el("p", "version", `Version ${draft.info.version}`));
-  return rail;
-}
-
-function statusRow(label: string, value: string): HTMLElement {
-  const row = el("div", "status-row");
-  row.append(el("dt", "", label), el("dd", "", value));
-  return row;
-}
-
 function liveBanner(draft: Draft): HTMLElement {
   const banner = el("div", "banner live");
   banner.dataset.live = "true";
@@ -238,14 +298,14 @@ function liveBanner(draft: Draft): HTMLElement {
     return banner;
   }
   const titles: Record<string, string> = {
-    recording: "Listening…",
-    transcribing: "Transcribing…",
+    recording: "Listening",
+    transcribing: "Transcribing",
     done: "Inserted",
     error: "Dictation failed",
   };
   banner.textContent = draft.live.message
-    ? `${titles[draft.live.phase] ?? "Cadence"} — ${draft.live.message}`
-    : titles[draft.live.phase] ?? "Cadence";
+    ? `${titles[draft.live.phase] ?? "Bolo.com"} — ${draft.live.message}`
+    : titles[draft.live.phase] ?? "Bolo.com";
   if (draft.live.phase === "error") banner.classList.add("bad");
   return banner;
 }
@@ -255,6 +315,7 @@ function alertBanner(draft: Draft): HTMLElement | null {
   if (!message) return null;
   const banner = el("div", "banner bad alert");
   banner.dataset.alert = "true";
+  banner.setAttribute("role", "alert");
   const copy = el("p", "", message);
   const dismiss = button("Dismiss", "text");
   dismiss.addEventListener("click", () => {
@@ -279,8 +340,12 @@ function listenerBanner(draft: Draft): HTMLElement {
   return banner;
 }
 
-function apiSection(draft: Draft): HTMLElement {
-  const section = sectionEl("01", "Groq API key", "Stored in Windows Credential Manager. It never goes into the settings file.");
+function generalPanel(draft: Draft): HTMLElement {
+  const panel = panelEl(
+    "general",
+    "Account",
+    "The Groq key stays in Windows Credential Manager. It is never written into the settings file.",
+  );
   const row = el("div", "key-row");
   const input = document.createElement("input");
   input.type = "password";
@@ -291,27 +356,27 @@ function apiSection(draft: Draft): HTMLElement {
     : "gsk_…";
   input.setAttribute("aria-label", "Groq API key");
   input.dataset.apiKey = "true";
-  const save = button("Save key", "primary");
+  const saveKey = button("Save key", "primary");
   const remove = button("Remove", "ghost");
   remove.disabled = !draft.keyStatus.configured;
   const note = el("p", "field-note");
   note.textContent = keyNote(draft.keyStatus);
   if (draft.keyStatus.error) note.classList.add("bad");
-  save.addEventListener("click", () => {
+  saveKey.addEventListener("click", () => {
     void (async () => {
-      save.disabled = true;
+      saveKey.disabled = true;
       try {
         draft.keyStatus = await api.setApiKey(input.value);
         input.value = "";
         note.textContent = `Saved in the OS credential store ${draft.keyStatus.hint ?? ""}.`;
         note.className = "field-note good";
         remove.disabled = false;
-        refreshRail(draft);
+        refreshPills(draft);
       } catch (error) {
         note.textContent = messageOf(error);
         note.className = "field-note bad";
       } finally {
-        save.disabled = false;
+        saveKey.disabled = false;
       }
     })();
   });
@@ -320,10 +385,10 @@ function apiSection(draft: Draft): HTMLElement {
       try {
         await api.clearApiKey();
         draft.keyStatus = { configured: false, hint: null, error: null };
-        note.textContent = "API key removed.";
+        note.textContent = "API key removed from this PC, including the previous Cadence entry.";
         note.className = "field-note";
         remove.disabled = true;
-        refreshRail(draft);
+        refreshPills(draft);
       } catch (error) {
         note.textContent = messageOf(error);
         note.className = "field-note bad";
@@ -331,20 +396,35 @@ function apiSection(draft: Draft): HTMLElement {
     })();
   });
   const link = button("Open Groq console", "text");
-  link.addEventListener("click", () => void api.openGroqKeys().catch((error) => {
-    note.textContent = messageOf(error);
-    note.className = "field-note bad";
-  }));
-  row.append(input, save, remove);
-  section.append(row, note, link);
-  return section;
+  link.addEventListener("click", () =>
+    void api.openGroqKeys().catch((error) => {
+      note.textContent = messageOf(error);
+      note.className = "field-note bad";
+    }),
+  );
+  row.append(input, saveKey, remove);
+  panel.append(
+    row,
+    note,
+    link,
+    toggle(
+      "Launch at startup",
+      "Bolo.com starts in the tray for this Windows user. The settings window stays closed until you open it.",
+      draft.settings.launchAtStartup,
+      (checked) => {
+        draft.settings.launchAtStartup = checked;
+        markDirty(draft);
+      },
+    ),
+  );
+  return panel;
 }
 
-function hotkeySection(draft: Draft): HTMLElement {
-  const section = sectionEl(
-    "02",
+function hotkeyPanel(draft: Draft): HTMLElement {
+  const panel = panelEl(
+    "hotkey",
     "Push to talk",
-    "Hold the chord to record. Release it to transcribe and paste. Double-tap to leave the mic open, then tap once to stop. Default is Ctrl + Win.",
+    "Hold the chord to record. Release it to transcribe and paste. Double-tap to leave the mic open, then tap once to stop. The default is Ctrl + Win.",
   );
   const display = el("div", "hotkey-display");
   const kbd = el("kbd", "hotkey-kbd", formatHotkey(draft.settings.hotkey));
@@ -364,7 +444,7 @@ function hotkeySection(draft: Draft): HTMLElement {
       draft.settings.hotkey = hotkey;
       kbd.textContent = formatHotkey(hotkey);
       markDirty(draft);
-      refreshRail(draft);
+      refreshPills(draft);
     });
     presets.append(preset);
   }
@@ -378,7 +458,7 @@ function hotkeySection(draft: Draft): HTMLElement {
     draft.settings.hotkey = { ctrl: true, alt: false, shift: false, win: true, key: null };
     kbd.textContent = formatHotkey(draft.settings.hotkey);
     markDirty(draft);
-    refreshRail(draft);
+    refreshPills(draft);
   });
   const test = button(draft.live?.phase === "recording" ? "Stop test" : "Record a test", "ghost");
   test.id = "test-record";
@@ -386,14 +466,18 @@ function hotkeySection(draft: Draft): HTMLElement {
     (document.activeElement as HTMLElement | null)?.blur();
     void api.toggleTestRecording();
   });
-  const testNote = el(
-    "p",
-    "field-note",
-    "Record a test uses the selected microphone and pastes into whichever app is focused when you stop.",
+  panel.append(
+    display,
+    presets,
+    hint,
+    test,
+    el(
+      "p",
+      "field-note",
+      "Record a test uses the selected microphone and pastes into whichever app is focused when you stop.",
+    ),
   );
-  section.append(display, presets, hint, el("div", "test-row", ""), testNote);
-  section.querySelector(".test-row")?.append(test);
-  return section;
+  return panel;
 }
 
 function startCapture(
@@ -418,7 +502,7 @@ function startCapture(
     if (hotkey) {
       draft.settings.hotkey = hotkey;
       markDirty(draft);
-      refreshRail(draft);
+      refreshPills(draft);
       hint.textContent = "Saved locally. Click Save settings to keep it.";
       hint.className = "field-note";
     } else if (error) {
@@ -476,12 +560,20 @@ function startCapture(
   window.addEventListener("keyup", onKeyUp, true);
 }
 
-function micSection(draft: Draft): HTMLElement {
-  const section = sectionEl(
-    "03",
+function micPanel(draft: Draft): HTMLElement {
+  const panel = panelEl(
+    "microphone",
     "Microphone",
-    "System default (auto) follows whichever microphone Windows is using. Pick one to prefer it — if you unplug it, Cadence uses the default and switches back when it returns.",
+    "System default follows whichever microphone Windows is using. Pick one to prefer it. If you unplug it, Bolo.com uses the default and switches back when it returns.",
   );
+  const meter = el("div", "meter");
+  meter.setAttribute("role", "meter");
+  meter.setAttribute("aria-label", "Microphone level");
+  meter.setAttribute("aria-valuemin", "0");
+  meter.setAttribute("aria-valuemax", "100");
+  const fill = el("span", "meter-fill");
+  fill.dataset.meterFill = "true";
+  meter.append(fill);
   const select = document.createElement("select");
   select.setAttribute("aria-label", "Microphone");
   select.dataset.micSelect = "true";
@@ -489,9 +581,9 @@ function micSection(draft: Draft): HTMLElement {
   select.addEventListener("change", () => {
     draft.settings.microphone = select.value || null;
     markDirty(draft);
-    const note = section.querySelector<HTMLElement>("[data-mic-note]");
+    const note = panel.querySelector<HTMLElement>("[data-mic-note]");
     if (note) note.textContent = micSummary(draft).note;
-    refreshRail(draft);
+    refreshPills(draft);
   });
   const refresh = button("Refresh list", "text");
   const note = el("p", "field-note", micSummary(draft).note);
@@ -507,8 +599,22 @@ function micSection(draft: Draft): HTMLElement {
       }
     })();
   });
-  section.append(select, refresh, note);
-  return section;
+  panel.append(meter, el("p", "field-note", "Live level from the microphone that is open now."), select, refresh, note);
+  return panel;
+}
+
+async function paintMeter(): Promise<void> {
+  const panel = document.querySelector<HTMLElement>('[data-panel="microphone"]');
+  const fill = document.querySelector<HTMLElement>("[data-meter-fill]");
+  if (!panel || panel.hidden || !fill) return;
+  try {
+    const level = Math.max(0, Math.min(1, await api.micLevel()));
+    fill.style.transform = `scaleX(${level})`;
+    const meter = fill.parentElement;
+    meter?.setAttribute("aria-valuenow", String(Math.round(level * 100)));
+  } catch {
+    fill.style.transform = "scaleX(0)";
+  }
 }
 
 function fillMicOptions(select: HTMLSelectElement, draft: Draft): void {
@@ -543,7 +649,7 @@ function applyDevices(draft: Draft, devices: MicInfo[]): void {
     note.textContent = micSummary(draft).note;
     note.className = "field-note";
   }
-  refreshRail(draft);
+  refreshPills(draft);
 }
 
 function normMic(name: string): string {
@@ -557,7 +663,7 @@ function micSummary(draft: Draft): { value: string; note: string } {
     if (!def) {
       return {
         value: "No microphone",
-        note: "No microphone is connected. Plug one in and Cadence will use it automatically.",
+        note: "No microphone is connected. Plug one in and Bolo.com will use it automatically.",
       };
     }
     return {
@@ -569,7 +675,7 @@ function micSummary(draft: Draft): { value: string; note: string } {
   if (match) {
     return {
       value: match.name,
-      note: `In use: ${match.name}. If you unplug it, Cadence uses the system default and switches back when it returns.`,
+      note: `In use: ${match.name}. If you unplug it, Bolo.com uses the system default and switches back when it returns.`,
     };
   }
   if (!def) {
@@ -584,11 +690,11 @@ function micSummary(draft: Draft): { value: string; note: string } {
   };
 }
 
-function modelSection(draft: Draft): HTMLElement {
-  const section = sectionEl(
-    "04",
-    "Transcription",
-    "Whisper on Groq. Cleanup uses Llama 3.1 8B Instant, also on Groq, and gives up quickly so a slow rewrite never holds the paste.",
+function languagePanel(draft: Draft): HTMLElement {
+  const panel = panelEl(
+    "language",
+    "Language and accuracy",
+    "Whisper runs on Groq at temperature 0. A low-confidence or empty result is tried once more without the prompt. The dictionary and your two most recent transcripts seed that prompt.",
   );
   const models: Array<{ id: WhisperModel; title: string; body: string }> = [
     {
@@ -642,28 +748,38 @@ function modelSection(draft: Draft): HTMLElement {
     markDirty(draft);
   });
   langLabel.append(lang);
-
-  const cleanup = toggle(
-    "Clean up with Llama",
-    "On for a new install. Llama 3.1 8B Instant punctuates and applies spoken corrections such as \"scratch that\", \"new line\", and \"period\". Chat stays casual, mail and documents stay formal, and code editors skip the rewrite. If the model is slow, Cadence pastes the local edit instead.",
-    draft.settings.cleanupEnabled,
-    (checked) => {
-      draft.settings.cleanupEnabled = checked;
-      markDirty(draft);
-    },
-  );
-  section.append(grid, langLabel, cleanup);
-  return section;
+  panel.append(grid, langLabel);
+  return panel;
 }
 
-function dictionarySection(draft: Draft): HTMLElement {
-  const section = sectionEl(
-    "05",
-    "Custom dictionary",
-    "One term per line. Whisper is prompted to spell them as written. Cadence also remembers capitalized names from what you dictate.",
+function cleanupPanel(draft: Draft): HTMLElement {
+  const panel = panelEl(
+    "cleanup",
+    "Cleanup and style",
+    "Llama 3.1 8B Instant punctuates and applies spoken corrections such as “scratch that”, “new line”, and “period”. Chat stays casual. Mail and documents stay formal. Code editors skip the rewrite. If the model fails, Bolo.com retries once, then pastes the local edit and logs why.",
+  );
+  panel.append(
+    toggle(
+      "Clean up with Llama",
+      "On for a new install. A settings file that already saved this off stays off until you turn it on.",
+      draft.settings.cleanupEnabled,
+      (checked) => {
+        draft.settings.cleanupEnabled = checked;
+        markDirty(draft);
+      },
+    ),
+  );
+  return panel;
+}
+
+function dictionaryPanel(draft: Draft): HTMLElement {
+  const panel = panelEl(
+    "dictionary",
+    "Dictionary",
+    "One term per line. Whisper is prompted to spell them as written. Bolo.com also remembers capitalized names from what you dictate.",
   );
   const area = document.createElement("textarea");
-  area.rows = 5;
+  area.rows = 8;
   area.spellcheck = false;
   area.setAttribute("aria-label", "Custom dictionary");
   area.value = draft.settings.dictionary.join("\n");
@@ -674,71 +790,102 @@ function dictionarySection(draft: Draft): HTMLElement {
       .filter(Boolean);
     markDirty(draft);
   });
-  section.append(area);
-  return section;
+  panel.append(area);
+  return panel;
 }
 
-function startupSection(draft: Draft): HTMLElement {
-  const section = sectionEl("06", "Startup", "Cadence starts in the tray. The settings window stays closed until you open it.");
-  section.append(
-    toggle(
-      "Launch at startup",
-      "Registers Cadence with Windows startup for the current user.",
-      draft.settings.launchAtStartup,
-      (checked) => {
-        draft.settings.launchAtStartup = checked;
-        markDirty(draft);
-      },
-    ),
+function historyPanel(draft: Draft): HTMLElement {
+  const panel = panelEl(
+    "history",
+    "History",
+    "The last 50 transcripts, newest first, stored only on this PC. Audio is not kept.",
   );
-  return section;
-}
-
-function saveBar(draft: Draft): HTMLElement {
-  const bar = el("div", "savebar");
-  const status = el("p", `save-status ${draft.statusTone}`, draft.status);
-  status.dataset.saveStatus = "true";
-  const save = button(draft.saving ? "Saving…" : "Save settings", "primary");
-  save.type = "submit";
-  save.disabled = draft.saving;
-  bar.append(status, save);
-  return bar;
-}
-
-function historySection(draft: Draft): HTMLElement {
-  const section = sectionEl("07", "Recent", "The last 50 transcripts, newest first. Audio is not stored.");
-  section.classList.add("history");
   const list = el("div", "history-list");
   list.dataset.history = "true";
   fillHistory(list, draft);
-  const clear = button("Clear history", "text");
+  const clear = button("Clear history", "ghost");
+  clear.addEventListener("click", () => void clearHistory(draft, list, panel));
+  panel.append(list, clear);
+  return panel;
+}
+
+function privacyPanel(draft: Draft): HTMLElement {
+  const panel = panelEl(
+    "privacy",
+    "Privacy",
+    "Audio and the transcript go only to Groq, using the key stored on this PC. Bolo.com does not store audio or text on a server of its own. Nothing else receives them. There is no telemetry.",
+  );
+  const list = el("div", "history-list");
+  list.dataset.historyPrivacy = "true";
+  panel.append(
+    toggle(
+      "Keep history on this PC",
+      "On by default. Turn this off to stop saving new transcripts. Transcripts already saved stay until you clear them.",
+      draft.settings.historyEnabled,
+      (checked) => {
+        draft.settings.historyEnabled = checked;
+        markDirty(draft);
+        const list = document.querySelector<HTMLElement>("[data-history]");
+        if (list) fillHistory(list, draft);
+      },
+    ),
+  );
+  const clear = button("Clear history", "ghost");
   clear.addEventListener("click", () => {
-    if (draft.history.length === 0) return;
-    if (!window.confirm("Clear every saved transcript on this computer?")) return;
-    void (async () => {
-      await api.clearHistory();
-      draft.history = [];
-      fillHistory(list, draft);
-    })().catch((error) => {
-      const note = el("p", "field-note bad", messageOf(error));
-      section.append(note);
-    });
+    const list = document.querySelector<HTMLElement>("[data-history]");
+    if (list) void clearHistory(draft, list, panel);
   });
-  section.append(list, clear);
-  return section;
+  panel.append(clear, el("p", "field-note", "Clear removes every saved transcript from this computer. It does not contact Groq."));
+  list.hidden = true;
+  return panel;
+}
+
+async function clearHistory(draft: Draft, list: HTMLElement, host: HTMLElement): Promise<void> {
+  if (draft.history.length === 0) return;
+  if (!window.confirm("Clear every saved transcript on this computer?")) return;
+  try {
+    await api.clearHistory();
+    draft.history = [];
+    fillHistory(list, draft);
+  } catch (error) {
+    host.append(el("p", "field-note bad", messageOf(error)));
+  }
+}
+
+function aboutPanel(draft: Draft): HTMLElement {
+  const panel = panelEl(
+    "about",
+    "About Bolo.com",
+    "Push-to-talk dictation for Windows. Hold the hotkey, speak, and the transcript is pasted at the cursor.",
+  );
+  const facts = el("dl", "facts");
+  facts.append(
+    fact("Version", draft.info.version),
+    fact("Transcription", "Groq Whisper, temperature 0"),
+    fact("Cleanup", "Groq Llama 3.1 8B Instant"),
+    fact("Audio", "16 kHz mono FLAC, WAV if encoding fails"),
+    fact("Carryover", "Settings and the Groq key from Cadence (com.cadence.dictation) are copied forward."),
+  );
+  panel.append(facts);
+  return panel;
+}
+
+function fact(label: string, value: string): HTMLElement {
+  const row = el("div", "fact");
+  row.append(el("dt", "", label), el("dd", "", value));
+  return row;
 }
 
 function fillHistory(list: HTMLElement, draft: Draft): void {
   list.replaceChildren();
+  if (!draft.settings.historyEnabled) {
+    list.append(el("p", "empty-title", "History is off. New dictation is not saved on this PC."));
+  }
   if (draft.history.length === 0) {
     const empty = el("div", "empty");
     empty.append(
-      el("p", "empty-title", "Nothing dictated yet."),
-      el(
-        "p",
-        "",
-        `Hold ${formatHotkey(draft.settings.hotkey)} in any app, speak, and release.`,
-      ),
+      el("p", "empty-title", draft.settings.historyEnabled ? "Nothing dictated yet." : "No saved transcripts."),
+      el("p", "", `Hold ${formatHotkey(draft.settings.hotkey)} in any app, speak, and release.`),
     );
     list.append(empty);
     return;
@@ -747,12 +894,13 @@ function fillHistory(list: HTMLElement, draft: Draft): void {
     const item = el("article", "history-item");
     const body = el("div");
     body.append(el("p", "history-text", entry.text));
-    const meta = el(
-      "p",
-      "history-meta",
-      `${formatWhen(entry.createdUnixMs)} · ${formatDuration(entry.durationMs)} · ${modelLabel(entry.model)}${entry.cleaned ? " · cleaned" : ""}`,
+    body.append(
+      el(
+        "p",
+        "history-meta",
+        `${formatWhen(entry.createdUnixMs)} · ${formatDuration(entry.durationMs)} · ${modelLabel(entry.model)}${entry.cleaned ? " · cleaned" : ""}`,
+      ),
     );
-    body.append(meta);
     const actions = el("div", "history-actions");
     const copy = button("Copy", "ghost");
     copy.addEventListener("click", () => {
@@ -812,16 +960,17 @@ async function save(draft: Draft, form: HTMLFormElement): Promise<void> {
         keyNoteEl.textContent = `Saved in the OS credential store ${draft.keyStatus.hint ?? ""}.`;
         keyNoteEl.className = "field-note good";
       }
-      refreshRail(draft);
+      refreshPills(draft);
     }
     await api.saveSettings(draft.settings);
     draft.dirty = false;
-    draft.settings = await api.getSettings();
+    const saved = await api.getSettings();
+    draft.settings = { ...saved, historyEnabled: saved.historyEnabled !== false };
     if (status) {
       status.textContent = "Settings saved.";
       status.className = "save-status good";
     }
-    refreshRail(draft);
+    refreshPills(draft);
   } catch (error) {
     if (status) {
       status.textContent = messageOf(error);
@@ -835,6 +984,17 @@ async function save(draft: Draft, form: HTMLFormElement): Promise<void> {
   }
 }
 
+function saveBar(draft: Draft): HTMLElement {
+  const bar = el("div", "savebar");
+  const status = el("p", `save-status ${draft.statusTone}`, draft.status);
+  status.dataset.saveStatus = "true";
+  const save = button(draft.saving ? "Saving…" : "Save settings", "primary");
+  save.type = "submit";
+  save.disabled = draft.saving;
+  bar.append(status, save);
+  return bar;
+}
+
 function markDirty(draft: Draft): void {
   draft.dirty = true;
   const status = document.querySelector<HTMLElement>("[data-save-status]");
@@ -844,22 +1004,18 @@ function markDirty(draft: Draft): void {
   }
 }
 
-function refreshRail(draft: Draft): void {
-  const rail = document.querySelector(".rail");
-  rail?.replaceWith(buildRail(draft));
-}
-
 function keyNote(status: ApiKeyStatus): string {
   if (status.error) return status.error;
-  if (status.configured) return `Key ${status.hint ?? ""} is in the OS credential store.`;
+  if (status.configured) return `Key ${status.hint ?? ""} is in the OS credential store. A key saved by Cadence is copied forward.`;
   return "Paste a key from console.groq.com. Nothing is sent until you dictate.";
 }
 
-function sectionEl(index: string, title: string, body: string): HTMLElement {
-  const section = el("section", "section");
-  const head = el("div", "section-head");
-  head.append(el("span", "index", index), el("h2", "", title));
-  section.append(head, el("p", "section-body", body));
+function panelEl(id: SectionId, title: string, body: string): HTMLElement {
+  const section = el("section", "card");
+  section.dataset.panel = id;
+  const head = el("div", "card-head");
+  head.append(el("h2", "", title));
+  section.append(head, el("p", "card-body", body));
   return section;
 }
 
@@ -893,7 +1049,7 @@ function button(text: string, kind: "primary" | "ghost" | "text"): HTMLButtonEle
 
 function loadingShell(): HTMLElement {
   const shell = el("div", "shell loading-shell");
-  shell.append(el("p", "eyebrow", "Dictation"), el("h1", "wordmark", "Cadence"));
+  shell.append(el("p", "eyebrow", "Dictation"), el("h1", "wordmark", "Bolo.com"));
   shell.append(el("p", "lede", "Loading your settings…"));
   shell.setAttribute("role", "status");
   return shell;
@@ -901,7 +1057,7 @@ function loadingShell(): HTMLElement {
 
 function errorShell(message: string, retry: () => void): HTMLElement {
   const shell = el("div", "shell error-shell");
-  shell.append(el("p", "eyebrow", "Dictation"), el("h1", "wordmark", "Cadence"));
+  shell.append(el("p", "eyebrow", "Dictation"), el("h1", "wordmark", "Bolo.com"));
   shell.append(el("p", "lede", "Settings didn't load."));
   const banner = el("div", "banner bad", visibleMessage(message) ?? "Settings didn't load.");
   const retryButton = button("Try again", "primary");
@@ -911,8 +1067,8 @@ function errorShell(message: string, retry: () => void): HTMLElement {
 }
 
 function messageOf(error: unknown): string {
-  if (error instanceof Error && error.message) return error.message;
-  if (typeof error === "string") return error;
+  if (error instanceof Error && error.message.trim()) return error.message.trim();
+  if (typeof error === "string" && error.trim()) return error.trim();
   return "Something went wrong.";
 }
 

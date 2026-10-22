@@ -65,13 +65,11 @@ fn assert_phrase(text: &str) {
 fn fixture_trims_silence_and_encodes_16k_mono() {
     let finished = decode_fixture();
     let raw_ms = finished.elapsed_ms;
-    let wav = audio::prepare_speech(&finished).expect("encode");
-    let mut reader = hound::WavReader::new(Cursor::new(&wav)).unwrap();
-    let spec = reader.spec();
-    assert_eq!(spec.sample_rate, 16_000);
-    assert_eq!(spec.channels, 1);
-    assert_eq!(spec.bits_per_sample, 16);
-    let samples = reader.samples::<i16>().count();
+    let samples_f = audio::speech_samples(&finished).expect("samples");
+    let encoded = audio::prepare_speech(&finished).expect("encode");
+    assert_eq!(&encoded.bytes[0..4], b"fLaC");
+    assert_eq!(encoded.format, "flac");
+    let samples = samples_f.len();
     let out_ms = samples as u64 * 1000 / 16_000;
     assert!(
         out_ms + 80 < raw_ms,
@@ -86,7 +84,7 @@ fn live_whisper_transcribes_the_fixture() {
         return;
     };
     let finished = decode_fixture();
-    let wav = audio::prepare_speech(&finished).expect("encode");
+    let wav = audio::prepare_speech(&finished).expect("encode").bytes;
     let text = wait(transcribe::transcribe(
         transcribe::http_client(),
         &key,
@@ -96,7 +94,7 @@ fn live_whisper_transcribes_the_fixture() {
         None,
     ))
     .expect("transcribe");
-    assert_phrase(&text);
+    assert_phrase(&text.text);
 }
 
 #[test]
@@ -114,7 +112,7 @@ fn live_llama_cleanup_applies_a_spoken_correction() {
     assert!(
         outcome.used_model,
         "cleanup did not use Llama: {}",
-        outcome.note.unwrap_or_default()
+        outcome.why
     );
     let lower = outcome.text.to_lowercase();
     assert!(lower.contains("wednesday"), "{}", outcome.text);
@@ -128,7 +126,7 @@ fn live_pipeline_trims_encodes_transcribes_and_strips_fillers() {
         return;
     };
     let finished = decode_fixture();
-    let wav = audio::prepare_speech(&finished).expect("encode");
+    let wav = audio::prepare_speech(&finished).expect("encode").bytes;
     let transcript = wait(transcribe::transcribe(
         transcribe::http_client(),
         &key,
@@ -138,7 +136,7 @@ fn live_pipeline_trims_encodes_transcribes_and_strips_fillers() {
         None,
     ))
     .expect("transcribe");
-    let cleaned = cleanup::strip_fillers(&transcript);
+    let cleaned = cleanup::strip_fillers(&transcript.text);
     assert_phrase(&cleaned);
     assert!(
         !words_of(&cleaned).iter().any(|word| word == "um" || word == "uh"),
@@ -172,9 +170,10 @@ fn encode_short_clip_stays_under_a_second() {
     let wav = audio::prepare_speech(&clip).expect("tone");
     let ms = started.elapsed().as_millis();
     eprintln!(
-        "LATENCY encode_fixture_ms={fixture_ms} fixture_bytes={} encode_3s_ms={ms} bytes={}",
-        fixture_wav.len(),
-        wav.len()
+        "LATENCY encode_fixture_ms={fixture_ms} fixture_bytes={} encode_3s_ms={ms} bytes={} fmt={}",
+        fixture_wav.bytes.len(),
+        wav.bytes.len(),
+        wav.format
     );
     assert!(fixture_ms < 1_500, "fixture encode took {fixture_ms} ms");
     assert!(ms < 1_500, "3s encode took {ms} ms");
@@ -189,15 +188,15 @@ fn live_latency_stages_stay_under_the_budget() {
     let encode_started = Instant::now();
     let wav = audio::prepare_speech(&finished).expect("encode");
     let encode_ms = encode_started.elapsed().as_millis();
-    let bytes = wav.len();
+    let bytes = wav.bytes.len();
     let groq_started = Instant::now();
     let text = wait(transcribe::transcribe(
         transcribe::http_client(),
         &key,
-        wav,
+        wav.bytes,
         transcribe::WHISPER_TURBO,
         "en",
-        transcribe::whisper_prompt(&["Cadence".into()]),
+        transcribe::whisper_prompt(&["Bolo.com".into()]),
     ))
     .expect("transcribe");
     let groq_ms = groq_started.elapsed().as_millis();
@@ -217,7 +216,7 @@ fn live_latency_stages_stay_under_the_budget() {
     );
     assert!(groq_ms < 8_000, "whisper took {groq_ms} ms");
     assert!(cleanup_ms < 4_000, "cleanup took {cleanup_ms} ms");
-    assert_phrase(&text);
+    assert_phrase(&text.text);
     let lower = outcome.text.to_lowercase();
     assert!(lower.contains("wednesday"), "{}", outcome.text);
     assert!(lower.contains('.') || lower.ends_with("wednesday"), "{}", outcome.text);

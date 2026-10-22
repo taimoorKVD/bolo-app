@@ -2,7 +2,7 @@
 //!
 //! The primary path copies the transcript to the clipboard, sends Ctrl+V, then
 //! puts the previous text clipboard back. If the clipboard holds an image, or
-//! the paste simulation fails, Cadence types the text instead.
+//! the paste simulation fails, Bolo.com types the text instead.
 
 use anyhow::{anyhow, Context};
 use arboard::Clipboard;
@@ -350,7 +350,7 @@ impl EditHost {
         let quit_thread = Arc::clone(&quit);
         let (ready_tx, ready_rx) = mpsc::channel();
         let thread = thread::spawn(move || unsafe {
-            let class_name: Vec<u16> = format!("CadencePasteTest{}\0", std::process::id())
+            let class_name: Vec<u16> = format!("BoloPasteTest{}\0", std::process::id())
                 .encode_utf16()
                 .collect();
             let module = match GetModuleHandleW(None) {
@@ -377,7 +377,7 @@ impl EditHost {
             let parent = match CreateWindowExW(
                 WINDOW_EX_STYLE::default(),
                 PCWSTR(class_name.as_ptr()),
-                w!("Cadence paste"),
+                w!("Bolo.com paste"),
                 WS_OVERLAPPEDWINDOW,
                 0,
                 0,

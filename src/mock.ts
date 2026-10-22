@@ -19,8 +19,9 @@ const settings: Settings = {
   model: "whisper-large-v3-turbo",
   cleanupEnabled: true,
   language: "auto",
-  dictionary: ["Cadence", "Tauri"],
+  dictionary: ["Bolo.com", "Groq"],
   launchAtStartup: false,
+  historyEnabled: true,
 };
 
 let apiKey: string | null = null;
@@ -47,7 +48,7 @@ let history: HistoryEntry[] = [
 
 const mics: MicInfo[] = [
   { name: "Microphone Array", isDefault: true },
-  { name: "USB Studio Mic", isDefault: false },
+  { name: "Jack Mic (2- Realtek(R) Audio)", isDefault: false },
 ];
 
 function keyStatus(): ApiKeyStatus {
@@ -111,6 +112,8 @@ export async function mockInvoke<T>(command: string, args?: Record<string, unkno
         lastError: previewParam("error"),
       } satisfies AppInfo as T;
     }
+    case "mic_level":
+      return (0.12 + 0.5 * Math.abs(Math.sin(Date.now() / 260))) as T;
     case "get_mic_status":
       return {
         preference: settings.microphone,
@@ -150,14 +153,14 @@ async function runDemoTake(): Promise<void> {
       cleaned: settings.cleanupEnabled,
       durationMs: 1800,
     };
-    history = [entry, ...history].slice(0, 50);
+    if (settings.historyEnabled) history = [entry, ...history].slice(0, 50);
     emitLocalDictation({
       phase: "done",
       message: "Inserted",
       elapsedMs: 1800,
       level: 0,
     });
-    window.dispatchEvent(new CustomEvent("cadence-history"));
+    window.dispatchEvent(new CustomEvent("bolo-history"));
     await delay(900);
     emitLocalDictation({ phase: "idle", message: null, elapsedMs: 0, level: 0 });
     return;

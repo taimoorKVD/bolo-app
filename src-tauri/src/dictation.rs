@@ -113,7 +113,9 @@ struct Staged {
     stop_ms: u64,
     encode_ms: u64,
     bytes: usize,
+    encode_fmt: String,
     groq_ms: u64,
+    groq_tries: u8,
     cleanup_ms: u64,
     /// Empty until cleanup runs. Then "applied", "off", "verbatim", or the fallback reason.
     cleanup_why: String,
@@ -336,8 +338,8 @@ pub fn begin(app: &AppHandle) {
     };
     *lock(&state.last_error) = None;
     let settings = lock(&state.settings).clone();
-    if let Some(tray) = app.tray_by_id("cadence") {
-        let _ = tray.set_tooltip(Some(format!("Cadence — hold {}", display(&settings.hotkey))));
+    if let Some(tray) = app.tray_by_id("bolo") {
+        let _ = tray.set_tooltip(Some(format!("Bolo.com — hold {}", display(&settings.hotkey))));
     }
     let take = match state.warm.begin(settings.microphone.as_deref()) {
         Ok(take) => take,
@@ -431,6 +433,11 @@ pub fn end(app: &AppHandle) {
     };
     let stop_ms = stop_started.elapsed().as_millis() as u64;
     let settings = lock(&state.settings).clone();
+    let recent: Vec<String> = lock(&state.history)
+        .iter()
+        .take(2)
+        .map(|entry| entry.text.clone())
+        .collect();
     let clock = Clock {
         release_started,
         held_ms,
@@ -450,7 +457,7 @@ pub fn end(app: &AppHandle) {
     );
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
-        match process(finished, settings, clock).await {
+        match process(finished, settings, clock, recent).await {
             Ok(outcome) => deliver(&app, outcome, generation).await,
             Err(err) => {
                 let release_ms = err.staged.release_started.elapsed().as_millis() as u64;
@@ -523,14 +530,21 @@ fn end_if_generation(app: &AppHandle, generation: u64) {
     }
 }
 
-async fn process(finished: audio::FinishedAudio, settings: Settings, clock: Clock) -> Result<Outcome, TakeError> {
+async fn process(
+    finished: audio::FinishedAudio,
+    settings: Settings,
+    clock: Clock,
+    recent: Vec<String>,
+) -> Result<Outcome, TakeError> {
     let mut staged = Staged {
         held_ms: clock.held_ms,
         open_wait_ms: clock.open_wait_ms,
         stop_ms: clock.stop_ms,
         encode_ms: 0,
         bytes: 0,
+        encode_fmt: String::new(),
         groq_ms: 0,
+        groq_tries: 0,
         cleanup_ms: 0,
         cleanup_why: String::new(),
         paste_ms: 0,
@@ -538,9 +552,11 @@ async fn process(finished: audio::FinishedAudio, settings: Settings, clock: Cloc
         release_started: clock.release_started,
     };
     let encode_started = Instant::now();
-    let wav = match audio::prepare_speech(&finished) {
-        Ok(wav) => wav,
-        Err(err) => {
+    let prompt = transcribe::whisper_prompt_with(&settings.dictionary, &recent);
+    let encoded = tauri::async_runtime::spawn_blocking(move || audio::prepare_speech(&finished)).await;
+    let encoded = match encoded {
+        Ok(Ok(encoded)) => encoded,
+        Ok(Err(err)) => {
             staged.encode_ms = encode_started.elapsed().as_millis() as u64;
             if matches!(err, SpeechError::Silent | SpeechError::Empty) {
                 return Err(TakeError {
@@ -555,9 +571,19 @@ async fn process(finished: audio::FinishedAudio, settings: Settings, clock: Cloc
                 staged,
             });
         }
+        Err(err) => {
+            staged.encode_ms = encode_started.elapsed().as_millis() as u64;
+            return Err(TakeError {
+                message: format!("Couldn't encode audio: {err}"),
+                hint: false,
+                staged,
+            });
+        }
     };
     staged.encode_ms = encode_started.elapsed().as_millis() as u64;
-    staged.bytes = wav.len();
+    staged.bytes = encoded.bytes.len();
+    staged.encode_fmt = encoded.format.to_string();
+    let wav = encoded.bytes;
     if wav.len() > 20 * 1024 * 1024 {
         return Err(TakeError {
             message: "The recording is too large to upload.".into(),
@@ -577,7 +603,6 @@ async fn process(finished: audio::FinishedAudio, settings: Settings, clock: Cloc
             });
         }
     };
-    let prompt = transcribe::whisper_prompt(&settings.dictionary);
     let model = settings.model.clone();
     let groq_started = Instant::now();
     let transcript = match transcribe::transcribe(
@@ -593,6 +618,7 @@ async fn process(finished: audio::FinishedAudio, settings: Settings, clock: Cloc
         Ok(text) => text,
         Err(err) => {
             staged.groq_ms = groq_started.elapsed().as_millis() as u64;
+            staged.groq_tries = 1;
             return Err(TakeError {
                 message: err.to_string(),
                 hint: false,
@@ -601,11 +627,12 @@ async fn process(finished: audio::FinishedAudio, settings: Settings, clock: Cloc
         }
     };
     staged.groq_ms = groq_started.elapsed().as_millis() as u64;
+    staged.groq_tries = transcript.tries;
     let cleanup_started = Instant::now();
     let cleaned = cleanup::clean_transcript(
         transcribe::http_client(),
         key.expose(),
-        &transcript,
+        &transcript.text,
         settings.cleanup_enabled,
         tone,
     )
@@ -721,14 +748,21 @@ fn stage_line(staged: &Staged, release_ms: u64) -> String {
     } else {
         format!(" cleanup_why={}", quote_log(&staged.cleanup_why))
     };
+    let fmt = if staged.encode_fmt.is_empty() {
+        "wav"
+    } else {
+        staged.encode_fmt.as_str()
+    };
     format!(
-        "stages held={} open_wait={} stop={} encode={} bytes={} groq={} cleanup={}{why} paste={} release={} tone={}",
+        "stages held={} open_wait={} stop={} encode={} bytes={} fmt={} groq={} tries={} cleanup={}{why} paste={} release={} tone={}",
         staged.held_ms,
         staged.open_wait_ms,
         staged.stop_ms,
         staged.encode_ms,
         staged.bytes,
+        fmt,
         staged.groq_ms,
+        staged.groq_tries,
         staged.cleanup_ms,
         staged.paste_ms,
         release_ms,
@@ -742,6 +776,9 @@ fn quote_log(value: &str) -> String {
 
 fn remember(app: &AppHandle, outcome: &Outcome) {
     let state = app.state::<AppState>();
+    if !lock(&state.settings).history_enabled {
+        return;
+    }
     let entry = HistoryEntry {
         id: store::new_history_id(),
         text: outcome.text.clone(),
@@ -761,8 +798,8 @@ fn fail(app: &AppHandle, message: &str) {
     let state = app.state::<AppState>();
     log_line(&state.config_dir, "error", message);
     *lock(&state.last_error) = Some(message.to_string());
-    if let Some(tray) = app.tray_by_id("cadence") {
-        let _ = tray.set_tooltip(Some(format!("Cadence — {message}")));
+    if let Some(tray) = app.tray_by_id("bolo") {
+        let _ = tray.set_tooltip(Some(format!("Bolo.com — {message}")));
     }
     show_problem(app, message, 8_000);
 }
@@ -921,7 +958,9 @@ mod tests {
                 stop_ms: 0,
                 encode_ms: 1,
                 bytes: 70124,
+                encode_fmt: "flac".into(),
                 groq_ms: 203,
+                groq_tries: 1,
                 cleanup_ms: 56,
                 cleanup_why: "couldn't reach Groq: timed out".into(),
                 paste_ms: 39,
@@ -930,6 +969,8 @@ mod tests {
             },
             304,
         );
+        assert!(line.contains("fmt=flac"));
+        assert!(line.contains("tries=1"));
         assert!(line.contains("cleanup=56"));
         assert!(line.contains("cleanup_why=\"couldn't reach Groq: timed out\""));
         assert!(line.contains("tone=casual"));

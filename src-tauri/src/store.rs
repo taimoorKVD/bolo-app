@@ -24,6 +24,13 @@ pub struct Settings {
     pub language: String,
     pub dictionary: Vec<String>,
     pub launch_at_startup: bool,
+    /// Local transcript history. Missing in older files, so it stays on.
+    #[serde(default = "history_on")]
+    pub history_enabled: bool,
+}
+
+fn history_on() -> bool {
+    true
 }
 
 impl Default for Settings {
@@ -36,6 +43,7 @@ impl Default for Settings {
             language: "auto".into(),
             dictionary: Vec::new(),
             launch_at_startup: false,
+            history_enabled: true,
         }
     }
 }
@@ -122,6 +130,31 @@ pub fn normalize_settings(mut settings: Settings) -> Settings {
         }
     }
     settings
+}
+
+/// Copy `settings.json` and `history.json` from a sibling Cadence config
+/// directory when this folder does not have settings yet. The old folder is
+/// left in place.
+pub fn migrate_legacy_config(dir: &Path) -> bool {
+    if dir.join("settings.json").exists() {
+        return false;
+    }
+    let Some(parent) = dir.parent() else {
+        return false;
+    };
+    let legacy = parent.join("com.cadence.dictation");
+    if legacy == dir || !legacy.is_dir() {
+        return false;
+    }
+    let mut copied = false;
+    for name in ["settings.json", "history.json"] {
+        let from = legacy.join(name);
+        let to = dir.join(name);
+        if from.is_file() && !to.exists() && fs::copy(&from, &to).is_ok() {
+            copied = true;
+        }
+    }
+    copied
 }
 
 pub fn load_settings(dir: &Path) -> Settings {
@@ -238,6 +271,7 @@ mod tests {
         assert_eq!(parsed, Settings::default());
         assert!(parsed.microphone.is_none());
         assert!(parsed.cleanup_enabled);
+        assert!(parsed.history_enabled);
         assert_eq!(parsed.model, WHISPER_TURBO);
         let blank: Settings = serde_json::from_str(r#"{"microphone":"   "}"#).unwrap();
         assert!(normalize_settings(blank).microphone.is_none());
@@ -341,5 +375,60 @@ mod tests {
         save_history(&dir, &history).unwrap();
         assert_eq!(load_history(&dir)[0].text, "hello");
         let _ = fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod carryover {
+    use super::*;
+
+    #[test]
+    fn copies_settings_and_history_from_the_cadence_folder() {
+        let parent = std::env::temp_dir().join(format!("bolo-carryover-{}", now_ms()));
+        let legacy = parent.join("com.cadence.dictation");
+        let next = parent.join("com.bolo.dictation");
+        let _ = fs::remove_dir_all(&parent);
+        fs::create_dir_all(&legacy).unwrap();
+        fs::create_dir_all(&next).unwrap();
+        let mut settings = Settings::default();
+        settings.dictionary = vec!["Bolo.com".into()];
+        settings.language = "en".into();
+        save_settings(&legacy, &settings).unwrap();
+        save_history(
+            &legacy,
+            &[HistoryEntry {
+                id: "old".into(),
+                text: "from cadence".into(),
+                created_unix_ms: 1,
+                model: WHISPER_TURBO.into(),
+                cleaned: false,
+                duration_ms: 10,
+            }],
+        )
+        .unwrap();
+        assert!(migrate_legacy_config(&next));
+        let loaded = load_settings(&next);
+        assert_eq!(loaded.dictionary, vec!["Bolo.com".to_string()]);
+        assert_eq!(loaded.language, "en");
+        assert!(loaded.history_enabled);
+        assert_eq!(load_history(&next)[0].text, "from cadence");
+        assert!(legacy.join("settings.json").is_file());
+        assert!(!migrate_legacy_config(&next));
+        let _ = fs::remove_dir_all(&parent);
+    }
+
+    #[test]
+    fn history_stays_on_when_the_old_file_omits_the_field() {
+        let raw = r#"{"cleanupEnabled":true,"language":"auto"}"#;
+        let parsed: Settings = serde_json::from_str(raw).unwrap();
+        assert!(parsed.history_enabled);
+        assert!(parsed.cleanup_enabled);
+    }
+
+    #[test]
+    fn credential_targets_still_name_cadence() {
+        assert!(crate::credentials::CADENCE_TARGET.contains("com.cadence.dictation"));
+        assert!(crate::credentials::TARGET.starts_with("com.bolo.dictation"));
+        assert!(crate::credentials::LEGACY_TARGET.contains("cadence"));
     }
 }

@@ -14,13 +14,31 @@ use serde::Serialize;
 use zeroize::Zeroize;
 
 #[cfg(not(windows))]
-const SERVICE: &str = "com.cadence.dictation";
+const SERVICE: &str = "com.bolo.dictation";
+#[cfg(not(windows))]
+const SERVICE_CADENCE: &str = "com.cadence.dictation";
 const ACCOUNT: &str = "groq-api-key";
-/// Stable Credential Manager target. Slashes are not used by keyring's
-/// `user.service` layout, so this does not collide with a legacy entry.
-const TARGET: &str = "com.cadence.dictation/groq-api-key";
+/// Current Credential Manager target.
+pub(crate) const TARGET: &str = "com.bolo.dictation/groq-api-key";
+/// The target used while the product was named Cadence. Still read, and copied
+/// onto `TARGET`, so a saved Groq key survives the rename. It is deleted only
+/// when the user removes the key.
+pub(crate) const CADENCE_TARGET: &str = "com.cadence.dictation/groq-api-key";
 /// keyring 3 on Windows stores `user.service`.
-const LEGACY_TARGET: &str = "groq-api-key.com.cadence.dictation";
+pub(crate) const LEGACY_TARGET: &str = "groq-api-key.com.cadence.dictation";
+
+/// Which keyring service a target belongs to. Windows Credential Manager uses
+/// the target string itself; this mapping is for the non-Windows store and tests.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn service_for_target(target: &str) -> Option<&'static str> {
+    if target == TARGET {
+        Some("com.bolo.dictation")
+    } else if target == CADENCE_TARGET || target == LEGACY_TARGET {
+        Some("com.cadence.dictation")
+    } else {
+        None
+    }
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -58,6 +76,7 @@ pub fn set_api_key(key: &str) -> anyhow::Result<()> {
 
 pub fn clear_api_key() -> anyhow::Result<()> {
     delete_target(TARGET)?;
+    delete_target(CADENCE_TARGET)?;
     delete_target(LEGACY_TARGET)?;
     Ok(())
 }
@@ -66,15 +85,15 @@ pub fn load_api_key() -> anyhow::Result<Option<String>> {
     if let Some(key) = read_target(TARGET)? {
         return Ok(Some(key));
     }
-    if let Some(key) = read_target(LEGACY_TARGET)? {
-        // Older builds used keyring's Windows target. Copy it forward so the
-        // next dictation reads the entry we just verified.
-        if write_target(TARGET, &key).is_ok() {
-            if read_target(TARGET)?.as_deref() == Some(key.as_str()) {
-                let _ = delete_target(LEGACY_TARGET);
+    // Cadence stored the key under either of these. Copy it onto the Bolo.com
+    // target and leave the old entry in place until the user clicks Remove.
+    for legacy in [CADENCE_TARGET, LEGACY_TARGET] {
+        if let Some(key) = read_target(legacy)? {
+            if write_target(TARGET, &key).is_ok() && read_target(TARGET)?.as_deref() == Some(key.as_str()) {
+                return Ok(Some(key));
             }
+            return Ok(Some(key));
         }
-        return Ok(Some(key));
     }
     Ok(None)
 }
@@ -115,7 +134,7 @@ impl SecretKey {
     pub fn load() -> anyhow::Result<Self> {
         match load_api_key()? {
             Some(key) => Ok(Self(key)),
-            None => anyhow::bail!("Add a Groq API key in Cadence settings."),
+            None => anyhow::bail!("Add a Groq API key in Bolo.com settings."),
         }
     }
 
@@ -130,7 +149,7 @@ impl Drop for SecretKey {
     }
 }
 
-/// Decode a credential blob. keyring 3 writes UTF-16LE. Cadence writes UTF-8.
+/// Decode a credential blob. keyring 3 writes UTF-16LE. Bolo.com writes UTF-8.
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn decode_secret(bytes: &[u8]) -> Option<String> {
     if bytes.is_empty() {
@@ -172,7 +191,7 @@ fn write_blob(target: &str, secret: &[u8]) -> anyhow::Result<()> {
 
     let mut target_w = wide(target);
     let mut user_w = wide(ACCOUNT);
-    let mut comment_w = wide("Cadence Groq API key");
+    let mut comment_w = wide("Bolo.com Groq API key");
     let mut alias_w = wide("");
     let mut blob = secret.to_vec();
     let credential = CREDENTIALW {
@@ -254,8 +273,8 @@ fn is_missing(err: &windows::core::Error) -> bool {
 
 #[cfg(not(windows))]
 fn write_target(target: &str, secret: &str) -> anyhow::Result<()> {
-    let _ = target;
-    let entry = keyring::Entry::new(SERVICE, ACCOUNT).context("couldn't open the credential store")?;
+    let service = service_for_target(target).unwrap_or(SERVICE);
+    let entry = keyring::Entry::new(service, ACCOUNT).context("couldn't open the credential store")?;
     entry
         .set_password(secret)
         .context("couldn't save the API key to the credential store")?;
@@ -264,12 +283,12 @@ fn write_target(target: &str, secret: &str) -> anyhow::Result<()> {
 
 #[cfg(not(windows))]
 fn read_target(target: &str) -> anyhow::Result<Option<String>> {
-    // Linux builds keep using one keyring entry. The legacy Windows target is
-    // only meaningful in Credential Manager.
-    if target != TARGET {
+    let Some(service) = service_for_target(target) else {
         return Ok(None);
-    }
-    let entry = keyring::Entry::new(SERVICE, ACCOUNT).context("couldn't open the credential store")?;
+    };
+    // Silence the unused const when both services are referenced via service_for_target.
+    let _ = (SERVICE, SERVICE_CADENCE);
+    let entry = keyring::Entry::new(service, ACCOUNT).context("couldn't open the credential store")?;
     match entry.get_password() {
         Ok(key) if key.trim().is_empty() => Ok(None),
         Ok(key) => Ok(Some(key)),
@@ -280,10 +299,10 @@ fn read_target(target: &str) -> anyhow::Result<Option<String>> {
 
 #[cfg(not(windows))]
 fn delete_target(target: &str) -> anyhow::Result<()> {
-    if target != TARGET {
+    let Some(service) = service_for_target(target) else {
         return Ok(());
-    }
-    let entry = keyring::Entry::new(SERVICE, ACCOUNT).context("couldn't open the credential store")?;
+    };
+    let entry = keyring::Entry::new(service, ACCOUNT).context("couldn't open the credential store")?;
     match entry.delete_credential() {
         Ok(()) => Ok(()),
         Err(keyring::Error::NoEntry) => Ok(()),
@@ -301,6 +320,17 @@ mod tests {
         assert!(validate_key("gsk_short").is_err());
         assert!(validate_key("gsk_has a space in the token!!").is_err());
         assert!(validate_key("gsk_12345678901234567890").is_ok());
+    }
+
+    #[test]
+    fn bolo_still_reads_the_cadence_targets() {
+        assert_eq!(TARGET, "com.bolo.dictation/groq-api-key");
+        assert_eq!(CADENCE_TARGET, "com.cadence.dictation/groq-api-key");
+        assert_eq!(LEGACY_TARGET, "groq-api-key.com.cadence.dictation");
+        assert_eq!(service_for_target(TARGET), Some("com.bolo.dictation"));
+        assert_eq!(service_for_target(CADENCE_TARGET), Some("com.cadence.dictation"));
+        assert_eq!(service_for_target(LEGACY_TARGET), Some("com.cadence.dictation"));
+        assert_eq!(service_for_target("other"), None);
     }
 
     #[test]
@@ -340,7 +370,7 @@ mod tests {
             }
         }
         let _restore = Restore(previous);
-        let probe = "gsk_cadence_selftest_key_123456";
+        let probe = "gsk_bolo_selftest_key_123456";
         set_api_key(probe).expect("save probe key");
         let loaded = load_api_key().expect("read probe key");
         assert_eq!(loaded.as_deref(), Some(probe));
@@ -363,5 +393,33 @@ mod tests {
         let loaded = read_target(&target).expect("read utf16 blob");
         delete_target(&target).expect("delete utf16 blob");
         assert_eq!(loaded.as_deref(), Some(secret));
+    }
+
+    /// A key saved by Cadence must load, and a copy must land on the Bolo.com
+    /// target, without deleting the original entry.
+    #[cfg(windows)]
+    #[test]
+    fn windows_copies_a_cadence_credential_forward() {
+        let previous = load_api_key().expect("read current key");
+        struct Restore(Option<String>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                let _ = clear_api_key();
+                if let Some(key) = self.0.take() {
+                    let _ = set_api_key(&key);
+                }
+            }
+        }
+        let _restore = Restore(previous);
+        clear_api_key().expect("clear before carryover");
+        let probe = "gsk_cadence_carry_forward_key_99";
+        write_target(CADENCE_TARGET, probe).expect("write cadence target");
+        assert_eq!(read_target(TARGET).expect("read new target"), None);
+        assert_eq!(load_api_key().expect("load").as_deref(), Some(probe));
+        assert_eq!(read_target(TARGET).expect("copied").as_deref(), Some(probe));
+        assert_eq!(
+            read_target(CADENCE_TARGET).expect("old entry").as_deref(),
+            Some(probe)
+        );
     }
 }

@@ -56,13 +56,14 @@ pub fn run() {
             get_app_info,
             dismiss_error,
             get_mic_status,
+            mic_level,
             copy_text,
             open_groq_keys,
             smoke_finished
         ])
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
-                if window.label() == "settings" && window.app_handle().tray_by_id("cadence").is_some()
+                if window.label() == "settings" && window.app_handle().tray_by_id("bolo").is_some()
                 {
                     api.prevent_close();
                     let _ = window.hide();
@@ -80,7 +81,11 @@ pub fn run() {
             if let Err(err) = std::fs::create_dir_all(&dir) {
                 eprintln!("config directory: {err}");
             }
+            let migrated = store::migrate_legacy_config(&dir);
             logbuf::init(&dir);
+            if migrated {
+                logbuf::log_line(&dir, "info", "copied settings from com.cadence.dictation");
+            }
             let settings = store::load_settings(&dir);
             let history = store::load_history(&dir);
             let state = AppState::new(settings.clone(), history, dir.clone());
@@ -142,13 +147,13 @@ pub fn run() {
             logbuf::log_line(
                 &dir,
                 "info",
-                &format!("Cadence ready, hold {}", display(&settings.hotkey)),
+                &format!("Bolo.com ready, hold {}", display(&settings.hotkey)),
             );
             micwatch::spawn(app.handle().clone());
             Ok(())
         })
         .run(tauri::generate_context!())
-        .expect("error while running Cadence");
+        .expect("error while running Bolo.com");
 }
 
 fn config_dir(app: &tauri::App) -> std::path::PathBuf {
@@ -205,11 +210,11 @@ fn park_offscreen<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) {
 
 fn setup_tray(app: &tauri::AppHandle, hotkey: &hotkey::Hotkey) -> tauri::Result<()> {
     let settings_item = MenuItem::with_id(app, "settings", "Settings", true, None::<&str>)?;
-    let quit_item = MenuItem::with_id(app, "quit", "Quit Cadence", true, None::<&str>)?;
+    let quit_item = MenuItem::with_id(app, "quit", "Quit Bolo.com", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&settings_item, &quit_item])?;
-    let mut builder = TrayIconBuilder::with_id("cadence")
+    let mut builder = TrayIconBuilder::with_id("bolo")
         .menu(&menu)
-        .tooltip(format!("Cadence — hold {}", display(hotkey)))
+        .tooltip(format!("Bolo.com — hold {}", display(hotkey)))
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {
             "settings" => show_settings(app),
@@ -245,8 +250,8 @@ fn show_settings(app: &tauri::AppHandle) {
 }
 
 fn update_tooltip(app: &tauri::AppHandle, hotkey: &hotkey::Hotkey) {
-    if let Some(tray) = app.tray_by_id("cadence") {
-        let _ = tray.set_tooltip(Some(format!("Cadence — hold {}", display(hotkey))));
+    if let Some(tray) = app.tray_by_id("bolo") {
+        let _ = tray.set_tooltip(Some(format!("Bolo.com — hold {}", display(hotkey))));
     }
 }
 
@@ -342,6 +347,11 @@ fn clear_api_key() -> Result<(), String> {
 #[tauri::command]
 fn list_microphones() -> Result<Vec<audio::MicInfo>, String> {
     audio::list_microphones().map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn mic_level(state: tauri::State<'_, AppState>) -> f32 {
+    state.warm.level()
 }
 
 #[tauri::command]

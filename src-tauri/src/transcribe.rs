@@ -21,7 +21,7 @@ pub fn http_client() -> &'static reqwest::Client {
             .http2_keep_alive_interval(Duration::from_secs(20))
             .http2_keep_alive_timeout(Duration::from_secs(10))
             .http2_keep_alive_while_idle(true)
-            .user_agent(concat!("Cadence/", env!("CARGO_PKG_VERSION")))
+            .user_agent(concat!("Bolo.com/", env!("CARGO_PKG_VERSION")))
             .build()
             .expect("http client")
     })
@@ -55,55 +55,162 @@ pub fn normalize_model(model: &str) -> Option<&'static str> {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn whisper_prompt(words: &[String]) -> Option<String> {
+    whisper_prompt_with(words, &[])
+}
+
+/// Dictionary terms plus the last couple of local transcripts, capped at 800 characters.
+pub fn whisper_prompt_with(words: &[String], recent: &[String]) -> Option<String> {
     let terms: Vec<&str> = words
         .iter()
         .map(|word| word.trim())
         .filter(|word| !word.is_empty())
         .collect();
-    if terms.is_empty() {
+    let snippets: Vec<String> = recent
+        .iter()
+        .take(2)
+        .map(|text| snippet(text, 140))
+        .filter(|text| !text.is_empty())
+        .collect();
+    if terms.is_empty() && snippets.is_empty() {
         return None;
     }
-    let mut prompt = format!(
-        "Dictation transcript. Spell these terms exactly when spoken: {}.",
-        terms.join(", ")
-    );
+    let mut prompt = String::new();
+    if !terms.is_empty() {
+        prompt.push_str("Dictation transcript. Spell these terms exactly when spoken: ");
+        prompt.push_str(&terms.join(", "));
+        prompt.push('.');
+    }
+    if !snippets.is_empty() {
+        if !prompt.is_empty() {
+            prompt.push(' ');
+        }
+        prompt.push_str("Recent dictation: ");
+        prompt.push_str(&snippets.join(" | "));
+        prompt.push('.');
+    }
     // Whisper prompts are capped at 224 tokens. Stay well under that in characters.
     if prompt.chars().count() > 800 {
         let truncated: String = prompt.chars().take(800).collect();
-        prompt = match truncated.rfind(',') {
-            Some(index) if index > 20 => truncated[..index].to_string(),
+        prompt = match truncated.rfind(['.', ',', '|']) {
+            Some(index) if index > 40 => truncated[..index].to_string(),
             _ => truncated,
         };
     }
     Some(prompt)
 }
 
+fn snippet(text: &str, max_chars: usize) -> String {
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= max_chars {
+        flat
+    } else {
+        let cut: String = flat.chars().take(max_chars).collect();
+        format!("{cut}…")
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Transcript {
+    pub text: String,
+    pub tries: u8,
+}
+
+/// A second Whisper call is worth it when the first result is empty or the
+/// model itself is unsure. Temperature stays 0; the retry drops the prompt so
+/// the request is not identical.
+pub fn should_retry(text: &str, avg_logprob: Option<f32>, no_speech_prob: Option<f32>) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    let words = trimmed.split_whitespace().count();
+    if avg_logprob.is_some_and(|value| value < -1.0) {
+        return true;
+    }
+    no_speech_prob.is_some_and(|value| value > 0.7) && words < 3
+}
+
 pub async fn transcribe(
     client: &reqwest::Client,
     api_key: &str,
-    wav: Vec<u8>,
+    audio: Vec<u8>,
     model: &str,
     language: &str,
     prompt: Option<String>,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<Transcript> {
     let model = normalize_model(model).context("unknown Whisper model")?;
-    let part = reqwest::multipart::Part::bytes(wav)
-        .file_name("dictation.wav")
-        .mime_str("audio/wav")
-        .context("couldn't build the audio upload")?;
+    let first = request_transcript(client, api_key, audio.clone(), model, language, prompt.as_deref()).await?;
+    if !should_retry(&first.text, first.avg_logprob, first.no_speech_prob) {
+        return Ok(Transcript {
+            text: first.text,
+            tries: 1,
+        });
+    }
+    match request_transcript(client, api_key, audio, model, language, None).await {
+        Ok(second) => Ok(Transcript {
+            text: prefer_attempt(first, second),
+            tries: 2,
+        }),
+        Err(_) if !first.text.trim().is_empty() => Ok(Transcript {
+            text: first.text,
+            tries: 2,
+        }),
+        Err(err) => Err(err),
+    }
+}
+
+fn prefer_attempt(first: Attempt, second: Attempt) -> String {
+    let primary = first.text.trim();
+    let retry = second.text.trim();
+    if primary.is_empty() {
+        return retry.to_string();
+    }
+    if retry.is_empty() {
+        return primary.to_string();
+    }
+    let first_bad = should_retry(primary, first.avg_logprob, first.no_speech_prob);
+    let second_bad = should_retry(retry, second.avg_logprob, second.no_speech_prob);
+    if first_bad && !second_bad {
+        return retry.to_string();
+    }
+    if !first_bad && second_bad {
+        return primary.to_string();
+    }
+    if retry.chars().count() >= primary.chars().count() {
+        retry.to_string()
+    } else {
+        primary.to_string()
+    }
+}
+
+struct Attempt {
+    text: String,
+    avg_logprob: Option<f32>,
+    no_speech_prob: Option<f32>,
+}
+
+async fn request_transcript(
+    client: &reqwest::Client,
+    api_key: &str,
+    audio: Vec<u8>,
+    model: &str,
+    language: &str,
+    prompt: Option<&str>,
+) -> anyhow::Result<Attempt> {
+    let part = audio_part(audio)?;
     let mut form = reqwest::multipart::Form::new()
         .part("file", part)
-        .text("model", model)
-        .text("response_format", "json")
+        .text("model", model.to_string())
+        .text("response_format", "verbose_json")
         .text("temperature", "0");
     if let Some(code) = normalize_language(language) {
         form = form.text("language", code);
     }
     if let Some(prompt) = prompt {
-        form = form.text("prompt", prompt);
+        form = form.text("prompt", prompt.to_string());
     }
-
     let response = client
         .post("https://api.groq.com/openai/v1/audio/transcriptions")
         .bearer_auth(api_key)
@@ -116,9 +223,56 @@ pub async fn transcribe(
     if !status.is_success() {
         return Err(anyhow!(groq_error_message(status.as_u16(), &body)));
     }
-    let parsed: Transcript =
-        serde_json::from_str(&body).context("transcription response was not JSON")?;
-    Ok(parsed.text.trim().to_string())
+    parse_attempt(&body)
+}
+
+fn audio_part(bytes: Vec<u8>) -> anyhow::Result<reqwest::multipart::Part> {
+    let flac = bytes.starts_with(b"fLaC");
+    let (name, mime) = if flac {
+        ("dictation.flac", "audio/flac")
+    } else {
+        ("dictation.wav", "audio/wav")
+    };
+    reqwest::multipart::Part::bytes(bytes)
+        .file_name(name)
+        .mime_str(mime)
+        .context("couldn't build the audio upload")
+}
+
+fn parse_attempt(body: &str) -> anyhow::Result<Attempt> {
+    if let Ok(verbose) = serde_json::from_str::<VerboseBody>(body) {
+        if let Some(text) = verbose.text {
+            let (avg_logprob, no_speech_prob) = verbose
+                .segments
+                .as_deref()
+                .map(confidence)
+                .unwrap_or((None, None));
+            return Ok(Attempt {
+                text: text.trim().to_string(),
+                avg_logprob,
+                no_speech_prob,
+            });
+        }
+    }
+    let parsed: SimpleTranscript =
+        serde_json::from_str(body).context("transcription response was not JSON")?;
+    Ok(Attempt {
+        text: parsed.text.trim().to_string(),
+        avg_logprob: None,
+        no_speech_prob: None,
+    })
+}
+
+fn confidence(segments: &[VerboseSegment]) -> (Option<f32>, Option<f32>) {
+    let logs: Vec<f32> = segments.iter().filter_map(|segment| segment.avg_logprob).collect();
+    let noises: Vec<f32> = segments.iter().filter_map(|segment| segment.no_speech_prob).collect();
+    let avg = if logs.is_empty() {
+        None
+    } else {
+        Some(logs.iter().sum::<f32>() / logs.len() as f32)
+    };
+    let noise = noises.into_iter().reduce(f32::max);
+    (avg, noise)
 }
 
 pub fn normalize_language(language: &str) -> Option<String> {
@@ -134,8 +288,20 @@ pub fn normalize_language(language: &str) -> Option<String> {
 }
 
 #[derive(Debug, Deserialize)]
-struct Transcript {
+struct SimpleTranscript {
     text: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct VerboseBody {
+    text: Option<String>,
+    segments: Option<Vec<VerboseSegment>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct VerboseSegment {
+    avg_logprob: Option<f32>,
+    no_speech_prob: Option<f32>,
 }
 
 #[cfg(test)]
@@ -154,6 +320,34 @@ mod tests {
         assert!(prompt.chars().count() <= 800);
         assert!(prompt.starts_with("Dictation transcript."));
         assert!(prompt.contains("Supercalifragilistic"));
+        let with_recent = whisper_prompt_with(
+            &["Bolo.com".into()],
+            &["Ship the notes to Priya tomorrow morning before the review.".into()],
+        )
+        .unwrap();
+        assert!(with_recent.contains("Bolo.com"));
+        assert!(with_recent.contains("Recent dictation"));
+        assert!(with_recent.contains("Priya"));
+        assert!(with_recent.chars().count() <= 800);
+        assert_eq!(whisper_prompt_with(&[], &["  ".into()]), None);
+    }
+
+    #[test]
+    fn retries_empty_or_low_confidence_results() {
+        assert!(should_retry("", None, None));
+        assert!(should_retry("   ", Some(-0.2), Some(0.1)));
+        assert!(should_retry("hello there", Some(-1.4), Some(0.2)));
+        assert!(should_retry("hi", Some(-0.2), Some(0.9)));
+        assert!(!should_retry("ship it tomorrow", Some(-0.3), Some(0.05)));
+        assert!(!should_retry("a longer confident sentence here", None, Some(0.8)));
+        let body = r#"{"text":" Ship it. ","segments":[{"avg_logprob":-0.2,"no_speech_prob":0.01},{"avg_logprob":-0.4,"no_speech_prob":0.2}]}"#;
+        let attempt = parse_attempt(body).unwrap();
+        assert_eq!(attempt.text, "Ship it.");
+        assert!(attempt.avg_logprob.unwrap() < -0.2);
+        assert!((attempt.no_speech_prob.unwrap() - 0.2).abs() < 0.001);
+        let plain = parse_attempt(r#"{"text":"hello"}"#).unwrap();
+        assert_eq!(plain.text, "hello");
+        assert!(plain.avg_logprob.is_none());
     }
 
     #[test]

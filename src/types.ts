@@ -16,6 +16,7 @@ export type Settings = {
   language: string;
   dictionary: string[];
   launchAtStartup: boolean;
+  historyEnabled: boolean;
 };
 
 export type ApiKeyStatus = {

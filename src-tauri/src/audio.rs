@@ -1,8 +1,8 @@
-//! Microphone capture, silence trimming, and 16 kHz mono WAV encoding.
+//! Microphone capture, silence trimming, and 16 kHz mono encoding.
 //!
-//! Groq accepts WAV and FLAC. Cadence uploads 16-bit PCM WAV: one minute of
-//! mono 16 kHz audio is about 1.9 MB, well under Groq's upload limit, and the
-//! encoder has no native dependency.
+//! Groq accepts WAV and FLAC. Bolo.com uploads FLAC when the encoder succeeds
+//! and falls back to 16-bit PCM WAV. One minute of mono 16 kHz WAV is about
+//! 1.9 MB; FLAC is much smaller, so the upload finishes sooner.
 
 use anyhow::{anyhow, Context};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -498,7 +498,19 @@ impl Drop for RecordingSession {
     }
 }
 
-pub fn prepare_speech(finished: &FinishedAudio) -> Result<Vec<u8>, SpeechError> {
+pub struct EncodedSpeech {
+    pub bytes: Vec<u8>,
+    /// `flac` or `wav`. Logged with the stage timings.
+    pub format: &'static str,
+}
+
+pub fn prepare_speech(finished: &FinishedAudio) -> Result<EncodedSpeech, SpeechError> {
+    let resampled = speech_samples(finished)?;
+    encode_speech(&resampled, TARGET_RATE)
+}
+
+/// Trimmed, gain-normalized, 16 kHz mono samples ready to encode.
+pub fn speech_samples(finished: &FinishedAudio) -> Result<Vec<f32>, SpeechError> {
     if finished.channels == 0 || finished.sample_rate == 0 || finished.interleaved.is_empty() {
         return Err(SpeechError::Empty);
     }
@@ -511,8 +523,27 @@ pub fn prepare_speech(finished: &FinishedAudio) -> Result<Vec<u8>, SpeechError> 
     if duration < MIN_SPEECH_SECS {
         return Err(SpeechError::Silent);
     }
-    let resampled = resample(&trimmed, finished.sample_rate, TARGET_RATE);
-    encode_wav(&resampled, TARGET_RATE).map_err(|err| SpeechError::Encode(err.to_string()))
+    let gained = normalize_gain(&trimmed);
+    Ok(resample(&gained, finished.sample_rate, TARGET_RATE))
+}
+
+/// Boost quiet speech toward a comfortable peak. Already-loud audio is left
+/// alone, and a near-silent buffer is not amplified into noise.
+pub fn normalize_gain(samples: &[f32]) -> Vec<f32> {
+    const TARGET_PEAK: f32 = 0.72;
+    const MAX_GAIN: f32 = 6.0;
+    let peak = samples.iter().fold(0.0f32, |peak, sample| peak.max(sample.abs()));
+    if peak < 0.001 {
+        return samples.to_vec();
+    }
+    let gain = (TARGET_PEAK / peak).clamp(1.0, MAX_GAIN);
+    if gain <= 1.001 {
+        return samples.to_vec();
+    }
+    samples
+        .iter()
+        .map(|sample| (sample * gain).clamp(-1.0, 1.0))
+        .collect()
 }
 
 pub fn downmix(interleaved: &[f32], channels: u16) -> Vec<f32> {
@@ -554,10 +585,13 @@ pub fn trim_silence_with(samples: &[f32], sample_rate: u32, threshold: f32) -> V
         .chunks(frame)
         .map(|chunk| rms(chunk) >= threshold)
         .collect();
-    let Some(first) = voiced.iter().position(|voiced| *voiced) else {
+    // Onset needs two voiced frames so a click is not speech. A short hangover
+    // keeps a quiet consonant that follows the last loud frame.
+    let Some((first, last)) = speech_bounds(&voiced) else {
         return Vec::new();
     };
-    let last = voiced.iter().rposition(|voiced| *voiced).unwrap_or(first);
+    const HANGOVER_FRAMES: usize = 3;
+    let last = (last + HANGOVER_FRAMES).min(voiced.len().saturating_sub(1));
     let pad = ((sample_rate as usize) * PAD_MS as usize) / 1000;
     let start = (first * frame).saturating_sub(pad);
     let end = ((last + 1) * frame).saturating_add(pad).min(samples.len());
@@ -565,6 +599,43 @@ pub fn trim_silence_with(samples: &[f32], sample_rate: u32, threshold: f32) -> V
         return Vec::new();
     }
     samples[start..end].to_vec()
+}
+
+/// First and last frame indexes that belong to a real onset (two voiced frames
+/// in a row). A single loud frame is ignored.
+fn speech_bounds(voiced: &[bool]) -> Option<(usize, usize)> {
+    const ONSET: usize = 2;
+    if voiced.is_empty() {
+        return None;
+    }
+    if voiced.len() < ONSET {
+        return if voiced.iter().any(|flag| *flag) {
+            Some((0, voiced.len() - 1))
+        } else {
+            None
+        };
+    }
+    let mut start = None;
+    let mut run = 0usize;
+    for (index, flag) in voiced.iter().enumerate() {
+        run = if *flag { run + 1 } else { 0 };
+        if run >= ONSET {
+            start = Some(index + 1 - ONSET);
+            break;
+        }
+    }
+    let start = start?;
+    let mut end = None;
+    run = 0;
+    for index in (0..voiced.len()).rev() {
+        run = if voiced[index] { run + 1 } else { 0 };
+        if run >= ONSET {
+            end = Some(index + ONSET - 1);
+            break;
+        }
+    }
+    let end = end?;
+    if end < start { None } else { Some((start, end)) }
 }
 
 pub fn resample(input: &[f32], in_rate: u32, out_rate: u32) -> Vec<f32> {
@@ -590,6 +661,45 @@ pub fn resample(input: &[f32], in_rate: u32, out_rate: u32) -> Vec<f32> {
         out.push(a + (b - a) * frac);
     }
     out
+}
+
+pub fn encode_speech(samples: &[f32], sample_rate: u32) -> Result<EncodedSpeech, SpeechError> {
+    if let Ok(bytes) = encode_flac(samples, sample_rate) {
+        if bytes.starts_with(b"fLaC") && bytes.len() > 42 {
+            return Ok(EncodedSpeech { bytes, format: "flac" });
+        }
+    }
+    let bytes = encode_wav(samples, sample_rate).map_err(|err| SpeechError::Encode(err.to_string()))?;
+    Ok(EncodedSpeech { bytes, format: "wav" })
+}
+
+fn encode_flac(samples: &[f32], sample_rate: u32) -> anyhow::Result<Vec<u8>> {
+    use flacenc::component::BitRepr;
+    use flacenc::error::Verify;
+    if samples.is_empty() || sample_rate == 0 {
+        return Err(anyhow!("empty audio"));
+    }
+    let pcm: Vec<i32> = samples
+        .iter()
+        .map(|sample| (sample.clamp(-1.0, 1.0) * i16::MAX as f32) as i32)
+        .collect();
+    let mut config = flacenc::config::Encoder::default();
+    // Fixed predictors and one thread. A short take should not pay to search
+    // LPC orders or start a worker pool.
+    config.multithread = false;
+    config.block_size = 2048;
+    config.subframe_coding.use_lpc = false;
+    let config = config
+        .into_verified()
+        .map_err(|err| anyhow!("flac config: {err:?}"))?;
+    let source = flacenc::source::MemSource::from_samples(&pcm, 1, 16, sample_rate as usize);
+    let stream = flacenc::encode_with_fixed_block_size(&config, source, config.block_size)
+        .map_err(|err| anyhow!("flac encode: {err:?}"))?;
+    let mut sink = flacenc::bitsink::ByteSink::new();
+    stream
+        .write(&mut sink)
+        .map_err(|err| anyhow!("flac write: {err}"))?;
+    Ok(sink.as_slice().to_vec())
 }
 
 pub fn encode_wav(samples: &[f32], sample_rate: u32) -> anyhow::Result<Vec<u8>> {
@@ -906,9 +1016,32 @@ mod tests {
             elapsed_ms: 800,
             noise_rms: 0.0,
         };
-        let wav = prepare_speech(&speech).unwrap();
-        assert!(wav.len() > 44);
-        assert_eq!(&wav[0..4], b"RIFF");
+        let encoded = prepare_speech(&speech).unwrap();
+        assert!(encoded.bytes.len() > 42);
+        assert_eq!(&encoded.bytes[0..4], b"fLaC");
+        assert_eq!(encoded.format, "flac");
+    }
+
+    #[test]
+    fn a_single_click_does_not_count_as_speech() {
+        let mut samples = vec![0.0; 8_000];
+        for sample in samples.iter_mut().skip(1_600).take(320) {
+            *sample = 0.4;
+        }
+        assert!(trim_silence(&samples, 16_000).is_empty());
+    }
+
+    #[test]
+    fn quiet_speech_is_boosted_and_loud_speech_is_not() {
+        let quiet = tone(16_000, 200, 0.05);
+        let gained = normalize_gain(&quiet);
+        let peak = gained.iter().fold(0.0f32, |peak, sample| peak.max(sample.abs()));
+        assert!(peak > 0.2 && peak <= 0.73, "peak {peak}");
+        let loud = tone(16_000, 200, 0.9);
+        let unchanged = normalize_gain(&loud);
+        let loud_peak = unchanged.iter().fold(0.0f32, |peak, sample| peak.max(sample.abs()));
+        assert!((loud_peak - 0.9).abs() < 0.05, "loud peak {loud_peak}");
+        assert!(normalize_gain(&vec![0.0001; 400]).iter().all(|sample| sample.abs() < 0.001));
     }
 
     #[test]

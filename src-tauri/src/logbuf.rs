@@ -4,10 +4,10 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn init(dir: &Path) {
-    let path = dir.join("cadence.log");
+    let path = dir.join("bolo.log");
     if let Ok(meta) = fs::metadata(&path) {
         if meta.len() > 1_000_000 {
-            let _ = fs::rename(&path, dir.join("cadence.log.1"));
+            let _ = fs::rename(&path, dir.join("bolo.log.1"));
         }
     }
 }
@@ -23,7 +23,7 @@ pub fn log_line(dir: &Path, level: &str, message: &str) {
     if let Ok(mut file) = OpenOptions::new()
         .create(true)
         .append(true)
-        .open(dir.join("cadence.log"))
+        .open(dir.join("bolo.log"))
     {
         let _ = writeln!(file, "{line}");
     }

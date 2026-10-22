@@ -74,18 +74,31 @@ impl LiveTake {
 
 pub struct WarmMic {
     cmd: Sender<Cmd>,
+    level: Arc<AtomicU32>,
 }
 
 impl WarmMic {
     pub fn spawn(preference: Option<String>) -> Self {
         let (cmd_tx, cmd_rx) = mpsc::channel();
+        let level = Arc::new(AtomicU32::new(0));
         let initial = preference.clone();
-        let _ = std::thread::Builder::new().name("cadence-warm".into()).spawn(move || {
-            run(cmd_rx, initial);
+        let shared = Arc::clone(&level);
+        let _ = std::thread::Builder::new().name("bolo-warm".into()).spawn(move || {
+            run(cmd_rx, initial, shared);
         });
         // Ask the thread to open this preference even if spawn raced.
         let _ = cmd_tx.send(Cmd::Retarget(preference));
-        Self { cmd: cmd_tx }
+        Self { cmd: cmd_tx, level }
+    }
+
+    /// Latest input level, 0.0–1.0, from the open microphone.
+    pub fn level(&self) -> f32 {
+        let rms = f32::from_bits(self.level.load(Ordering::Relaxed));
+        if !rms.is_finite() || rms < 0.0 {
+            0.0
+        } else {
+            (rms * 4.5).clamp(0.0, 1.0)
+        }
     }
 
     pub fn retarget(&self, preference: Option<String>) {
@@ -133,7 +146,7 @@ struct Capture {
 }
 
 impl Capture {
-    fn new() -> Self {
+    fn new(level: Arc<AtomicU32>) -> Self {
         Self {
             ring: VecDeque::new(),
             cap: 16_000,
@@ -144,7 +157,7 @@ impl Capture {
             last_rms: 0.0,
             noise_rms: 0.004,
             error: None,
-            level: Arc::new(AtomicU32::new(0)),
+            level,
         }
     }
 
@@ -158,9 +171,9 @@ impl Capture {
     }
 }
 
-fn run(cmd_rx: Receiver<Cmd>, mut preference: Option<String>) {
+fn run(cmd_rx: Receiver<Cmd>, mut preference: Option<String>, level: Arc<AtomicU32>) {
     let host = cpal::default_host();
-    let state = Arc::new(Mutex::new(Capture::new()));
+    let state = Arc::new(Mutex::new(Capture::new(level)));
     let mut stream: Option<cpal::Stream> = None;
     let mut active_name = String::new();
     let mut used_fallback = false;
