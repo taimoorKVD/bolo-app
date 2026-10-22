@@ -8,23 +8,33 @@ use anyhow::{anyhow, Context};
 use serde::Deserialize;
 use zeroize::Zeroize;
 
-pub const CLEANUP_MODEL: &str = "llama-3.3-70b-versatile";
+/// Groq's smallest fast chat model. Cleanup has a hard timeout and falls back
+/// to the local editor, so a slow response never holds the paste.
+pub const CLEANUP_MODEL: &str = "llama-3.1-8b-instant";
+const CLEANUP_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1200);
 
-const SYSTEM_PROMPT: &str = "\
-You edit a speech-to-text transcript. Return only the corrected transcript.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tone {
+    /// Slack, Discord, Teams.
+    Casual,
+    /// Mail and documents.
+    Formal,
+    /// Everything else.
+    Plain,
+    /// Editors and terminals: do not paraphrase.
+    Verbatim,
+}
 
-Rules:
-- Remove filler and hesitation sounds (um, uh, er, ah, hmm) when they are not part of a real word.
-- Fix punctuation and capitalization.
-- Apply spoken self-corrections. If the speaker says \"scratch that\", \"no wait\", \"I mean\", or similar, keep the replacement and drop the abandoned phrase.
-- Do not answer questions, summarize, or add information that was not spoken.
-- Do not wrap the result in quotes or add a preamble.
-- If the transcript is already clean, return it unchanged.
-
-Examples:
-- \"Let's meet Tuesday scratch that Wednesday\" -> \"Let's meet Wednesday.\"
-- \"Email um Sarah, I mean Sam, at example.com\" -> \"Email Sam at example.com.\"
-- \"The budget is fifty thousand no wait fifty-five thousand\" -> \"The budget is fifty-five thousand.\"";
+impl Tone {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Casual => "casual",
+            Self::Formal => "formal",
+            Self::Plain => "plain",
+            Self::Verbatim => "verbatim",
+        }
+    }
+}
 
 #[derive(Debug)]
 pub struct CleanOutcome {
@@ -39,25 +49,19 @@ pub async fn clean_transcript(
     api_key: &str,
     transcript: &str,
     enabled: bool,
+    tone: Tone,
 ) -> CleanOutcome {
-    let fallback = strip_fillers(transcript);
-    if !enabled {
+    let fallback = polish_locally(transcript);
+    if !enabled || matches!(tone, Tone::Verbatim) || transcript.trim().is_empty() {
         return CleanOutcome {
             text: fallback,
             used_model: false,
             note: None,
         };
     }
-    if transcript.trim().is_empty() {
-        return CleanOutcome {
-            text: String::new(),
-            used_model: false,
-            note: None,
-        };
-    }
-    match request_cleanup(client, api_key, transcript).await {
+    match request_cleanup(client, api_key, transcript, tone).await {
         Ok(cleaned) if accept_cleanup(transcript, &cleaned) => CleanOutcome {
-            text: cleaned,
+            text: polish_model_output(&cleaned),
             used_model: true,
             note: None,
         },
@@ -66,12 +70,24 @@ pub async fn clean_transcript(
             used_model: false,
             note: Some("Cleanup was skipped because the rewrite didn't look usable.".into()),
         },
-        Err(err) => CleanOutcome {
+        Err(_) => CleanOutcome {
             text: fallback,
             used_model: false,
-            note: Some(format!("Cleanup was skipped ({err}).")),
+            note: None,
         },
     }
+}
+
+/// Local pass used when the model is off, too slow, or the focused app is code.
+pub fn polish_locally(input: &str) -> String {
+    let text = strip_fillers(input);
+    let text = apply_self_correction(&text);
+    apply_commands(&text)
+}
+
+fn polish_model_output(input: &str) -> String {
+    let text = apply_self_correction(input);
+    apply_commands(&text)
 }
 
 /// Remove standalone "um" / "uh" (and stretched forms like "umm").
@@ -136,24 +152,38 @@ fn tidy_spacing(input: &str) -> String {
     trimmed.to_string()
 }
 
+fn style_line(tone: Tone) -> &'static str {
+    match tone {
+        Tone::Casual => "Tone: chat. Keep contractions. Light punctuation.",
+        Tone::Formal => "Tone: email or document. Complete sentences and clear punctuation.",
+        Tone::Plain | Tone::Verbatim => "Tone: neutral dictation. Punctuate sentences.",
+    }
+}
+
 async fn request_cleanup(
     client: &reqwest::Client,
     api_key: &str,
     transcript: &str,
+    tone: Tone,
 ) -> anyhow::Result<String> {
-    let user = format!("Transcript:\n\"\"\"\n{}\n\"\"\"", transcript.trim());
-    let max_tokens = (transcript.chars().count() as u32 / 2 + 128).clamp(128, 1024);
+    let system = format!(
+        "Edit a dictation transcript. Return only the edited words.\n{}\nRemove um and uh. If the speaker says scratch that, no wait, or I mean, keep the correction and drop the words it replaces. Do not add facts or wrap the result in quotes.",
+        style_line(tone)
+    );
+    let user = transcript.trim();
+    let max_tokens = (transcript.chars().count() as u32 / 2 + 48).clamp(48, 256);
     let body = serde_json::json!({
         "model": CLEANUP_MODEL,
         "temperature": 0,
         "max_tokens": max_tokens,
         "messages": [
-            { "role": "system", "content": SYSTEM_PROMPT },
+            { "role": "system", "content": system },
             { "role": "user", "content": user }
         ]
     });
     let response = client
         .post("https://api.groq.com/openai/v1/chat/completions")
+        .timeout(CLEANUP_TIMEOUT)
         .bearer_auth(api_key)
         .json(&body)
         .send()
@@ -230,6 +260,161 @@ struct GroqErrorDetail {
     message: Option<String>,
 }
 
+/// Replace the last spoken self-correction and keep the words that survived it.
+pub fn apply_self_correction(input: &str) -> String {
+    let words: Vec<&str> = input.split_whitespace().collect();
+    let markers: [&[&str]; 3] = [&["scratch", "that"], &["no", "wait"], &["i", "mean"]];
+    let mut found: Option<(usize, usize)> = None;
+    for (index, _) in words.iter().enumerate() {
+        for marker in markers {
+            if words.len() - index >= marker.len()
+                && marker.iter().zip(&words[index..]).all(|(want, got)| same_word(got, want))
+            {
+                found = Some((index, marker.len()));
+            }
+        }
+    }
+    let Some((at, len)) = found else {
+        return input.trim().to_string();
+    };
+    let before = &words[..at];
+    let after = &words[at + len..];
+    if after.is_empty() {
+        return before.join(" ");
+    }
+    if before.is_empty() {
+        return after.join(" ");
+    }
+    let drop_n = before.len().min(after.len()).clamp(1, 6).min(before.len());
+    let keep = before.len() - drop_n;
+    let mut kept: Vec<&str> = before[..keep].to_vec();
+    kept.extend_from_slice(after);
+    tidy_spacing(&kept.join(" "))
+}
+
+/// Spoken punctuation and line breaks. Longer phrases win over single words.
+pub fn apply_commands(input: &str) -> String {
+    let words: Vec<&str> = input.split_whitespace().collect();
+    let commands: &[(&[&str], &str)] = &[
+        (&["new", "paragraph"], "\n\n"),
+        (&["new", "line"], "\n"),
+        (&["question", "mark"], "?"),
+        (&["exclamation", "point"], "!"),
+        (&["exclamation", "mark"], "!"),
+        (&["full", "stop"], "."),
+        (&["open", "quote"], "\""),
+        (&["close", "quote"], "\""),
+        (&["semicolon"], ";"),
+        (&["colon"], ":"),
+        (&["comma"], ","),
+        (&["period"], "."),
+        (&["dash"], "—"),
+    ];
+    apply_commands_plain(&words, commands)
+}
+
+fn apply_commands_plain(words: &[&str], commands: &[(&[&str], &str)]) -> String {
+    let mut out = String::new();
+    let mut index = 0;
+    while index < words.len() {
+        let mut matched = false;
+        for (phrase, insert) in commands {
+            if words.len() - index >= phrase.len()
+                && phrase.iter().zip(&words[index..]).all(|(want, got)| same_word(got, want))
+            {
+                push_command(&mut out, insert);
+                index += phrase.len();
+                matched = true;
+                break;
+            }
+        }
+        if matched {
+            continue;
+        }
+        if !out.is_empty() && !out.ends_with('\n') && !out.ends_with(' ') {
+            out.push(' ');
+        }
+        out.push_str(words[index]);
+        index += 1;
+    }
+    tidy_newlines(&out)
+}
+
+fn push_command(out: &mut String, insert: &str) {
+    if insert.starts_with('\n') {
+        while out.ends_with(' ') {
+            out.pop();
+        }
+        out.push_str(insert);
+        return;
+    }
+    while out.ends_with(' ') {
+        out.pop();
+    }
+    out.push_str(insert);
+    if insert != "\"" {
+        out.push(' ');
+    }
+}
+
+fn tidy_newlines(input: &str) -> String {
+    let mut text = input.trim().to_string();
+    while text.contains(" \n") {
+        text = text.replace(" \n", "\n");
+    }
+    text.replace("  ", " ")
+}
+
+fn same_word(got: &str, want: &str) -> bool {
+    let bare = got.trim_matches(|c: char| matches!(c, ',' | '.' | '!' | '?' | ';' | ':' | '"' | '\''));
+    bare.eq_ignore_ascii_case(want)
+}
+
+const LEARN_STOP: &[&str] = &[
+    "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday", "January",
+    "February", "March", "April", "May", "June", "July", "August", "September", "October",
+    "November", "December", "Today", "Tomorrow", "Please", "Thanks", "Hello", "There", "This",
+    "That", "When", "What", "Where", "Which", "While", "After", "Before", "About", "Could",
+    "Would", "Should", "Their", "They", "Them",
+];
+
+/// Remember capitalized names that are not just the first word of the take.
+pub fn learn_terms(text: &str, dictionary: &mut Vec<String>) -> Vec<String> {
+    let mut added = Vec::new();
+    for (index, word) in text.split_whitespace().enumerate() {
+        if added.len() >= 3 || dictionary.len() >= 200 {
+            break;
+        }
+        if index == 0 {
+            continue;
+        }
+        let bare = word.trim_matches(|c: char| !c.is_ascii_alphanumeric());
+        if !learnable(bare) {
+            continue;
+        }
+        if dictionary.iter().any(|term| term.eq_ignore_ascii_case(bare)) {
+            continue;
+        }
+        dictionary.push(bare.to_string());
+        added.push(bare.to_string());
+    }
+    added
+}
+
+fn learnable(word: &str) -> bool {
+    let chars: Vec<char> = word.chars().collect();
+    if chars.len() < 4 || chars.len() > 40 {
+        return false;
+    }
+    if !chars[0].is_uppercase() || !chars.iter().any(|c| c.is_lowercase()) {
+        return false;
+    }
+    if !chars.iter().all(|c| c.is_ascii_alphabetic()) {
+        return false;
+    }
+    !LEARN_STOP.iter().any(|stop| stop.eq_ignore_ascii_case(word))
+}
+
 /// Best-effort wipe of a secret that is about to be dropped.
 pub fn wipe(secret: &mut String) {
     secret.zeroize();
@@ -258,6 +443,45 @@ mod tests {
         let essay = "word ".repeat(80);
         assert!(!accept_cleanup(original, &essay));
         assert!(!accept_cleanup(original, "   "));
+    }
+
+    #[test]
+    fn local_editor_applies_corrections_and_commands() {
+        assert_eq!(
+            apply_self_correction("Let's meet Tuesday scratch that Wednesday"),
+            "Let's meet Wednesday"
+        );
+        assert_eq!(
+            apply_self_correction("The budget is fifty thousand no wait fifty-five thousand"),
+            "The budget is fifty-five thousand"
+        );
+        assert_eq!(polish_locally("Email um Sarah I mean Sam"), "Email Sam");
+        assert_eq!(apply_commands("Ship it tomorrow period"), "Ship it tomorrow.");
+        assert_eq!(apply_commands("First line new line second line"), "First line\nsecond line");
+        assert_eq!(apply_commands("Is this right question mark"), "Is this right?");
+    }
+
+    #[test]
+    fn learns_a_mid_sentence_name_and_skips_weekdays() {
+        let mut dictionary = vec!["Cadence".into()];
+        let added = learn_terms("Meet Priya on Wednesday about Tauri", &mut dictionary);
+        assert_eq!(added, vec!["Priya".to_string(), "Tauri".to_string()]);
+        assert!(dictionary.iter().any(|term| term == "Priya"));
+        assert!(!dictionary.iter().any(|term| term == "Wednesday"));
+        assert!(learn_terms("Priya again", &mut dictionary).is_empty());
+    }
+
+    #[test]
+    fn verbatim_skips_the_model_and_still_polishes() {
+        let outcome = tauri::async_runtime::block_on(clean_transcript(
+            crate::transcribe::http_client(),
+            "unused",
+            "deploy um scratch that ship it period",
+            true,
+            Tone::Verbatim,
+        ));
+        assert!(!outcome.used_model);
+        assert_eq!(outcome.text, "ship it.");
     }
 
     #[test]

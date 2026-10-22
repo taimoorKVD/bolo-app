@@ -293,7 +293,7 @@ function hotkeySection(draft: Draft): HTMLElement {
   const section = sectionEl(
     "02",
     "Push to talk",
-    "Hold the chord to record. Release it to transcribe and paste. Default is Ctrl + Win.",
+    "Hold the chord to record. Release it to transcribe and paste. Double-tap to leave the mic open, then tap once to stop. Default is Ctrl + Win.",
   );
   const display = el("div", "hotkey-display");
   const kbd = el("kbd", "hotkey-kbd", formatHotkey(draft.settings.hotkey));
@@ -537,7 +537,7 @@ function modelSection(draft: Draft): HTMLElement {
   const section = sectionEl(
     "04",
     "Transcription",
-    "Whisper on Groq. Cleanup is optional and uses Llama 3.3 70B, also on Groq.",
+    "Whisper on Groq. Cleanup uses Llama 3.1 8B Instant, also on Groq, and gives up quickly so a slow rewrite never holds the paste.",
   );
   const models: Array<{ id: WhisperModel; title: string; body: string }> = [
     {
@@ -594,7 +594,7 @@ function modelSection(draft: Draft): HTMLElement {
 
   const cleanup = toggle(
     "Clean up with Llama",
-    "Off by default. When on, filler, punctuation, and spoken self-corrections (\"scratch that\") are rewritten by Llama 3.3 70B on Groq. When off, only standalone um and uh are removed.",
+    "On for a new install. Llama 3.1 8B Instant punctuates and applies spoken corrections such as \"scratch that\", \"new line\", and \"period\". Chat stays casual, mail and documents stay formal, and code editors skip the rewrite. If the model is slow, Cadence pastes the local edit instead.",
     draft.settings.cleanupEnabled,
     (checked) => {
       draft.settings.cleanupEnabled = checked;
@@ -609,7 +609,7 @@ function dictionarySection(draft: Draft): HTMLElement {
   const section = sectionEl(
     "05",
     "Custom dictionary",
-    "One term per line. These spellings are passed to Whisper as a prompt — names, products, jargon.",
+    "One term per line. Whisper is prompted to spell them as written. Cadence also remembers capitalized names from what you dictate.",
   );
   const area = document.createElement("textarea");
   area.rows = 5;

@@ -16,11 +16,11 @@ use std::time::{Duration, Instant};
 
 const TARGET_RATE: u32 = 16_000;
 const FRAME_MS: u32 = 20;
-const SILENCE_RMS: f32 = 0.015;
-const PAD_MS: u32 = 140;
-const MIN_SPEECH_SECS: f32 = 0.15;
+const PAD_MS: u32 = 160;
+/// Keep a short word. A hard 150 ms floor was rejecting quiet one-syllable takes.
+const MIN_SPEECH_SECS: f32 = 0.08;
 /// About three minutes of stereo 48 kHz, past the recording watchdog.
-const MAX_SAMPLES: usize = 48_000 * 2 * 180;
+pub(crate) const MAX_SAMPLES: usize = 48_000 * 2 * 180;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -91,6 +91,8 @@ pub struct FinishedAudio {
     pub channels: u16,
     pub sample_rate: u32,
     pub elapsed_ms: u64,
+    /// Estimated room tone. The trimmer sets its speech floor from this.
+    pub noise_rms: f32,
 }
 
 #[derive(Debug)]
@@ -244,7 +246,7 @@ fn push_unique(names: &mut Vec<String>, name: &str) {
     }
 }
 
-fn host_mics(host: &cpal::Host) -> anyhow::Result<Vec<ListedMic>> {
+pub(crate) fn host_mics(host: &cpal::Host) -> anyhow::Result<Vec<ListedMic>> {
     let default_name = host.default_input_device().and_then(|device| device.name().ok());
     let mut mics: Vec<ListedMic> = Vec::new();
     for device in host.input_devices()? {
@@ -403,8 +405,10 @@ fn capture_until_stop(
     let _ = ready_tx.send(Err(anyhow!(message)));
 }
 
-fn confirm_alive(error: &Mutex<Option<String>>) -> Result<(), String> {
-    for _ in 0..9 {
+/// Wait briefly for an immediate device-removed error. This runs when a stream
+/// is first opened, not on every key press.
+pub(crate) fn confirm_alive(error: &Mutex<Option<String>>) -> Result<(), String> {
+    for _ in 0..4 {
         thread::sleep(Duration::from_millis(20));
         if let Some(err) = error.lock().ok().and_then(|slot| slot.clone()) {
             return Err(err);
@@ -413,7 +417,7 @@ fn confirm_alive(error: &Mutex<Option<String>>) -> Result<(), String> {
     Ok(())
 }
 
-fn open_named(
+pub(crate) fn open_named(
     host: &cpal::Host,
     name: &str,
     audio: &Arc<Mutex<SharedAudio>>,
@@ -473,6 +477,7 @@ impl RecordingSession {
             channels: audio.channels,
             sample_rate: audio.sample_rate,
             elapsed_ms: self.started.elapsed().as_millis() as u64,
+            noise_rms: 0.0,
         })
     }
 
@@ -498,7 +503,7 @@ pub fn prepare_speech(finished: &FinishedAudio) -> Result<Vec<u8>, SpeechError> 
         return Err(SpeechError::Empty);
     }
     let mono = downmix(&finished.interleaved, finished.channels);
-    let trimmed = trim_silence(&mono, finished.sample_rate);
+    let trimmed = trim_silence_with(&mono, finished.sample_rate, speech_threshold(finished.noise_rms));
     if trimmed.is_empty() {
         return Err(SpeechError::Silent);
     }
@@ -524,8 +529,20 @@ pub fn downmix(interleaved: &[f32], channels: u16) -> Vec<f32> {
         .collect()
 }
 
+/// Speech floor from the idle noise estimate.
+///
+/// A fixed 0.015 RMS treated a quiet laptop array as silence. The floor stays
+/// low enough for soft speech and high enough that pure digital silence is cut.
+pub fn speech_threshold(noise_rms: f32) -> f32 {
+    (noise_rms.max(0.0) * 3.2 + 0.004).clamp(0.004, 0.018)
+}
+
 /// Drop leading and trailing silence. Pauses in the middle of a sentence stay.
 pub fn trim_silence(samples: &[f32], sample_rate: u32) -> Vec<f32> {
+    trim_silence_with(samples, sample_rate, speech_threshold(0.0))
+}
+
+pub fn trim_silence_with(samples: &[f32], sample_rate: u32, threshold: f32) -> Vec<f32> {
     if sample_rate == 0 || samples.is_empty() {
         return Vec::new();
     }
@@ -535,7 +552,7 @@ pub fn trim_silence(samples: &[f32], sample_rate: u32) -> Vec<f32> {
     }
     let voiced: Vec<bool> = samples
         .chunks(frame)
-        .map(|chunk| rms(chunk) >= SILENCE_RMS)
+        .map(|chunk| rms(chunk) >= threshold)
         .collect();
     let Some(first) = voiced.iter().position(|voiced| *voiced) else {
         return Vec::new();
@@ -618,7 +635,89 @@ fn rms(chunk: &[f32]) -> f32 {
     (chunk.iter().map(|sample| sample * sample).sum::<f32>() / chunk.len() as f32).sqrt()
 }
 
-fn build_stream(
+pub(crate) fn build_input_callback<F, E>(
+    device: &Device,
+    config: &StreamConfig,
+    sample_format: SampleFormat,
+    on_samples: F,
+    on_error: E,
+) -> anyhow::Result<cpal::Stream>
+where
+    F: FnMut(Vec<f32>) + Send + 'static,
+    E: FnMut(cpal::StreamError) + Send + 'static,
+{
+    let stream = match sample_format {
+        SampleFormat::F32 => {
+            let mut on_samples = on_samples;
+            let mut on_error = on_error;
+            device.build_input_stream(
+                config,
+                move |data: &[f32], _| on_samples(data.to_vec()),
+                move |err| on_error(err),
+                None,
+            )
+        }
+        SampleFormat::I16 => {
+            let mut on_samples = on_samples;
+            let mut on_error = on_error;
+            device.build_input_stream(
+                config,
+                move |data: &[i16], _| {
+                    on_samples(data.iter().map(|sample| *sample as f32 / i16::MAX as f32).collect())
+                },
+                move |err| on_error(err),
+                None,
+            )
+        }
+        SampleFormat::U16 => {
+            let mut on_samples = on_samples;
+            let mut on_error = on_error;
+            device.build_input_stream(
+                config,
+                move |data: &[u16], _| {
+                    on_samples(
+                        data.iter()
+                            .map(|sample| (*sample as f32 / u16::MAX as f32) * 2.0 - 1.0)
+                            .collect(),
+                    )
+                },
+                move |err| on_error(err),
+                None,
+            )
+        }
+        SampleFormat::I32 => {
+            let mut on_samples = on_samples;
+            let mut on_error = on_error;
+            device.build_input_stream(
+                config,
+                move |data: &[i32], _| {
+                    on_samples(data.iter().map(|sample| *sample as f32 / i32::MAX as f32).collect())
+                },
+                move |err| on_error(err),
+                None,
+            )
+        }
+        SampleFormat::F64 => {
+            let mut on_samples = on_samples;
+            let mut on_error = on_error;
+            device.build_input_stream(
+                config,
+                move |data: &[f64], _| on_samples(data.iter().map(|sample| *sample as f32).collect()),
+                move |err| on_error(err),
+                None,
+            )
+        }
+        other => {
+            return Err(anyhow!(
+                "This microphone uses an unsupported sample format ({other:?})."
+            ))
+        }
+    }
+    .with_context(|| format!("couldn't open the microphone ({sample_format:?})"))?;
+    Ok(stream)
+}
+
+pub(crate) fn build_stream(
     device: &Device,
     config: &StreamConfig,
     sample_format: SampleFormat,
@@ -791,6 +890,7 @@ mod tests {
             channels: 1,
             sample_rate: 16_000,
             elapsed_ms: 500,
+            noise_rms: 0.0,
         };
         assert!(matches!(prepare_speech(&silent), Err(SpeechError::Silent)));
 
@@ -804,10 +904,27 @@ mod tests {
             channels: 1,
             sample_rate: 16_000,
             elapsed_ms: 800,
+            noise_rms: 0.0,
         };
         let wav = prepare_speech(&speech).unwrap();
         assert!(wav.len() > 44);
         assert_eq!(&wav[0..4], b"RIFF");
+    }
+
+    #[test]
+    fn quiet_speech_survives_and_room_tone_does_not() {
+        let quiet = tone(16_000, 300, 0.012);
+        assert!(
+            !trim_silence_with(&quiet, 16_000, speech_threshold(0.0)).is_empty(),
+            "soft speech should stay above the low floor"
+        );
+        let hiss = tone(16_000, 300, 0.001);
+        assert!(
+            trim_silence_with(&hiss, 16_000, speech_threshold(0.008)).is_empty(),
+            "a raised noise floor should still reject hiss"
+        );
+        assert!(speech_threshold(0.0) < 0.01);
+        assert!(speech_threshold(0.02) <= 0.018);
     }
 
     fn headset() -> ListedMic {

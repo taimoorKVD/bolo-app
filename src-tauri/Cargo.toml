@@ -32,7 +32,7 @@ zeroize = { version = "1", features = ["derive"] }
 
 [target.'cfg(windows)'.dependencies]
 tauri-plugin-single-instance = "2"
-reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "native-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "native-tls", "http2"] }
 # The `#[implement]` macro emits `::windows_core::` paths. Pin the same
 # version the `windows` 0.61 crate uses so those paths are not ambiguous.
 windows-core = "=0.61.2"
@@ -52,7 +52,16 @@ windows = { version = "0.61", features = [
 keyring = "3"
 device_query = "2.1"
 enigo = "0.5"
-reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls", "http2"] }
+
+# `tauri dev` is a debug build. Optimize this crate so capture and encoding
+# are not the thing that makes a take feel slow while developing.
+[profile.dev.package.cadence]
+opt-level = 3
+
+# Latency checks run under `cargo test`, which uses the test profile.
+[profile.test.package.cadence]
+opt-level = 3
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
 [profile.release]

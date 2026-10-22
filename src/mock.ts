@@ -17,7 +17,7 @@ const settings: Settings = {
   hotkey: { ctrl: true, alt: false, shift: false, win: true, key: null },
   microphone: previewParam("mic"),
   model: "whisper-large-v3-turbo",
-  cleanupEnabled: false,
+  cleanupEnabled: true,
   language: "auto",
   dictionary: ["Cadence", "Tauri"],
   launchAtStartup: false,

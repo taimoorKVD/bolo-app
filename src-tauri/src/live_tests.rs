@@ -2,10 +2,11 @@
 //! print SKIP and pass so CI without the secret stays green.
 
 use crate::audio::{self, FinishedAudio};
-use crate::cleanup;
+use crate::cleanup::{self, Tone};
 use crate::transcribe;
 use std::future::Future;
 use std::io::Cursor;
+use std::time::Instant;
 
 const FIXTURE: &[u8] = include_bytes!("../tests/fixtures/dictation.wav");
 
@@ -38,6 +39,7 @@ fn decode_fixture() -> FinishedAudio {
         channels: spec.channels,
         sample_rate: spec.sample_rate,
         elapsed_ms,
+        noise_rms: 0.0,
     }
 }
 
@@ -107,6 +109,7 @@ fn live_llama_cleanup_applies_a_spoken_correction() {
         &key,
         "Let's meet Tuesday um scratch that Wednesday",
         true,
+        Tone::Plain,
     ));
     assert!(
         outcome.used_model,
@@ -141,4 +144,81 @@ fn live_pipeline_trims_encodes_transcribes_and_strips_fillers() {
         !words_of(&cleaned).iter().any(|word| word == "um" || word == "uh"),
         "fillers remained in {cleaned:?}"
     );
+}
+
+#[test]
+fn encode_short_clip_stays_under_a_second() {
+    let finished = decode_fixture();
+    let fixture_started = Instant::now();
+    let fixture_wav = audio::prepare_speech(&finished).expect("fixture");
+    let fixture_ms = fixture_started.elapsed().as_millis();
+
+    let rate = 48_000u32;
+    let frames = rate * 3;
+    let tone = (0..frames)
+        .map(|index| {
+            let t = index as f32 / rate as f32;
+            (t * 220.0 * std::f32::consts::TAU).sin() * 0.2
+        })
+        .collect::<Vec<_>>();
+    let clip = FinishedAudio {
+        interleaved: tone,
+        channels: 1,
+        sample_rate: rate,
+        elapsed_ms: 3_000,
+        noise_rms: 0.0,
+    };
+    let started = Instant::now();
+    let wav = audio::prepare_speech(&clip).expect("tone");
+    let ms = started.elapsed().as_millis();
+    eprintln!(
+        "LATENCY encode_fixture_ms={fixture_ms} fixture_bytes={} encode_3s_ms={ms} bytes={}",
+        fixture_wav.len(),
+        wav.len()
+    );
+    assert!(fixture_ms < 1_500, "fixture encode took {fixture_ms} ms");
+    assert!(ms < 1_500, "3s encode took {ms} ms");
+}
+
+#[test]
+fn live_latency_stages_stay_under_the_budget() {
+    let Some(key) = require_key("live_latency_stages_stay_under_the_budget") else {
+        return;
+    };
+    let finished = decode_fixture();
+    let encode_started = Instant::now();
+    let wav = audio::prepare_speech(&finished).expect("encode");
+    let encode_ms = encode_started.elapsed().as_millis();
+    let bytes = wav.len();
+    let groq_started = Instant::now();
+    let text = wait(transcribe::transcribe(
+        transcribe::http_client(),
+        &key,
+        wav,
+        transcribe::WHISPER_TURBO,
+        "en",
+        transcribe::whisper_prompt(&["Cadence".into()]),
+    ))
+    .expect("transcribe");
+    let groq_ms = groq_started.elapsed().as_millis();
+    let cleanup_started = Instant::now();
+    let outcome = wait(cleanup::clean_transcript(
+        transcribe::http_client(),
+        &key,
+        "Let's meet Tuesday scratch that Wednesday period",
+        true,
+        Tone::Plain,
+    ));
+    let cleanup_ms = cleanup_started.elapsed().as_millis();
+    eprintln!(
+        "LATENCY encode_ms={encode_ms} bytes={bytes} groq_ms={groq_ms} cleanup_ms={cleanup_ms} cleaned={} model={}",
+        outcome.used_model,
+        cleanup::CLEANUP_MODEL
+    );
+    assert!(groq_ms < 8_000, "whisper took {groq_ms} ms");
+    assert!(cleanup_ms < 4_000, "cleanup took {cleanup_ms} ms");
+    assert_phrase(&text);
+    let lower = outcome.text.to_lowercase();
+    assert!(lower.contains("wednesday"), "{}", outcome.text);
+    assert!(lower.contains('.') || lower.ends_with("wednesday"), "{}", outcome.text);
 }

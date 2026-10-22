@@ -10,8 +10,8 @@ use serde::Serialize;
 use std::thread;
 use std::time::Duration;
 
-const CLIPBOARD_PUBLISH_DELAY: Duration = Duration::from_millis(40);
-const PASTE_SETTLE_DELAY: Duration = Duration::from_millis(250);
+const CLIPBOARD_PUBLISH_DELAY: Duration = Duration::from_millis(8);
+const PASTE_SETTLE_DELAY: Duration = Duration::from_millis(25);
 
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -464,6 +464,17 @@ impl EditHost {
 impl Drop for EditHost {
     fn drop(&mut self) {
         self.stop(false);
+    }
+}
+
+#[cfg(test)]
+mod delay_tests {
+    use super::*;
+
+    #[test]
+    fn clipboard_paste_does_not_sleep_through_the_take() {
+        assert!(CLIPBOARD_PUBLISH_DELAY <= Duration::from_millis(15));
+        assert!(PASTE_SETTLE_DELAY <= Duration::from_millis(40));
     }
 }
 

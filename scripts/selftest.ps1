@@ -11,9 +11,9 @@ Set-Location $root
 Write-Host "Cadence self-test"
 Write-Host "Repo: $root"
 if ([string]::IsNullOrWhiteSpace($env:GROQ_API_KEY)) {
-    Write-Host "GROQ_API_KEY is not set. Live Whisper and Llama tests will SKIP."
+    Write-Host "GROQ_API_KEY is not set. Live Whisper, Llama, and latency tests will SKIP. Encode timing still runs."
 } else {
-    Write-Host "GROQ_API_KEY is set. Live Whisper and Llama tests will run."
+    Write-Host "GROQ_API_KEY is set. Live Whisper, Llama, and latency tests will run."
 }
 
 # The first group includes a cold compile. Later limits assume the crate is built.
@@ -21,7 +21,7 @@ $steps = @(
     @{ Name = "Microphone selection and capture"; Filter = "audio::"; TimeoutSec = 900 },
     @{ Name = "Credential store round trip"; Filter = "credentials::"; TimeoutSec = 180 },
     @{ Name = "Paste into a text control"; Filter = "insert::"; TimeoutSec = 90 },
-    @{ Name = "Groq transcription, cleanup, and pipeline"; Filter = "live_tests::"; TimeoutSec = 300 },
+    @{ Name = "Groq transcription, cleanup, pipeline, and latency"; Filter = "live_tests::"; TimeoutSec = 300 },
     @{ Name = "Other unit tests"; Filter = ""; TimeoutSec = 300 }
 )
 

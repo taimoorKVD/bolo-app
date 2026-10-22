@@ -32,7 +32,7 @@ impl Default for Settings {
             hotkey: Hotkey::default(),
             microphone: None,
             model: WHISPER_TURBO.to_string(),
-            cleanup_enabled: false,
+            cleanup_enabled: true,
             language: "auto".into(),
             dictionary: Vec::new(),
             launch_at_startup: false,
@@ -212,7 +212,7 @@ mod tests {
         let parsed: Settings = serde_json::from_str("{}").unwrap();
         assert_eq!(parsed, Settings::default());
         assert!(parsed.microphone.is_none());
-        assert!(!parsed.cleanup_enabled);
+        assert!(parsed.cleanup_enabled);
         assert_eq!(parsed.model, WHISPER_TURBO);
         let blank: Settings = serde_json::from_str(r#"{"microphone":"   "}"#).unwrap();
         assert!(normalize_settings(blank).microphone.is_none());

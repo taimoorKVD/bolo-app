@@ -4,7 +4,7 @@ Cadence is a Windows push-to-talk dictation app. Hold a global hotkey in any app
 
 It runs from the system tray. A small tally appears while you are recording. Settings live in their own window.
 
-Audio is uploaded to Groq as 16 kHz mono WAV. Groq also accepts FLAC; WAV keeps the encoder free of native dependencies and stays small (about 1.9 MB per minute). No other AI provider is used.
+Audio is uploaded to Groq as 16 kHz mono WAV. A short take is about 32 KB per second, so compressing it to FLAC would cost more time than it saves. No other AI provider is used.
 
 ## What you need
 
@@ -31,12 +31,12 @@ Hold **Ctrl + Win** (the default), speak, and release. Ctrl + Space and a few ot
 | Setting | Behavior |
 | --- | --- |
 | Groq API key | Saved in Windows Credential Manager as a local generic credential, target `com.cadence.dictation/groq-api-key`. A save counts only after the same value is read back. It is not written to `settings.json` and is not logged. |
-| Hotkey | Hold to record, release to transcribe. Modifier-only chords need two modifiers so a lone Ctrl cannot start a recording. |
+| Hotkey | Hold to record, release to transcribe. A release shorter than about a quarter second waits briefly for a second tap, which leaves the mic open until you tap again. A longer hold stops the moment you release. Modifier-only chords need two modifiers so a lone Ctrl cannot start a recording. |
 | Microphone | **System default (auto)** is the default. It follows the Windows default when you plug or unplug a headset. A named mic is remembered: if it is missing or will not open, Cadence uses another live mic without failing the take, and switches back when the preferred one returns. The settings window and the recording tally show which mic is in use. |
 | Model | `whisper-large-v3-turbo` (default) or `whisper-large-v3`. |
-| Cleanup | Off by default. On, the transcript is rewritten by Groq-hosted `llama-3.3-70b-versatile` (punctuation, fillers, spoken self-corrections such as "scratch that"). Off, only standalone "um" and "uh" are removed. |
+| Cleanup | On when `settings.json` has no `cleanupEnabled` field (a new install). A file that already saved `false` stays off until you turn it on. On, Groq-hosted `llama-3.1-8b-instant` punctuates and applies spoken corrections. The request gives up after 1.2 seconds and Cadence pastes the local edit instead. Slack, Discord, and Teams stay casual. Word, Outlook, PowerPoint, OneNote, and a browser whose title says Gmail or Outlook stay formal. Code editors and terminals skip the model. The local edit also handles "scratch that", "no wait", "I mean", and spoken punctuation such as "new line" and "period". |
 | Language | `auto`, or an ISO 639-1 code passed to Whisper. |
-| Dictionary | One term per line, sent as the Whisper prompt so names and jargon are spelled your way. |
+| Dictionary | One term per line. Whisper is prompted to spell them exactly. After a take, capitalized names that are not the first word (and not weekdays or months) are added, up to three per take. |
 | Launch at startup | Current-user startup registration. |
 | History | The last 50 inserted transcripts. Audio is not kept. |
 
@@ -44,7 +44,9 @@ Recordings longer than two minutes stop and transcribe on their own. Silence-onl
 
 ### Where files live
 
-Settings and history are in the app config directory (`settings.json`, `history.json`). A diagnostic log is `cadence.log` next to them. The log records durations and errors, not the API key.
+Settings and history are in the app config directory (`settings.json`, `history.json`). A diagnostic log is `cadence.log` next to them. The log records durations and errors, not the API key and not the transcript.
+
+After each take the log has one stage line. Times are milliseconds. `held` is how long the microphone was open. `open_wait` is how long the hotkey waited for that stream (it should be a few milliseconds once the mic is warm). `stop` is draining the buffer. `encode` is trim plus 16 kHz WAV. `groq` is the Whisper response. `cleanup` is the Llama call, or the local edit when the model is skipped. `paste` is clipboard write, Ctrl+V, and restore. `release` is from the key-up that ends the take through the paste. `tone` is `casual`, `formal`, `plain`, `verbatim`, or `none` when nothing was said. An older log line `inserted chars=N ms=N` used `ms` for hold time, not for how long the paste took.
 
 ## Build an installer
 
@@ -76,7 +78,7 @@ That runs `scripts/selftest.ps1`, which prints a pass/fail line for microphone s
 
 The paste check does not steal foreground focus and does not send Ctrl+V. It writes the clipboard, then sends `WM_PASTE` to a real Edit control — the message that control handles for Ctrl+V — and fails within a few seconds if any step stalls.
 
-Set `GROQ_API_KEY` in the environment before running if you want the live Whisper and Llama checks. They transcribe `src-tauri/tests/fixtures/dictation.wav` (the spoken line is "Hello um cadence this is a dictation test.") and send a filler-and-correction sentence to Llama. Without the variable those cases print `SKIP` and do not fail.
+Set `GROQ_API_KEY` in the environment before running if you want the live Whisper, Llama, and latency checks. They transcribe `src-tauri/tests/fixtures/dictation.wav` (the spoken line is "Hello um cadence this is a dictation test.") and send a filler-and-correction sentence to Llama. The latency case prints `LATENCY encode_ms=… groq_ms=… cleanup_ms=…` and fails if Whisper takes 8 seconds or cleanup takes 4. Without the variable those cases print `SKIP` and do not fail. The encode timing case always runs and prints `LATENCY encode_fixture_ms=… encode_3s_ms=…`.
 
 ```powershell
 $env:GROQ_API_KEY = "gsk_..."
@@ -89,12 +91,14 @@ npm run test:windows
 
 ## How a take works
 
-1. A low-level keyboard hook watches for the chord. The trigger key is swallowed so Ctrl+Space does not type a space. A Win chord sends an unassigned virtual key before Win is released so the Start menu stays closed.
-2. The preferred microphone, or the current Windows default, is resolved again at the start of the take. A missing or unplugged device falls through to the next live input. The default device is watched for hot-plug changes.
-3. Leading and trailing silence is trimmed. Speech is resampled to 16 kHz mono and encoded as 16-bit PCM WAV.
-4. The WAV is posted to `https://api.groq.com/openai/v1/audio/transcriptions`.
-5. Optional Llama cleanup uses `https://api.groq.com/openai/v1/chat/completions`. If cleanup fails, Cadence still pastes the filler-stripped transcript.
-6. The previous text clipboard is saved, the transcript is placed on the clipboard, Ctrl+V is sent, and the previous text is restored. If the clipboard holds an image, or the paste cannot be sent, Cadence types the text instead.
+1. A low-level keyboard hook watches for the chord. The trigger key is swallowed so Ctrl+Space does not type a space. A Win chord sends an unassigned virtual key before Win is released so the Start menu stays closed. Double-tap (two presses that each last under about a quarter second, with the second inside a third of a second) latches hands-free. The next press stops.
+2. The microphone stream is opened at startup and kept open, with about 350 ms of pre-roll. Key-down copies that buffer instead of opening WASAPI again, so the first word is not clipped by device startup. While idle, Cadence re-resolves the preferred mic about once a second and switches back when a missing headset returns. It does not switch devices in the middle of a take.
+3. Leading and trailing silence is trimmed against an adaptive floor (a quiet room keeps quieter speech; a noisy room asks for more). Speech is resampled to 16 kHz mono and encoded as 16-bit PCM WAV. A press that never contains speech shows a short hint instead of a failure, including "hold the hotkey, or double-tap for hands-free" when the press itself was short.
+4. The WAV is posted to `https://api.groq.com/openai/v1/audio/transcriptions` on a persistent HTTP/2 client. Cadence opens that connection at startup. The dictionary is the Whisper prompt.
+5. Cleanup calls `https://api.groq.com/openai/v1/chat/completions` with `llama-3.1-8b-instant` unless the focused app is a code editor or terminal, or the setting is off. The call is capped at 1.2 seconds. Timeout, error, or a rewrite that grew too far falls back to the local edit, which still removes um/uh, applies "scratch that" / "no wait" / "I mean", and spoken punctuation.
+6. The previous text clipboard is saved, the transcript is placed on the clipboard, Ctrl+V is sent, and the previous text is restored. The two waits are 8 ms for the clipboard to publish and 25 ms before restore. If the clipboard holds an image, or the paste cannot be sent, Cadence types the text instead.
+
+`tauri dev` is a debug build of dependencies, but this crate is compiled at optimization level 3 so capture and encoding are not left in debug mode while you develop. The release profile uses link-time optimization.
 
 ## Development notes
 
@@ -107,7 +111,7 @@ npm run dev
 
 Open `http://127.0.0.1:1420` for settings and `http://127.0.0.1:1420/?view=overlay` for the recording tally. Outside the Tauri shell those pages use local preview data and do not call Groq.
 
-`cargo test --manifest-path src-tauri/Cargo.toml` covers silence trimming, WAV encoding, filler removal, hotkey chords, settings, history, and microphone selection (system default, a missing preferred mic, and switching back when it returns). A short real capture runs only when the machine has an input device. Live Groq calls run only when `GROQ_API_KEY` is set. Otherwise those cases print `SKIP` and pass.
+`cargo test --manifest-path src-tauri/Cargo.toml` covers silence trimming, adaptive speech threshold, WAV encoding, filler removal, spoken corrections and punctuation commands, foreground-app tone, hotkey chords, double-tap decisions, settings, history, and microphone selection (system default, a missing preferred mic, and switching back when it returns). A short real capture runs only when the machine has an input device. Live Groq calls, including the latency budget, run only when `GROQ_API_KEY` is set. Otherwise those cases print `SKIP` and pass. The encode timing case always prints a `LATENCY` line.
 
 Linux can compile and unit-test the project. The global hook, Credential Manager, and Ctrl+V path are Windows-specific; on other systems a polling listener and a best-effort paste exist so the UI can be exercised, and they are not the supported dictation path.
 
@@ -115,26 +119,28 @@ Linux can compile and unit-test the project. The global hook, Credential Manager
 
 Verified while building:
 
-- `cargo test` on Linux: 36 tests. Microphone selection, the speech fixture trim, and the Groq cases are included. This machine has no input device and no `GROQ_API_KEY`, so the real capture and the live Whisper/Llama cases printed `SKIP`.
-- `cargo check --tests --target x86_64-pc-windows-gnu`, which typechecks the Windows hook, the Credential Manager read/write path, device-change notifications, and the edit-control paste test. The MSVC target did not finish here because `tauri-winres` needs `llvm-rc`, which this environment does not have. A Windows machine with the C++ build tools compiles that resource step.
+- `cargo test` on Linux: 46 tests. Microphone selection, the speech fixture trim, cleanup, tone, double-tap, and the Groq cases are included. This machine has no input device and no `GROQ_API_KEY`, so the real capture and the live Whisper, Llama, and latency cases printed `SKIP`. The local encode timing printed `encode_fixture_ms=0` (89,644 bytes) and `encode_3s_ms=1` (96,044 bytes) with this crate optimized.
+- `cargo check --tests --target x86_64-pc-windows-gnu`, which typechecks the Windows hook, the Credential Manager read/write path, device-change notifications, foreground-app detection, and the edit-control paste test. The MSVC target did not finish here because `tauri-winres` needs `llvm-rc`, which this environment does not have. A Windows machine with the C++ build tools compiles that resource step.
 - `tsc --noEmit` for the settings window and overlay
-- A headless Chrome pass of the browser preview: System default (auto), the in-use line, a missing headset falling back without dropping the preference, a saved settings round trip, the persistent error banner and Dismiss, the overlay mic caption and error wrap, and a 390px layout
+- A browser pass of the settings preview for the cleanup default, the Llama 3.1 copy, and the double-tap sentence
 
 Not verified on a real Windows machine:
 
-- The low-level hook actually swallowing keys and suppressing the Start menu
-- WASAPI capture from a physical microphone, including an unplug while Cadence is open
+- The low-level hook actually swallowing keys and suppressing the Start menu, and the double-tap hands-free latch
+- WASAPI capture from a physical microphone with the stream kept warm, including an unplug while Cadence is open and the first words of a take
+- The stage timings in `cadence.log` on a real take (the encode numbers above are a local fixture, not a Groq round trip)
+- Foreground-app tone (Slack versus Word versus a terminal)
 - Credential Manager read/write of a live Groq key (the test exists and runs in Windows CI; it was not executed here)
 - WebView2 overlay transparency, always-on-top, and click-through
 - Ctrl+V restoration timing in Notepad, browsers, and Electron apps
 - The MSI/NSIS installer, SmartScreen, and the startup registry entry
-- A live Groq transcription or Llama cleanup call
+- A live Groq transcription, Llama cleanup call, or the latency budget (no `GROQ_API_KEY` in this environment)
 
 ## Next steps on Windows
 
 1. Install Rust, Node 22, and the C++ build tools, then `npm run tauri dev`.
 2. Put a Groq key in Settings and dictate into Notepad with Ctrl+Win and with Ctrl+Space.
 3. Confirm the previous clipboard text comes back, then try an app that ignores Ctrl+V so the typing fallback runs.
-4. Toggle Llama cleanup and a custom dictionary term.
+4. If Cleanup is off in an existing `settings.json`, turn it on. Dictate "meet Priya scratch that Wednesday period" and confirm the dictionary picked up a capitalized name. Try a double-tap in Slack and a hold in a terminal.
 5. `npm run tauri build`, install the MSI or NSIS package, and check tray autostart after a sign-out.
 6. If SmartScreen is a problem for distribution, sign the installer with an Authenticode certificate.

@@ -1,5 +1,6 @@
 mod audio;
 mod cleanup;
+mod context;
 mod credentials;
 mod dictation;
 mod hotkey;
@@ -9,6 +10,7 @@ mod logbuf;
 mod micwatch;
 mod store;
 mod transcribe;
+mod warm;
 
 #[cfg(test)]
 mod live_tests;
@@ -88,13 +90,14 @@ pub fn run() {
                 .name("cadence-dictation".into())
                 .spawn(move || {
                     while let Ok(edge) = rx.recv() {
-                        match edge {
-                            HotkeyEdge::Pressed => dictation::begin(&handle),
-                            HotkeyEdge::Released => dictation::end(&handle),
-                        }
+                        dictation::hotkey(&handle, edge);
                     }
                 })
                 .map_err(|err| format!("couldn't start dictation: {err}"))?;
+            let prewarm_dir = dir.clone();
+            tauri::async_runtime::spawn(async move {
+                transcribe::prewarm(&prewarm_dir).await;
+            });
 
             if let Some(overlay) = app.get_webview_window("overlay") {
                 let _ = overlay.set_ignore_cursor_events(true);
@@ -222,6 +225,7 @@ fn save_settings(
         return Err(err);
     }
     state.listener.set_hotkey(settings.hotkey.clone());
+    state.warm.retarget(settings.microphone.clone());
     update_tooltip(&app, &settings.hotkey);
     *state
         .settings
