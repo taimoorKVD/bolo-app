@@ -203,20 +203,19 @@ fn pastes_into_a_real_edit_control() {
     };
     eprintln!("paste test: edit control is ready");
 
-    let previous = match Clipboard::new() {
-        Ok(mut clipboard) => match clipboard.get_text() {
-            Ok(text) => Some(text),
-            Err(_) if clipboard.get_image().is_ok() => {
-                panic!("paste test: the clipboard holds an image, so it was left untouched")
-            }
-            Err(_) => None,
-        },
-        Err(err) => panic!("paste test: couldn't open the clipboard: {err}"),
+    // An image on the clipboard is real user data (a screenshot, for example).
+    // Leaving it untouched is what the app does during dictation. This test
+    // copies the image, pastes text, and puts the image back. If the image
+    // cannot be copied, skip instead of failing or clearing it.
+    let previous = match capture_clipboard() {
+        Ok(saved) => saved,
+        Err(message) => {
+            eprintln!("SKIP pastes_into_a_real_edit_control: {message}");
+            host.shutdown();
+            return;
+        }
     };
-    let _restore = ClipboardGuard {
-        had_text: previous.is_some(),
-        previous,
-    };
+    let _restore = ClipboardGuard { previous };
 
     within("writing the clipboard", || {
         set_clipboard_text(PHRASE).unwrap_or_else(|err| panic!("paste test: couldn't write the clipboard: {err}"));
@@ -274,9 +273,36 @@ fn within<T: Send + 'static>(what: &str, work: impl FnOnce() -> T + Send + 'stat
 }
 
 #[cfg(all(test, windows))]
+enum SavedClipboard {
+    Text(String),
+    Image(arboard::ImageData<'static>),
+    Empty,
+}
+
+#[cfg(all(test, windows))]
+fn capture_clipboard() -> Result<SavedClipboard, String> {
+    let mut clipboard = Clipboard::new().map_err(|err| format!("couldn't open the clipboard: {err}"))?;
+    if let Ok(text) = clipboard.get_text() {
+        return Ok(SavedClipboard::Text(text));
+    }
+    match clipboard.get_image() {
+        Ok(image) => {
+            eprintln!(
+                "paste test: clipboard holds an image ({}x{}); it will be restored after the paste",
+                image.width, image.height
+            );
+            Ok(SavedClipboard::Image(image))
+        }
+        Err(arboard::Error::ContentNotAvailable) => Ok(SavedClipboard::Empty),
+        Err(err) => Err(format!(
+            "the clipboard could not be copied ({err}), so it was left untouched"
+        )),
+    }
+}
+
+#[cfg(all(test, windows))]
 struct ClipboardGuard {
-    previous: Option<String>,
-    had_text: bool,
+    previous: SavedClipboard,
 }
 
 #[cfg(all(test, windows))]
@@ -286,10 +312,11 @@ impl Drop for ClipboardGuard {
             eprintln!("paste test: couldn't reopen the clipboard to restore it");
             return;
         };
-        let restored = if self.had_text {
-            clipboard.set_text(self.previous.take().unwrap_or_default()).is_ok()
-        } else {
-            clipboard.clear().is_ok()
+        let previous = std::mem::replace(&mut self.previous, SavedClipboard::Empty);
+        let restored = match previous {
+            SavedClipboard::Text(text) => clipboard.set_text(text).is_ok(),
+            SavedClipboard::Image(image) => clipboard.set_image(image).is_ok(),
+            SavedClipboard::Empty => clipboard.clear().is_ok(),
         };
         if !restored {
             eprintln!("paste test: couldn't restore the previous clipboard");

@@ -130,7 +130,9 @@ pub fn run() {
                 logbuf::log_line(&dir, "error", &format!("startup setting: {err}"));
             }
             let needs_key = !credentials::status().configured;
-            if smoke || needs_key || !tray_ok {
+            // Smoke must not focus a window onto a monitor. The settings page
+            // is parked off-screen in create_windows so get_settings still runs.
+            if !smoke && (needs_key || !tray_ok) {
                 show_settings(app.handle());
             }
             logbuf::log_line(
@@ -165,12 +167,36 @@ fn create_windows(app: &tauri::App, smoke: bool) -> Result<(), String> {
         }
         let mut builder = tauri::WebviewWindowBuilder::from_config(app.handle(), &config)
             .map_err(|err| err.to_string())?;
-        if smoke && config.label == "settings" {
-            builder = builder.initialization_script("window.__CADENCE_SMOKE__ = true;");
+        if smoke {
+            // from_config applies `center: true` and does not clear it when a
+            // position is set afterwards. The window is created hidden; it is
+            // moved off-screen before anything shows it.
+            builder = builder.visible(false).focused(false).skip_taskbar(true);
+            if config.label == "settings" {
+                builder = builder.initialization_script("window.__CADENCE_SMOKE__ = true;");
+            }
         }
-        builder.build().map_err(|err| err.to_string())?;
+        let window = builder.build().map_err(|err| err.to_string())?;
+        if smoke {
+            park_offscreen(&window);
+            if config.label == "settings" {
+                // WebView2 skips navigation on a window that is never shown.
+                // Show without activating (focused is false), then park again
+                // in case that show pulled the window onto a monitor.
+                let _ = window.show();
+                park_offscreen(&window);
+            } else {
+                let _ = window.hide();
+            }
+        }
     }
     Ok(())
+}
+
+fn park_offscreen<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) {
+    // Outside any real virtual-screen layout. Windows parks its own hidden
+    // windows in this region.
+    let _ = window.set_position(tauri::PhysicalPosition::new(-32_000, -32_000));
 }
 
 fn setup_tray(app: &tauri::AppHandle, hotkey: &hotkey::Hotkey) -> tauri::Result<()> {
@@ -204,6 +230,9 @@ fn setup_tray(app: &tauri::AppHandle, hotkey: &hotkey::Hotkey) -> tauri::Result<
 }
 
 fn show_settings(app: &tauri::AppHandle) {
+    if std::env::var("CADENCE_SMOKE").ok().as_deref() == Some("1") {
+        return;
+    }
     if let Some(window) = app.get_webview_window("settings") {
         let _ = window.show();
         let _ = window.unminimize();

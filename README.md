@@ -76,9 +76,9 @@ npm run test:windows
 
 That runs `scripts/selftest.ps1`, which prints a pass/fail line for microphone selection and a real capture (skipped when the machine has no input device), the Credential Manager save/read round trip, a paste into a hidden edit control, the Groq transcription and Llama cleanup calls, the rest of the unit tests, and a startup smoke test. Each group has a time limit. If one hangs, the script stops that process and still runs the groups after it.
 
-The smoke test builds the release app (`npm run build`, then `cargo build --release`) and launches `cadence.exe` with `CADENCE_SMOKE=1`. The settings window, created only after app state is registered, invokes `get_settings` the same way the UI does. The test fails if that command errors, if it does not return, or if a UTF-8 BOM settings file (PowerShell `ConvertTo-Json` shape, microphone null, cleanup on) is not what comes back. Quit Cadence first if it is already running; a second instance exits without running the check.
+The smoke test builds the release app with `npm run tauri -- build --no-bundle`. That is the same frontend embedding the installer uses: the Tauri CLI passes `tauri/custom-protocol` and embeds `frontendDist`. A plain `cargo build --release` does not, so that exe loads `http://localhost:1420` and the window shows a connection error. The test launches `cadence.exe` with `CADENCE_SMOKE=1`. The settings window is created only after app state is registered, parked off-screen, kept off the taskbar, and not focused. It still loads the bundled page and invokes `get_settings` the same way the UI does. The test fails if that command errors, if it does not return, or if a UTF-8 BOM settings file (PowerShell `ConvertTo-Json` shape, microphone null, cleanup on) is not what comes back. Afterwards the script kills that process tree, including a WebView2 child that outlives the exe. Quit Cadence first if it is already running; a second instance exits without running the check.
 
-The paste check does not steal foreground focus and does not send Ctrl+V. It writes the clipboard, then sends `WM_PASTE` to a real Edit control — the message that control handles for Ctrl+V — and fails within a few seconds if any step stalls.
+The paste check does not steal foreground focus and does not send Ctrl+V. It writes the clipboard, then sends `WM_PASTE` to a real Edit control — the message that control handles for Ctrl+V — and fails within a few seconds if any step stalls. If the clipboard holds an image, the test copies it, runs the paste, and puts the image back. If that image cannot be copied, the test prints `SKIP` and leaves the clipboard alone.
 
 Set `GROQ_API_KEY` in the environment before running if you want the live Whisper, Llama, and latency checks. They transcribe `src-tauri/tests/fixtures/dictation.wav` (the spoken line is "Hello um cadence this is a dictation test.") and send a filler-and-correction sentence to Llama. The latency case prints `LATENCY encode_ms=… groq_ms=… cleanup_ms=…` and fails if Whisper takes 8 seconds or cleanup takes 4. Without the variable those cases print `SKIP` and do not fail. The encode timing case always runs and prints `LATENCY encode_fixture_ms=… encode_3s_ms=…`.
 
@@ -137,7 +137,7 @@ Not verified on a real Windows machine:
 - Ctrl+V restoration timing in Notepad, browsers, and Electron apps
 - The MSI/NSIS installer, SmartScreen, and the startup registry entry
 - A live Groq transcription, Llama cleanup call, or the latency budget (no `GROQ_API_KEY` in this environment)
-- The release-app startup smoke test (`get_settings` from the real settings window). It is part of `scripts/selftest.ps1` and the Windows CI job; this machine is Linux, so the exe was not launched here
+- The bundled-app startup smoke test (`tauri build --no-bundle`, then `get_settings` from the real settings page, window off-screen). It is part of `scripts/selftest.ps1` and the Windows CI job; this machine is Linux, so the exe was not launched here
 
 ## Next steps on Windows
 
