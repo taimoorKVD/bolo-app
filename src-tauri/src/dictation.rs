@@ -115,6 +115,8 @@ struct Staged {
     bytes: usize,
     groq_ms: u64,
     cleanup_ms: u64,
+    /// Empty until cleanup runs. Then "applied", "off", "verbatim", or the fallback reason.
+    cleanup_why: String,
     paste_ms: u64,
     tone: String,
     release_started: Instant,
@@ -530,6 +532,7 @@ async fn process(finished: audio::FinishedAudio, settings: Settings, clock: Cloc
         bytes: 0,
         groq_ms: 0,
         cleanup_ms: 0,
+        cleanup_why: String::new(),
         paste_ms: 0,
         tone: "none".into(),
         release_started: clock.release_started,
@@ -608,6 +611,7 @@ async fn process(finished: audio::FinishedAudio, settings: Settings, clock: Cloc
     )
     .await;
     staged.cleanup_ms = cleanup_started.elapsed().as_millis() as u64;
+    staged.cleanup_why = cleaned.why;
     drop(key);
     let text = cleaned.text.trim().to_string();
     if text.is_empty() {
@@ -708,23 +712,32 @@ fn absorb_dictionary(app: &AppHandle, text: &str) {
 
 fn log_stages(app: &AppHandle, staged: &Staged, release_ms: u64) {
     let state = app.state::<AppState>();
-    log_line(
-        &state.config_dir,
-        "info",
-        &format!(
-            "stages held={} open_wait={} stop={} encode={} bytes={} groq={} cleanup={} paste={} release={} tone={}",
-            staged.held_ms,
-            staged.open_wait_ms,
-            staged.stop_ms,
-            staged.encode_ms,
-            staged.bytes,
-            staged.groq_ms,
-            staged.cleanup_ms,
-            staged.paste_ms,
-            release_ms,
-            staged.tone
-        ),
-    );
+    log_line(&state.config_dir, "info", &stage_line(staged, release_ms));
+}
+
+fn stage_line(staged: &Staged, release_ms: u64) -> String {
+    let why = if staged.cleanup_why.is_empty() {
+        String::new()
+    } else {
+        format!(" cleanup_why={}", quote_log(&staged.cleanup_why))
+    };
+    format!(
+        "stages held={} open_wait={} stop={} encode={} bytes={} groq={} cleanup={}{why} paste={} release={} tone={}",
+        staged.held_ms,
+        staged.open_wait_ms,
+        staged.stop_ms,
+        staged.encode_ms,
+        staged.bytes,
+        staged.groq_ms,
+        staged.cleanup_ms,
+        staged.paste_ms,
+        release_ms,
+        staged.tone
+    )
+}
+
+fn quote_log(value: &str) -> String {
+    format!("\"{}\"", value.replace('"', "'"))
 }
 
 fn remember(app: &AppHandle, outcome: &Outcome) {
@@ -897,5 +910,29 @@ mod tests {
         let quiet = silence_hint(2_000, false);
         assert!(quiet.contains("louder"));
         assert_eq!(recording_caption(true, &None).as_deref(), Some("Hands-free — tap the hotkey to stop"));
+    }
+
+    #[test]
+    fn stage_line_quotes_why_cleanup_did_not_apply() {
+        let line = stage_line(
+            &Staged {
+                held_ms: 2097,
+                open_wait_ms: 0,
+                stop_ms: 0,
+                encode_ms: 1,
+                bytes: 70124,
+                groq_ms: 203,
+                cleanup_ms: 56,
+                cleanup_why: "couldn't reach Groq: timed out".into(),
+                paste_ms: 39,
+                tone: "casual".into(),
+                release_started: Instant::now(),
+            },
+            304,
+        );
+        assert!(line.contains("cleanup=56"));
+        assert!(line.contains("cleanup_why=\"couldn't reach Groq: timed out\""));
+        assert!(line.contains("tone=casual"));
+        assert!(!line.contains("cleanup_why=\"\""));
     }
 }

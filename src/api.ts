@@ -3,6 +3,7 @@ import type {
   AppInfo,
   DictationEvent,
   HistoryEntry,
+  ListenerStatus,
   MicInfo,
   MicStatus,
   Settings,
@@ -32,6 +33,14 @@ export async function onMicStatus(handler: (status: MicStatus) => void): Promise
   if (!inTauri()) return () => {};
   const { listen } = await import("@tauri-apps/api/event");
   return listen<MicStatus>("mic-status", (event) => handler(event.payload));
+}
+
+export async function onListenerStatus(
+  handler: (status: ListenerStatus) => void,
+): Promise<() => void> {
+  if (!inTauri()) return () => {};
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen<ListenerStatus>("listener-status", (event) => handler(event.payload));
 }
 
 export async function onDictation(handler: Handler): Promise<() => void> {

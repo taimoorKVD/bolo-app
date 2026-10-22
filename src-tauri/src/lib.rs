@@ -23,7 +23,7 @@ use serde::Serialize;
 use std::sync::mpsc;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{Manager, WindowEvent};
+use tauri::{Emitter, Manager, WindowEvent};
 use tauri_plugin_autostart::ManagerExt;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -92,12 +92,16 @@ pub fn run() {
                 logbuf::log_line(&dir, "error", "app state is not visible after manage()");
             }
 
+            let emit_app = app.handle().clone();
+            listener.set_on_status(move |status| {
+                let _ = emit_app.emit("listener-status", &status);
+            });
+            let (tx, rx) = mpsc::channel::<HotkeyEdge>();
+            listener::spawn(listener, tx);
+
             if let Err(err) = create_windows(app, smoke) {
                 logbuf::log_line(&dir, "error", &format!("windows: {err}"));
             }
-
-            let (tx, rx) = mpsc::channel::<HotkeyEdge>();
-            listener::spawn(listener, tx);
             let handle = app.handle().clone();
             if let Err(err) = std::thread::Builder::new()
                 .name("cadence-dictation".into())

@@ -1,5 +1,6 @@
-import { api, onDictation, onMicStatus } from "./api";
+import { api, onDictation, onListenerStatus, onMicStatus } from "./api";
 import { formatDuration, formatHotkey, formatWhen, modelLabel } from "./format";
+import { listenerNotice, visibleMessage } from "./notices";
 import type {
   ApiKeyStatus,
   AppInfo,
@@ -74,7 +75,11 @@ export async function mountSettings(root: HTMLElement): Promise<SettingsLoad> {
       keyStatus,
       mics,
       history,
-      info,
+      info: {
+        ...info,
+        listenerError: visibleMessage(info.listenerError),
+        lastError: visibleMessage(info.lastError),
+      },
       dirty: false,
       saving: false,
       status: "",
@@ -103,8 +108,9 @@ function render(root: HTMLElement, draft: Draft): void {
     void save(draft, form);
   });
 
+  const alert = alertBanner(draft);
   form.append(
-    alertBanner(draft),
+    ...(alert ? [alert] : []),
     liveBanner(draft),
     listenerBanner(draft),
     apiSection(draft),
@@ -121,12 +127,14 @@ function render(root: HTMLElement, draft: Draft): void {
 
   void onDictation((event) => {
     draft.live = event.phase === "idle" ? null : event;
-    if (event.phase === "error") draft.lastError = event.message;
+    if (event.phase === "error") {
+      const message = visibleMessage(event.message);
+      if (message) draft.lastError = message;
+    }
     if (event.phase === "recording") draft.lastError = null;
     const banner = form.querySelector<HTMLElement>("[data-live]");
     if (banner) banner.replaceWith(liveBanner(draft));
-    const alert = form.querySelector<HTMLElement>("[data-alert]");
-    if (alert) alert.replaceWith(alertBanner(draft));
+    placeAlert(form, draft);
     const test = document.getElementById("test-record");
     if (test) test.textContent = event.phase === "recording" ? "Stop test" : "Record a test";
     if (event.phase === "recording") refreshRail(draft);
@@ -137,7 +145,45 @@ function render(root: HTMLElement, draft: Draft): void {
   void onMicStatus((status) => {
     applyDevices(draft, status.devices);
   });
+  void watchListener(draft, form);
   window.addEventListener("cadence-history", () => void refreshHistory(draft));
+}
+
+function placeAlert(form: HTMLElement, draft: Draft): void {
+  const current = form.querySelector<HTMLElement>("[data-alert]");
+  const next = alertBanner(draft);
+  if (next && current) current.replaceWith(next);
+  else if (next) form.prepend(next);
+  else current?.remove();
+}
+
+async function watchListener(draft: Draft, form: HTMLElement): Promise<void> {
+  const apply = (running: boolean, error: string | null) => {
+    draft.info.listenerRunning = running;
+    draft.info.listenerError = visibleMessage(error);
+    const current = form.querySelector<HTMLElement>("[data-listener]");
+    const next = listenerBanner(draft);
+    if (current) current.replaceWith(next);
+  };
+  await onListenerStatus((status) => apply(status.running, status.error));
+  let attempts = 0;
+  const poll = async (): Promise<boolean> => {
+    try {
+      const info = await api.getAppInfo();
+      apply(info.listenerRunning, info.listenerError);
+      return info.listenerRunning || visibleMessage(info.listenerError) !== null;
+    } catch {
+      return false;
+    }
+  };
+  if (await poll()) return;
+  const timer = window.setInterval(() => {
+    void (async () => {
+      attempts += 1;
+      const running = await poll();
+      if (running || attempts >= 40) window.clearInterval(timer);
+    })();
+  }, 250);
 }
 
 function buildRail(draft: Draft): HTMLElement {
@@ -204,18 +250,16 @@ function liveBanner(draft: Draft): HTMLElement {
   return banner;
 }
 
-function alertBanner(draft: Draft): HTMLElement {
+function alertBanner(draft: Draft): HTMLElement | null {
+  const message = visibleMessage(draft.lastError);
+  if (!message) return null;
   const banner = el("div", "banner bad alert");
   banner.dataset.alert = "true";
-  if (!draft.lastError) {
-    banner.hidden = true;
-    return banner;
-  }
-  const copy = el("p", "", draft.lastError);
+  const copy = el("p", "", message);
   const dismiss = button("Dismiss", "text");
   dismiss.addEventListener("click", () => {
     draft.lastError = null;
-    banner.replaceWith(alertBanner(draft));
+    banner.remove();
     void api.dismissError();
   });
   banner.append(copy, dismiss);
@@ -224,14 +268,14 @@ function alertBanner(draft: Draft): HTMLElement {
 
 function listenerBanner(draft: Draft): HTMLElement {
   const banner = el("div", "banner");
-  if (draft.info.listenerRunning) {
+  banner.dataset.listener = "true";
+  const notice = listenerNotice(draft.info.listenerRunning, draft.info.listenerError);
+  if (!notice) {
     banner.hidden = true;
     return banner;
   }
   banner.classList.add("warn");
-  banner.textContent = draft.info.listenerError
-    ? `Global hotkey isn't active. ${draft.info.listenerError}`
-    : "Global hotkey isn't active yet. You can still record a test below.";
+  banner.textContent = notice;
   return banner;
 }
 
@@ -859,7 +903,7 @@ function errorShell(message: string, retry: () => void): HTMLElement {
   const shell = el("div", "shell error-shell");
   shell.append(el("p", "eyebrow", "Dictation"), el("h1", "wordmark", "Cadence"));
   shell.append(el("p", "lede", "Settings didn't load."));
-  const banner = el("div", "banner bad", message);
+  const banner = el("div", "banner bad", visibleMessage(message) ?? "Settings didn't load.");
   const retryButton = button("Try again", "primary");
   retryButton.addEventListener("click", retry);
   shell.append(banner, retryButton);

@@ -25,6 +25,7 @@ const settings: Settings = {
 
 let apiKey: string | null = null;
 let recording = false;
+let appInfoReads = 0;
 let history: HistoryEntry[] = [
   {
     id: "sample-1",
@@ -92,14 +93,24 @@ export async function mockInvoke<T>(command: string, args?: Record<string, unkno
     case "toggle_test_recording":
       void runDemoTake();
       return undefined as T;
-    case "get_app_info":
+    case "get_app_info": {
+      appInfoReads += 1;
+      const late =
+        typeof location !== "undefined" &&
+        new URLSearchParams(location.search).get("listener") === "late";
+      const listenerRunning = late && appInfoReads >= 8;
+      const listenerError =
+        late || listenerRunning
+          ? null
+          : "Global hook preview is Windows-only in this browser session.";
       return {
         version: "0.1.0",
-        listenerRunning: false,
-        listenerError: "Global hook preview is Windows-only in this browser session.",
+        listenerRunning,
+        listenerError,
         platform: "linux",
         lastError: previewParam("error"),
       } satisfies AppInfo as T;
+    }
     case "get_mic_status":
       return {
         preference: settings.microphone,

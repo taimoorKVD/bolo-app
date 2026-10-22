@@ -12,6 +12,7 @@ use crate::hotkey::KeySnapshot;
 use crate::hotkey::{kind_from_vk, should_swallow_keydown, snapshot_from_kinds, KeyKind};
 #[cfg(windows)]
 use std::collections::HashSet;
+use serde::Serialize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, RwLock};
@@ -19,17 +20,21 @@ use std::thread;
 #[cfg(not(windows))]
 use std::time::Duration;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ListenerStatus {
     pub running: bool,
     pub error: Option<String>,
 }
+
+type StatusHook = Arc<dyn Fn(ListenerStatus) + Send + Sync>;
 
 #[derive(Clone)]
 pub struct ListenerControl {
     pub hotkey: Arc<RwLock<Hotkey>>,
     pub paused: Arc<AtomicBool>,
     pub status: Arc<Mutex<ListenerStatus>>,
+    on_status: Arc<Mutex<Option<StatusHook>>>,
 }
 
 impl ListenerControl {
@@ -41,6 +46,15 @@ impl ListenerControl {
                 running: false,
                 error: None,
             })),
+            on_status: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// Called on the hook thread whenever the listener starts or stops.
+    /// The settings page listens so it does not keep the startup status.
+    pub fn set_on_status(&self, hook: impl Fn(ListenerStatus) + Send + Sync + 'static) {
+        if let Ok(mut slot) = self.on_status.lock() {
+            *slot = Some(Arc::new(hook));
         }
     }
 
@@ -70,9 +84,13 @@ pub fn spawn(control: ListenerControl, tx: Sender<HotkeyEdge>) {
 }
 
 fn set_status(control: &ListenerControl, running: bool, error: Option<String>) {
+    let snapshot = ListenerStatus { running, error };
     if let Ok(mut status) = control.status.lock() {
-        status.running = running;
-        status.error = error;
+        *status = snapshot.clone();
+    }
+    let notify = control.on_status.lock().ok().and_then(|hook| hook.clone());
+    if let Some(notify) = notify {
+        notify(snapshot);
     }
 }
 
@@ -334,5 +352,37 @@ fn keycode_name(key: device_query::Keycode) -> String {
         Keycode::F11 => "f11".into(),
         Keycode::F12 => "f12".into(),
         other => format!("other:{other:?}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn status_hook_fires_when_the_listener_reports_in() {
+        let control = ListenerControl::new(Hotkey::default());
+        let seen = Arc::new(Mutex::new(None));
+        let slot = Arc::clone(&seen);
+        control.set_on_status(move |status| {
+            *slot.lock().unwrap_or_else(|err| err.into_inner()) = Some(status);
+        });
+        set_status(&control, true, None);
+        let status = seen.lock().unwrap_or_else(|err| err.into_inner()).clone();
+        let status = status.expect("hook should have run");
+        assert!(status.running);
+        assert!(status.error.is_none());
+
+        set_status(&control, false, Some("couldn't install the keyboard hook".into()));
+        let status = seen
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone()
+            .expect("hook should have run again");
+        assert!(!status.running);
+        assert_eq!(
+            status.error.as_deref(),
+            Some("couldn't install the keyboard hook")
+        );
     }
 }

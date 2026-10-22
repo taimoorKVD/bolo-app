@@ -38,6 +38,11 @@ export type HistoryEntry = {
   durationMs: number;
 };
 
+export type ListenerStatus = {
+  running: boolean;
+  error: string | null;
+};
+
 export type AppInfo = {
   version: string;
   listenerRunning: boolean;

@@ -42,6 +42,8 @@ pub struct CleanOutcome {
     /// True when the Llama cleanup actually produced the text.
     pub used_model: bool,
     pub note: Option<String>,
+    /// Why `used_model` is true or false. Written to the stage log.
+    pub why: String,
 }
 
 pub async fn clean_transcript(
@@ -52,29 +54,71 @@ pub async fn clean_transcript(
     tone: Tone,
 ) -> CleanOutcome {
     let fallback = polish_locally(transcript);
-    if !enabled || matches!(tone, Tone::Verbatim) || transcript.trim().is_empty() {
-        return CleanOutcome {
-            text: fallback,
-            used_model: false,
-            note: None,
-        };
+    if !enabled {
+        return skipped(fallback, "off");
     }
-    match request_cleanup(client, api_key, transcript, tone).await {
+    if matches!(tone, Tone::Verbatim) {
+        return skipped(fallback, "verbatim");
+    }
+    if transcript.trim().is_empty() {
+        return skipped(fallback, "empty");
+    }
+    outcome_from_model(transcript, request_cleanup(client, api_key, transcript, tone).await)
+}
+
+fn skipped(text: String, why: &str) -> CleanOutcome {
+    CleanOutcome {
+        text,
+        used_model: false,
+        note: None,
+        why: why.to_string(),
+    }
+}
+
+/// Turn a model response into the text we paste, and a reason safe to log.
+fn outcome_from_model(transcript: &str, result: anyhow::Result<String>) -> CleanOutcome {
+    let fallback = polish_locally(transcript);
+    match result {
         Ok(cleaned) if accept_cleanup(transcript, &cleaned) => CleanOutcome {
             text: polish_model_output(&cleaned),
             used_model: true,
             note: None,
+            why: "applied".into(),
         },
-        Ok(_) => CleanOutcome {
-            text: fallback,
-            used_model: false,
-            note: Some("Cleanup was skipped because the rewrite didn't look usable.".into()),
-        },
-        Err(_) => CleanOutcome {
+        Ok(cleaned) => {
+            let trimmed = cleaned.trim();
+            let why = if trimmed.is_empty() {
+                "rejected empty rewrite".into()
+            } else {
+                format!(
+                    "rejected rewrite ({} chars, transcript {} chars)",
+                    trimmed.chars().count(),
+                    transcript.trim().chars().count()
+                )
+            };
+            CleanOutcome {
+                text: fallback,
+                used_model: false,
+                note: Some("Cleanup was skipped because the rewrite didn't look usable.".into()),
+                why,
+            }
+        }
+        Err(err) => CleanOutcome {
             text: fallback,
             used_model: false,
             note: None,
+            why: compact_why(&format!("{err:#}")),
         },
+    }
+}
+
+fn compact_why(value: &str) -> String {
+    let flat = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= 220 {
+        flat
+    } else {
+        let cut: String = flat.chars().take(220).collect();
+        format!("{cut}…")
     }
 }
 
@@ -481,7 +525,56 @@ mod tests {
             Tone::Verbatim,
         ));
         assert!(!outcome.used_model);
+        assert_eq!(outcome.why, "verbatim");
         assert_eq!(outcome.text, "ship it.");
+    }
+
+    #[test]
+    fn disabled_cleanup_records_why_and_still_polishes() {
+        let outcome = tauri::async_runtime::block_on(clean_transcript(
+            crate::transcribe::http_client(),
+            "unused",
+            "hello um there",
+            false,
+            Tone::Plain,
+        ));
+        assert!(!outcome.used_model);
+        assert_eq!(outcome.why, "off");
+        assert_eq!(outcome.text, "hello there");
+        assert!(outcome.note.is_none());
+    }
+
+    #[test]
+    fn model_error_falls_back_and_keeps_the_reason() {
+        let outcome = outcome_from_model("hello um there", Err(anyhow!("timed out talking to Groq")));
+        assert!(!outcome.used_model);
+        assert_eq!(outcome.text, "hello there");
+        assert!(outcome.note.is_none());
+        assert!(outcome.why.contains("timed out"));
+        assert!(!outcome.why.contains('\n'));
+    }
+
+    #[test]
+    fn empty_or_huge_rewrite_is_rejected_with_a_reason() {
+        let empty = outcome_from_model("ship it tomorrow", Ok("   ".into()));
+        assert!(!empty.used_model);
+        assert_eq!(empty.why, "rejected empty rewrite");
+        assert_eq!(empty.text, "ship it tomorrow");
+        assert!(empty.note.is_some());
+
+        let essay = "word ".repeat(80);
+        let huge = outcome_from_model("ship it tomorrow", Ok(essay));
+        assert!(!huge.used_model);
+        assert!(huge.why.contains("rejected rewrite"));
+        assert!(huge.why.contains("transcript"));
+    }
+
+    #[test]
+    fn usable_rewrite_is_marked_applied() {
+        let outcome = outcome_from_model("ship it tomorrow", Ok("Ship it tomorrow.".into()));
+        assert!(outcome.used_model);
+        assert_eq!(outcome.why, "applied");
+        assert_eq!(outcome.text, "Ship it tomorrow.");
     }
 
     #[test]
