@@ -72,7 +72,9 @@ On Windows, from the repo root:
 npm run test:windows
 ```
 
-That runs `scripts/selftest.ps1`, which prints a pass/fail line for microphone selection and a real capture (skipped when the machine has no input device), the Credential Manager save/read round trip, a paste into a real edit control, the Groq transcription and Llama cleanup calls, and the rest of the unit tests.
+That runs `scripts/selftest.ps1`, which prints a pass/fail line for microphone selection and a real capture (skipped when the machine has no input device), the Credential Manager save/read round trip, a paste into a hidden edit control, the Groq transcription and Llama cleanup calls, and the rest of the unit tests. Each group has a time limit. If one hangs, the script stops that process and still runs the groups after it.
+
+The paste check does not steal foreground focus and does not send Ctrl+V. It writes the clipboard, then sends `WM_PASTE` to a real Edit control — the message that control handles for Ctrl+V — and fails within a few seconds if any step stalls.
 
 Set `GROQ_API_KEY` in the environment before running if you want the live Whisper and Llama checks. They transcribe `src-tauri/tests/fixtures/dictation.wav` (the spoken line is "Hello um cadence this is a dictation test.") and send a filler-and-correction sentence to Llama. Without the variable those cases print `SKIP` and do not fail.
 
