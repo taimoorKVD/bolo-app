@@ -26,7 +26,6 @@ serde_json = "1"
 anyhow = "1"
 cpal = "0.15"
 hound = "3.5"
-keyring = "3"
 arboard = "3"
 open = "5"
 zeroize = { version = "1", features = ["derive"] }
@@ -34,13 +33,23 @@ zeroize = { version = "1", features = ["derive"] }
 [target.'cfg(windows)'.dependencies]
 tauri-plugin-single-instance = "2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "native-tls"] }
+# The `#[implement]` macro emits `::windows_core::` paths. Pin the same
+# version the `windows` 0.61 crate uses so those paths are not ambiguous.
+windows-core = "=0.61.2"
 windows = { version = "0.61", features = [
     "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Media_Audio",
+    "Win32_Security_Credentials",
+    "Win32_System_Com",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Input_KeyboardAndMouse",
 ] }
 
 [target.'cfg(not(windows))'.dependencies]
+keyring = "3"
 device_query = "2.1"
 enigo = "0.5"
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls"] }

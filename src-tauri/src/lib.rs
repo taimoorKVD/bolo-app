@@ -6,8 +6,12 @@ mod hotkey;
 mod insert;
 mod listener;
 mod logbuf;
+mod micwatch;
 mod store;
 mod transcribe;
+
+#[cfg(test)]
+mod live_tests;
 
 use crate::credentials::ApiKeyStatus;
 use crate::dictation::AppState;
@@ -22,6 +26,7 @@ use tauri_plugin_autostart::ManagerExt;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg_attr(not(windows), allow(unused_mut))]
     let mut builder = tauri::Builder::default();
     #[cfg(windows)]
     {
@@ -47,6 +52,8 @@ pub fn run() {
             set_hotkey_capture,
             toggle_test_recording,
             get_app_info,
+            dismiss_error,
+            get_mic_status,
             copy_text,
             open_groq_keys
         ])
@@ -113,6 +120,7 @@ pub fn run() {
                 "info",
                 &format!("Cadence ready, hold {}", display(&settings.hotkey)),
             );
+            micwatch::spawn(app.handle().clone());
             Ok(())
         })
         .run(tauri::generate_context!())
@@ -179,6 +187,7 @@ struct AppInfo {
     listener_running: bool,
     listener_error: Option<String>,
     platform: &'static str,
+    last_error: Option<String>,
 }
 
 #[tauri::command]
@@ -227,15 +236,21 @@ fn api_key_status() -> ApiKeyStatus {
 }
 
 #[tauri::command]
-fn set_api_key(mut key: String) -> Result<ApiKeyStatus, String> {
+fn set_api_key(state: tauri::State<'_, AppState>, mut key: String) -> Result<ApiKeyStatus, String> {
     let trimmed = key.trim().to_string();
     cleanup::wipe(&mut key);
     credentials::validate_key(&trimmed)?;
     let saved = credentials::set_api_key(&trimmed);
-    let status = credentials::status_from_key(&trimmed);
     let mut trimmed = trimmed;
     cleanup::wipe(&mut trimmed);
     saved.map_err(|err| err.to_string())?;
+    let status = credentials::status();
+    if !status.configured {
+        return Err(status
+            .error
+            .unwrap_or_else(|| "The API key was not stored.".into()));
+    }
+    logbuf::log_line(&state.config_dir, "info", "Groq API key stored");
     Ok(status)
 }
 
@@ -247,6 +262,25 @@ fn clear_api_key() -> Result<(), String> {
 #[tauri::command]
 fn list_microphones() -> Result<Vec<audio::MicInfo>, String> {
     audio::list_microphones().map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn get_mic_status(state: tauri::State<'_, AppState>) -> audio::MicStatus {
+    let preference = state
+        .settings
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .microphone
+        .clone();
+    audio::mic_status(preference.as_deref())
+}
+
+#[tauri::command]
+fn dismiss_error(state: tauri::State<'_, AppState>) {
+    *state
+        .last_error
+        .lock()
+        .unwrap_or_else(|err| err.into_inner()) = None;
 }
 
 #[tauri::command]
@@ -296,11 +330,17 @@ fn get_app_info(state: tauri::State<'_, AppState>) -> AppInfo {
         .lock()
         .unwrap_or_else(|err| err.into_inner())
         .clone();
+    let last_error = state
+        .last_error
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .clone();
     AppInfo {
         version: env!("CARGO_PKG_VERSION"),
         listener_running: status.running,
         listener_error: status.error,
         platform: std::env::consts::OS,
+        last_error,
     }
 }
 

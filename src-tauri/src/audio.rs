@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 const TARGET_RATE: u32 = 16_000;
 const FRAME_MS: u32 = 20;
@@ -46,6 +46,44 @@ pub struct RecordingSession {
     pub started: Instant,
     pub error: Arc<Mutex<Option<String>>>,
     pub device_note: Option<String>,
+    /// Device this take actually opened. The overlay text is `device_note`.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub active_name: String,
+    pub used_fallback: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListedMic {
+    pub name: String,
+    pub is_default: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MicChoice {
+    pub active_name: String,
+    pub using_fallback: bool,
+    pub preference: Option<String>,
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MicStatus {
+    pub preference: Option<String>,
+    pub active_name: Option<String>,
+    pub using_fallback: bool,
+    pub message: Option<String>,
+    pub devices: Vec<MicInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub struct CaptureReport {
+    pub device_name: String,
+    pub used_fallback: bool,
+    pub sample_count: usize,
+    pub sample_rate: u32,
+    pub channels: u16,
 }
 
 pub struct FinishedAudio {
@@ -74,23 +112,165 @@ impl std::fmt::Display for SpeechError {
 
 pub fn list_microphones() -> anyhow::Result<Vec<MicInfo>> {
     let host = cpal::default_host();
+    let listed = host_mics(&host).context("couldn't list microphones")?;
+    Ok(listed
+        .into_iter()
+        .map(|mic| MicInfo {
+            name: mic.name,
+            is_default: mic.is_default,
+        })
+        .collect())
+}
+
+pub fn mic_status(preference: Option<&str>) -> MicStatus {
+    let preference = trimmed(preference);
+    match list_microphones() {
+        Ok(devices) => {
+            let listed: Vec<ListedMic> = devices
+                .iter()
+                .map(|mic| ListedMic {
+                    name: mic.name.clone(),
+                    is_default: mic.is_default,
+                })
+                .collect();
+            match resolve_microphone(&listed, preference.as_deref()) {
+                Ok(choice) => MicStatus {
+                    message: Some(choice.note.unwrap_or_else(|| usage_line(preference.as_deref(), &choice.active_name, false))),
+                    active_name: Some(choice.active_name),
+                    using_fallback: choice.using_fallback,
+                    preference,
+                    devices,
+                },
+                Err(err) => MicStatus {
+                    preference,
+                    active_name: None,
+                    using_fallback: false,
+                    message: Some(err),
+                    devices,
+                },
+            }
+        }
+        Err(err) => MicStatus {
+            preference,
+            active_name: None,
+            using_fallback: false,
+            message: Some(err.to_string()),
+            devices: Vec::new(),
+        },
+    }
+}
+
+pub fn normalize_mic_name(name: &str) -> String {
+    name.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+}
+
+/// Pick the microphone to show and to try first.
+///
+/// `None` or an empty preference means "system default (auto)": follow whichever
+/// device Windows currently calls the default. A saved name is kept even when
+/// that device is missing; the default is used until the name shows up again.
+pub fn resolve_microphone(devices: &[ListedMic], preference: Option<&str>) -> Result<MicChoice, String> {
+    if devices.is_empty() {
+        return Err("No microphone is available. Plug one in and try again.".into());
+    }
+    let default = devices.iter().find(|device| device.is_default).unwrap_or(&devices[0]);
+    let preference = trimmed(preference);
+    if let Some(pref) = preference {
+        if let Some(found) = find_named(devices, &pref) {
+            return Ok(MicChoice {
+                active_name: found.name.clone(),
+                using_fallback: false,
+                preference: Some(pref),
+                note: None,
+            });
+        }
+        return Ok(MicChoice {
+            active_name: default.name.clone(),
+            using_fallback: true,
+            note: Some(format!("{pref} isn't connected. Using {}.", default.name)),
+            preference: Some(pref),
+        });
+    }
+    Ok(MicChoice {
+        active_name: default.name.clone(),
+        using_fallback: false,
+        preference: None,
+        note: None,
+    })
+}
+
+/// Devices to try, preferred first, then the current default, then the rest.
+/// Names are not repeated. A missing preference is skipped rather than failed.
+pub fn open_order(devices: &[ListedMic], preference: Option<&str>) -> Vec<String> {
+    let mut names = Vec::new();
+    if let Some(pref) = trimmed(preference) {
+        if let Some(found) = find_named(devices, &pref) {
+            push_unique(&mut names, &found.name);
+        }
+    }
+    if let Some(default) = devices.iter().find(|device| device.is_default) {
+        push_unique(&mut names, &default.name);
+    }
+    for device in devices {
+        push_unique(&mut names, &device.name);
+    }
+    names
+}
+
+pub fn usage_line(preference: Option<&str>, active: &str, used_fallback: bool) -> String {
+    match (trimmed(preference), used_fallback) {
+        (Some(pref), true) => format!("Using {active}. {pref} isn't available."),
+        (None, true) => format!("Using {active}. The system default didn't open."),
+        (None, false) => format!("{active} · system default"),
+        (Some(_), false) => active.to_string(),
+    }
+}
+
+fn trimmed(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn find_named<'a>(devices: &'a [ListedMic], wanted: &str) -> Option<&'a ListedMic> {
+    let wanted = normalize_mic_name(wanted);
+    devices.iter().find(|device| normalize_mic_name(&device.name) == wanted)
+}
+
+fn push_unique(names: &mut Vec<String>, name: &str) {
+    if !names.iter().any(|existing| normalize_mic_name(existing) == normalize_mic_name(name)) {
+        names.push(name.to_string());
+    }
+}
+
+fn host_mics(host: &cpal::Host) -> anyhow::Result<Vec<ListedMic>> {
     let default_name = host.default_input_device().and_then(|device| device.name().ok());
-    let mut mics = Vec::new();
-    for device in host.input_devices().context("couldn't list microphones")? {
+    let mut mics: Vec<ListedMic> = Vec::new();
+    for device in host.input_devices()? {
         let name = device.name().unwrap_or_else(|_| "Microphone".into());
         let is_default = default_name.as_ref() == Some(&name);
-        mics.push(MicInfo { name, is_default });
+        if let Some(existing) = mics.iter_mut().find(|mic| mic.name == name) {
+            existing.is_default |= is_default;
+            continue;
+        }
+        mics.push(ListedMic { name, is_default });
+    }
+    if !mics.is_empty() && mics.iter().all(|mic| !mic.is_default) {
+        mics[0].is_default = true;
     }
     Ok(mics)
 }
 
-struct CaptureReady {
-    device_note: Option<String>,
+struct OpenedMic {
+    active_name: String,
+    used_fallback: bool,
+    note: String,
 }
 
 pub fn start_recording(wanted: Option<&str>) -> anyhow::Result<RecordingSession> {
     let wanted = wanted.map(str::to_string);
-    let (ready_tx, ready_rx) = mpsc::channel::<anyhow::Result<CaptureReady>>();
+    let (ready_tx, ready_rx) = mpsc::channel::<anyhow::Result<OpenedMic>>();
     let (stop_tx, stop_rx) = mpsc::channel::<()>();
     let audio = Arc::new(Mutex::new(SharedAudio {
         interleaved: Vec::new(),
@@ -107,19 +287,14 @@ pub fn start_recording(wanted: Option<&str>) -> anyhow::Result<RecordingSession>
     let worker = thread::Builder::new()
         .name("cadence-audio".into())
         .spawn(move || {
-            let opened = open_input(wanted.as_deref(), &audio_thread, &stop_flag, &error_flag);
-            match opened {
-                Ok((stream, note)) => {
-                    if ready_tx.send(Ok(CaptureReady { device_note: note })).is_err() {
-                        return;
-                    }
-                    let _ = stop_rx.recv();
-                    drop(stream);
-                }
-                Err(err) => {
-                    let _ = ready_tx.send(Err(err));
-                }
-            }
+            capture_until_stop(
+                wanted.as_deref(),
+                &audio_thread,
+                &stop_flag,
+                &error_flag,
+                ready_tx,
+                stop_rx,
+            );
         })
         .context("couldn't start audio capture")?;
 
@@ -133,21 +308,132 @@ pub fn start_recording(wanted: Option<&str>) -> anyhow::Result<RecordingSession>
         stop,
         started: Instant::now(),
         error,
-        device_note: ready.device_note,
+        device_note: Some(ready.note),
+        active_name: ready.active_name,
+        used_fallback: ready.used_fallback,
     })
 }
 
-fn open_input(
+/// Record a short take. Used by the Windows self-test and returns as soon as
+/// the stream has been healthy long enough to prove the device opened.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn capture_for(preference: Option<&str>, duration: Duration) -> Result<CaptureReport, String> {
+    let session = start_recording(preference).map_err(|err| err.to_string())?;
+    let device_name = session.active_name.clone();
+    let used_fallback = session.used_fallback;
+    thread::sleep(duration);
+    let finished = session.finish()?;
+    Ok(CaptureReport {
+        device_name,
+        used_fallback,
+        sample_count: finished.interleaved.len(),
+        sample_rate: finished.sample_rate,
+        channels: finished.channels,
+    })
+}
+
+fn capture_until_stop(
     wanted: Option<&str>,
     audio: &Arc<Mutex<SharedAudio>>,
     stop: &Arc<AtomicBool>,
     error: &Arc<Mutex<Option<String>>>,
-) -> anyhow::Result<(cpal::Stream, Option<String>)> {
+    ready_tx: Sender<anyhow::Result<OpenedMic>>,
+    stop_rx: mpsc::Receiver<()>,
+) {
     let host = cpal::default_host();
-    let (device, device_note) = select_device(&host, wanted)?;
+    let devices = match host_mics(&host) {
+        Ok(devices) => devices,
+        Err(err) => {
+            let _ = ready_tx.send(Err(err));
+            return;
+        }
+    };
+    let order = open_order(&devices, wanted);
+    if order.is_empty() {
+        let _ = ready_tx.send(Err(anyhow!(
+            "No microphone is available. Plug one in and try again."
+        )));
+        return;
+    }
+    let mut failures = Vec::new();
+    for name in &order {
+        if let Ok(mut slot) = error.lock() {
+            *slot = None;
+        }
+        match open_named(&host, name, audio, stop, error) {
+            Ok(stream) => {
+                if let Err(err) = confirm_alive(error) {
+                    drop(stream);
+                    failures.push(format!("{name}: {err}"));
+                    continue;
+                }
+                let preference = trimmed(wanted);
+                let opened_preference = preference
+                    .as_deref()
+                    .is_some_and(|pref| normalize_mic_name(pref) == normalize_mic_name(name));
+                let skipped_first = order.first().map(String::as_str) != Some(name.as_str());
+                let used_fallback = match &preference {
+                    Some(_) => !opened_preference,
+                    None => skipped_first,
+                };
+                let note = usage_line(preference.as_deref(), name, used_fallback);
+                if ready_tx
+                    .send(Ok(OpenedMic {
+                        active_name: name.clone(),
+                        used_fallback,
+                        note,
+                    }))
+                    .is_err()
+                {
+                    drop(stream);
+                    return;
+                }
+                let _ = stop_rx.recv();
+                drop(stream);
+                return;
+            }
+            Err(err) => failures.push(format!("{name}: {err:#}")),
+        }
+    }
+    let mut message = String::from("Couldn't open a microphone.");
+    if !failures.is_empty() {
+        message.push(' ');
+        message.push_str(&failures.join(" "));
+    }
+    let _ = ready_tx.send(Err(anyhow!(message)));
+}
+
+fn confirm_alive(error: &Mutex<Option<String>>) -> Result<(), String> {
+    for _ in 0..9 {
+        thread::sleep(Duration::from_millis(20));
+        if let Some(err) = error.lock().ok().and_then(|slot| slot.clone()) {
+            return Err(err);
+        }
+    }
+    Ok(())
+}
+
+fn open_named(
+    host: &cpal::Host,
+    name: &str,
+    audio: &Arc<Mutex<SharedAudio>>,
+    stop: &Arc<AtomicBool>,
+    error: &Arc<Mutex<Option<String>>>,
+) -> anyhow::Result<cpal::Stream> {
+    let wanted = normalize_mic_name(name);
+    let device = host
+        .input_devices()?
+        .find(|device| {
+            device
+                .name()
+                .ok()
+                .map(|found| normalize_mic_name(&found) == wanted)
+                .unwrap_or(false)
+        })
+        .with_context(|| format!("microphone \"{name}\" disappeared"))?;
     let supported = device
         .default_input_config()
-        .context("the microphone has no default input format")?;
+        .with_context(|| format!("{name} has no default input format"))?;
     let channels = supported.channels();
     let sample_rate = supported.sample_rate().0;
     let sample_format = supported.sample_format();
@@ -155,6 +441,8 @@ fn open_input(
     if let Ok(mut buffer) = audio.lock() {
         buffer.channels = channels;
         buffer.sample_rate = sample_rate;
+        buffer.interleaved.clear();
+        buffer.last_rms = 0.0;
     }
     let stream = build_stream(
         &device,
@@ -164,8 +452,10 @@ fn open_input(
         Arc::clone(stop),
         Arc::clone(error),
     )?;
-    stream.play().context("couldn't start microphone capture")?;
-    Ok((stream, device_note))
+    stream
+        .play()
+        .with_context(|| format!("couldn't start {name}"))?;
+    Ok(stream)
 }
 
 impl RecordingSession {
@@ -326,29 +616,6 @@ fn rms(chunk: &[f32]) -> f32 {
         return 0.0;
     }
     (chunk.iter().map(|sample| sample * sample).sum::<f32>() / chunk.len() as f32).sqrt()
-}
-
-fn select_device(host: &cpal::Host, wanted: Option<&str>) -> anyhow::Result<(Device, Option<String>)> {
-    if let Some(name) = wanted.map(str::trim).filter(|name| !name.is_empty()) {
-        if let Some(device) = host.input_devices()?.find(|device| {
-            device.name().ok().as_deref() == Some(name)
-        }) {
-            return Ok((device, None));
-        }
-        let fallback = host
-            .default_input_device()
-            .context("No microphone is available")?;
-        return Ok((
-            fallback,
-            Some(format!(
-                "Saved microphone \"{name}\" isn't connected. Using the system default."
-            )),
-        ));
-    }
-    let device = host
-        .default_input_device()
-        .context("No microphone is available. Plug one in and try again.")?;
-    Ok((device, None))
 }
 
 fn build_stream(
@@ -541,5 +808,147 @@ mod tests {
         let wav = prepare_speech(&speech).unwrap();
         assert!(wav.len() > 44);
         assert_eq!(&wav[0..4], b"RIFF");
+    }
+
+    fn headset() -> ListedMic {
+        ListedMic {
+            name: "Jack Mic (2- Realtek(R) Audio)".into(),
+            is_default: false,
+        }
+    }
+
+    fn laptop() -> ListedMic {
+        ListedMic {
+            name: "Microphone Array".into(),
+            is_default: true,
+        }
+    }
+
+    #[test]
+    fn auto_follows_the_current_default() {
+        let unplugged = vec![laptop()];
+        let choice = resolve_microphone(&unplugged, None).unwrap();
+        assert_eq!(choice.active_name, "Microphone Array");
+        assert!(!choice.using_fallback);
+        assert!(choice.preference.is_none());
+
+        let replugged = vec![
+            ListedMic {
+                name: laptop().name,
+                is_default: false,
+            },
+            ListedMic {
+                name: "USB Studio Mic".into(),
+                is_default: true,
+            },
+        ];
+        let choice = resolve_microphone(&replugged, None).unwrap();
+        assert_eq!(choice.active_name, "USB Studio Mic");
+        assert!(!choice.using_fallback);
+    }
+
+    #[test]
+    fn missing_preference_uses_default_and_returns_when_replugged() {
+        let preferred = headset();
+        let preference = Some(preferred.name.as_str());
+        let gone = resolve_microphone(&[laptop()], preference).unwrap();
+        assert!(gone.using_fallback);
+        assert_eq!(gone.active_name, "Microphone Array");
+        assert_eq!(gone.preference.as_deref(), Some(headset().name.as_str()));
+        assert!(gone.note.unwrap().contains("isn't connected"));
+        assert_eq!(
+            usage_line(Some(preferred.name.as_str()), "Microphone Array", true),
+            "Using Microphone Array. Jack Mic (2- Realtek(R) Audio) isn't available."
+        );
+        assert_eq!(
+            usage_line(None, "Microphone Array", false),
+            "Microphone Array · system default"
+        );
+
+        let back = resolve_microphone(&[headset(), laptop()], preference).unwrap();
+        assert!(!back.using_fallback);
+        assert_eq!(back.active_name, headset().name);
+        assert!(back.note.is_none());
+    }
+
+    #[test]
+    fn name_match_ignores_case_and_extra_spaces() {
+        let devices = vec![headset(), laptop()];
+        let choice = resolve_microphone(&devices, Some("  jack mic (2- realtek(r) audio)  ")).unwrap();
+        assert_eq!(choice.active_name, headset().name);
+        assert!(!choice.using_fallback);
+    }
+
+    #[test]
+    fn open_order_tries_preference_then_default_then_others() {
+        let usb = ListedMic {
+            name: "USB Studio Mic".into(),
+            is_default: false,
+        };
+        let devices = vec![headset(), laptop(), usb.clone()];
+        assert_eq!(
+            open_order(&devices, Some(&headset().name)),
+            vec![headset().name, laptop().name, usb.name.clone()]
+        );
+        assert_eq!(
+            open_order(&devices, None),
+            vec![laptop().name, headset().name, usb.name.clone()]
+        );
+        assert_eq!(
+            open_order(&devices, Some("Not A Real Mic")),
+            vec![laptop().name, headset().name, usb.name]
+        );
+    }
+
+    #[test]
+    fn no_devices_is_an_error_and_does_not_invent_one() {
+        let err = resolve_microphone(&[], Some("Jack Mic")).unwrap_err();
+        assert!(err.contains("No microphone"));
+        assert!(open_order(&[], Some("Jack Mic")).is_empty());
+    }
+
+    #[test]
+    fn records_when_a_microphone_exists() {
+        match list_microphones() {
+            Ok(mics) if !mics.is_empty() => mics,
+            Ok(_) => {
+                eprintln!("SKIP records_when_a_microphone_exists: no input device");
+                return;
+            }
+            Err(err) => {
+                eprintln!("SKIP records_when_a_microphone_exists: {err}");
+                return;
+            }
+        };
+        let report = capture_for(None, Duration::from_millis(400)).expect("capture");
+        assert!(!report.device_name.is_empty());
+        assert!(report.sample_rate > 0);
+        assert!(report.channels > 0);
+        assert!(
+            report.sample_count > 0,
+            "the open microphone produced no samples ({})",
+            report.device_name
+        );
+    }
+
+    #[test]
+    fn missing_microphone_falls_back_when_a_device_exists() {
+        let mics = match list_microphones() {
+            Ok(mics) if !mics.is_empty() => mics,
+            _ => {
+                eprintln!("SKIP missing_microphone_falls_back_when_a_device_exists: no input device");
+                return;
+            }
+        };
+        let missing = "Cadence Missing Mic 9000";
+        let report = capture_for(Some(missing), Duration::from_millis(400)).expect("fallback capture");
+        assert!(report.used_fallback, "expected a fallback, opened {}", report.device_name);
+        assert_ne!(normalize_mic_name(&report.device_name), normalize_mic_name(missing));
+        assert!(
+            mics.iter().any(|mic| normalize_mic_name(&mic.name) == normalize_mic_name(&report.device_name)),
+            "fallback {} is not a listed device",
+            report.device_name
+        );
+        assert!(report.sample_count > 0);
     }
 }

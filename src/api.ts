@@ -4,6 +4,7 @@ import type {
   DictationEvent,
   HistoryEntry,
   MicInfo,
+  MicStatus,
   Settings,
 } from "./types";
 
@@ -27,6 +28,12 @@ export function emitLocalDictation(event: DictationEvent): void {
   for (const handler of localHandlers) handler(event);
 }
 
+export async function onMicStatus(handler: (status: MicStatus) => void): Promise<() => void> {
+  if (!inTauri()) return () => {};
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen<MicStatus>("mic-status", (event) => handler(event.payload));
+}
+
 export async function onDictation(handler: Handler): Promise<() => void> {
   if (!inTauri()) {
     localHandlers.add(handler);
@@ -43,6 +50,8 @@ export const api = {
   setApiKey: (key: string) => call<ApiKeyStatus>("set_api_key", { key }),
   clearApiKey: () => call<void>("clear_api_key"),
   listMicrophones: () => call<MicInfo[]>("list_microphones"),
+  getMicStatus: () => call<MicStatus>("get_mic_status"),
+  dismissError: () => call<void>("dismiss_error"),
   getHistory: () => call<HistoryEntry[]>("get_history"),
   deleteHistoryEntry: (id: string) => call<void>("delete_history_entry", { id }),
   clearHistory: () => call<void>("clear_history"),

@@ -179,3 +179,114 @@ fn type_text(text: &str) -> anyhow::Result<()> {
         .map_err(|err| anyhow!("input: {err}"))?;
     Ok(())
 }
+
+#[cfg(all(test, windows))]
+#[test]
+fn pastes_into_a_real_edit_control() {
+    use std::sync::mpsc;
+    use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
+    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
+    use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, DefWindowProcW, DispatchMessageW, GetForegroundWindow, GetMessageW,
+        GetWindowTextW, GetWindowThreadProcessId, PostMessageW, RegisterClassW, SetForegroundWindow,
+        ShowWindow, TranslateMessage, HMENU, MSG, SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE, WNDCLASSW,
+        WS_CHILD, WS_OVERLAPPEDWINDOW, WS_VISIBLE, WM_CLOSE,
+    };
+    use windows::core::{w, PCWSTR};
+
+    unsafe extern "system" fn paste_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+        DefWindowProcW(hwnd, msg, wparam, lparam)
+    }
+
+    let (tx, rx) = mpsc::channel::<(usize, usize)>();
+    let window = std::thread::spawn(move || unsafe {
+        let class_name: Vec<u16> = "CadencePasteTest\0".encode_utf16().collect();
+        let module = GetModuleHandleW(None).expect("module");
+        let instance = HINSTANCE(module.0);
+        let wc = WNDCLASSW {
+            style: Default::default(),
+            lpfnWndProc: Some(paste_wnd_proc),
+            cbClsExtra: 0,
+            cbWndExtra: 0,
+            hInstance: instance,
+            hIcon: Default::default(),
+            hCursor: Default::default(),
+            hbrBackground: Default::default(),
+            lpszMenuName: PCWSTR::null(),
+            lpszClassName: PCWSTR(class_name.as_ptr()),
+        };
+        let _atom = RegisterClassW(&wc);
+        let hwnd = CreateWindowExW(
+            WINDOW_EX_STYLE::default(),
+            PCWSTR(class_name.as_ptr()),
+            w!("Cadence paste"),
+            WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+            80,
+            80,
+            560,
+            220,
+            None,
+            None,
+            Some(instance),
+            None,
+        )
+        .expect("parent window");
+        let edit = CreateWindowExW(
+            WINDOW_EX_STYLE::default(),
+            w!("EDIT"),
+            w!(""),
+            WS_CHILD | WS_VISIBLE | WINDOW_STYLE(0x0080),
+            16,
+            16,
+            500,
+            32,
+            Some(hwnd),
+            None::<HMENU>,
+            Some(instance),
+            None,
+        )
+        .expect("edit control");
+        let _ = ShowWindow(hwnd, SW_SHOW);
+        let _ = SetForegroundWindow(hwnd);
+        let _ = SetFocus(Some(edit));
+        tx.send((hwnd.0 as usize, edit.0 as usize)).expect("send hwnd");
+        let mut message = MSG::default();
+        while GetMessageW(&mut message, None, 0, 0).0 != 0 {
+            let _ = TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
+    });
+
+    let (parent, edit) = rx.recv_timeout(std::time::Duration::from_secs(5)).expect("window opened");
+    let parent = HWND(parent as *mut core::ffi::c_void);
+    let edit = HWND(edit as *mut core::ffi::c_void);
+    unsafe {
+        let foreground = GetForegroundWindow();
+        let foreground_thread = GetWindowThreadProcessId(foreground, None);
+        let our_thread = GetCurrentThreadId();
+        if foreground_thread != 0 && foreground_thread != our_thread {
+            let _ = AttachThreadInput(foreground_thread, our_thread, true);
+        }
+        let _ = SetForegroundWindow(parent);
+        let _ = SetFocus(Some(edit));
+        if foreground_thread != 0 && foreground_thread != our_thread {
+            let _ = AttachThreadInput(foreground_thread, our_thread, false);
+        }
+    }
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    insert_text("cadence paste ok").expect("insert");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let mut buffer = [0u16; 256];
+    let length = unsafe { GetWindowTextW(edit, &mut buffer) };
+    let text = String::from_utf16_lossy(&buffer[..length.max(0) as usize]);
+    unsafe {
+        let _ = PostMessageW(Some(parent), WM_CLOSE, WPARAM(0), LPARAM(0));
+    }
+    let _ = window.join();
+    assert!(
+        text.to_lowercase().contains("cadence paste ok"),
+        "edit control contained {text:?}"
+    );
+}

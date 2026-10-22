@@ -43,6 +43,15 @@ export type AppInfo = {
   listenerRunning: boolean;
   listenerError: string | null;
   platform: string;
+  lastError: string | null;
+};
+
+export type MicStatus = {
+  preference: string | null;
+  activeName: string | null;
+  usingFallback: boolean;
+  message: string | null;
+  devices: MicInfo[];
 };
 
 export type DictationPhase = "idle" | "recording" | "transcribing" | "done" | "error";

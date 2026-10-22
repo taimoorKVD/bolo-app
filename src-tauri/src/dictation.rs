@@ -6,6 +6,7 @@
 use crate::audio::{self, RecordingSession};
 use crate::cleanup;
 use crate::credentials::SecretKey;
+use crate::hotkey::display;
 use crate::insert::{self, InsertMethod};
 use crate::logbuf::log_line;
 use crate::store::{self, HistoryEntry, Settings};
@@ -15,7 +16,7 @@ use serde::Serialize;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewWindow};
+use tauri::{AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, PhysicalSize, WebviewWindow};
 
 const MAX_RECORDING: Duration = Duration::from_secs(120);
 
@@ -48,6 +49,7 @@ pub struct AppState {
     engine: Mutex<Engine>,
     pub listener: ListenerControl,
     pub config_dir: std::path::PathBuf,
+    pub last_error: Mutex<Option<String>>,
 }
 
 impl AppState {
@@ -64,6 +66,7 @@ impl AppState {
             }),
             listener,
             config_dir,
+            last_error: Mutex::new(None),
         }
     }
 }
@@ -88,7 +91,11 @@ pub fn begin(app: &AppHandle) {
         engine.stop_requested = false;
         engine.generation
     };
+    *lock(&state.last_error) = None;
     let settings = lock(&state.settings).clone();
+    if let Some(tray) = app.tray_by_id("cadence") {
+        let _ = tray.set_tooltip(Some(format!("Cadence — hold {}", display(&settings.hotkey))));
+    }
     let session = match audio::start_recording(settings.microphone.as_deref()) {
         Ok(session) => session,
         Err(err) => {
@@ -101,6 +108,11 @@ pub fn begin(app: &AppHandle) {
     let stop = Arc::clone(&session.stop);
     let started = session.started;
     let note = session.device_note.clone();
+    if session.used_fallback {
+        if let Some(message) = &note {
+            log_line(&state.config_dir, "info", message);
+        }
+    }
     {
         let mut engine = lock(&state.engine);
         let cancelled = engine.stop_requested
@@ -317,7 +329,7 @@ async fn deliver(app: &AppHandle, outcome: Outcome, generation: u64) {
             level: 0.0,
         },
     );
-    schedule_hide(app.clone(), generation);
+    schedule_hide(app.clone(), generation, 1_600);
 }
 
 fn remember(app: &AppHandle, outcome: &Outcome) {
@@ -340,6 +352,10 @@ fn remember(app: &AppHandle, outcome: &Outcome) {
 fn fail(app: &AppHandle, message: &str) {
     let state = app.state::<AppState>();
     log_line(&state.config_dir, "error", message);
+    *lock(&state.last_error) = Some(message.to_string());
+    if let Some(tray) = app.tray_by_id("cadence") {
+        let _ = tray.set_tooltip(Some(format!("Cadence — {message}")));
+    }
     let generation = lock(&state.engine).generation;
     publish(
         app,
@@ -350,12 +366,12 @@ fn fail(app: &AppHandle, message: &str) {
             level: 0.0,
         },
     );
-    schedule_hide(app.clone(), generation);
+    schedule_hide(app.clone(), generation, 8_000);
 }
 
-fn schedule_hide(app: AppHandle, generation: u64) {
+fn schedule_hide(app: AppHandle, generation: u64, delay_ms: u64) {
     std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(1600));
+        std::thread::sleep(Duration::from_millis(delay_ms));
         let state = app.state::<AppState>();
         let still_idle = {
             let engine = lock(&state.engine);
@@ -392,6 +408,12 @@ fn publish(app: &AppHandle, event: &DictationEvent) {
         let _ = overlay.hide();
         return;
     }
+    let (width, height) = if event.phase == "error" {
+        (460.0, 210.0)
+    } else {
+        (420.0, 112.0)
+    };
+    let _ = overlay.set_size(LogicalSize::new(width, height));
     position_overlay(&overlay);
     let _ = overlay.show();
 }

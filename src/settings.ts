@@ -1,4 +1,4 @@
-import { api, onDictation } from "./api";
+import { api, onDictation, onMicStatus } from "./api";
 import { formatDuration, formatHotkey, formatWhen, modelLabel } from "./format";
 import type {
   ApiKeyStatus,
@@ -52,6 +52,7 @@ type Draft = {
   statusTone: "muted" | "good" | "bad";
   capturing: boolean;
   live: DictationEvent | null;
+  lastError: string | null;
 };
 
 export async function mountSettings(root: HTMLElement): Promise<void> {
@@ -76,6 +77,7 @@ export async function mountSettings(root: HTMLElement): Promise<void> {
       statusTone: "muted",
       capturing: false,
       live: null,
+      lastError: info.lastError,
     });
   } catch (error) {
     root.replaceChildren(errorShell(messageOf(error), () => void mountSettings(root)));
@@ -95,6 +97,7 @@ function render(root: HTMLElement, draft: Draft): void {
   });
 
   form.append(
+    alertBanner(draft),
     liveBanner(draft),
     listenerBanner(draft),
     apiSection(draft),
@@ -111,13 +114,21 @@ function render(root: HTMLElement, draft: Draft): void {
 
   void onDictation((event) => {
     draft.live = event.phase === "idle" ? null : event;
+    if (event.phase === "error") draft.lastError = event.message;
+    if (event.phase === "recording") draft.lastError = null;
     const banner = form.querySelector<HTMLElement>("[data-live]");
     if (banner) banner.replaceWith(liveBanner(draft));
+    const alert = form.querySelector<HTMLElement>("[data-alert]");
+    if (alert) alert.replaceWith(alertBanner(draft));
     const test = document.getElementById("test-record");
     if (test) test.textContent = event.phase === "recording" ? "Stop test" : "Record a test";
+    if (event.phase === "recording") refreshRail(draft);
     if (event.phase === "done" || event.phase === "idle") {
       void refreshHistory(draft);
     }
+  });
+  void onMicStatus((status) => {
+    applyDevices(draft, status.devices);
   });
   window.addEventListener("cadence-history", () => void refreshHistory(draft));
 }
@@ -137,7 +148,7 @@ function buildRail(draft: Draft): HTMLElement {
   list.append(
     statusRow("API key", draft.keyStatus.configured ? draft.keyStatus.hint ?? "Saved" : "Not set"),
     statusRow("Hotkey", formatHotkey(draft.settings.hotkey)),
-    statusRow("Microphone", draft.settings.microphone ?? "System default"),
+    statusRow("In use", micSummary(draft).value),
   );
   rail.append(list);
   rail.append(
@@ -186,6 +197,24 @@ function liveBanner(draft: Draft): HTMLElement {
   return banner;
 }
 
+function alertBanner(draft: Draft): HTMLElement {
+  const banner = el("div", "banner bad alert");
+  banner.dataset.alert = "true";
+  if (!draft.lastError) {
+    banner.hidden = true;
+    return banner;
+  }
+  const copy = el("p", "", draft.lastError);
+  const dismiss = button("Dismiss", "text");
+  dismiss.addEventListener("click", () => {
+    draft.lastError = null;
+    banner.replaceWith(alertBanner(draft));
+    void api.dismissError();
+  });
+  banner.append(copy, dismiss);
+  return banner;
+}
+
 function listenerBanner(draft: Draft): HTMLElement {
   const banner = el("div", "banner");
   if (draft.info.listenerRunning) {
@@ -210,11 +239,13 @@ function apiSection(draft: Draft): HTMLElement {
     ? `Saved ${draft.keyStatus.hint ?? ""}. Paste a new key to replace it.`
     : "gsk_…";
   input.setAttribute("aria-label", "Groq API key");
+  input.dataset.apiKey = "true";
   const save = button("Save key", "primary");
   const remove = button("Remove", "ghost");
   remove.disabled = !draft.keyStatus.configured;
   const note = el("p", "field-note");
   note.textContent = keyNote(draft.keyStatus);
+  if (draft.keyStatus.error) note.classList.add("bad");
   save.addEventListener("click", () => {
     void (async () => {
       save.disabled = true;
@@ -395,39 +426,30 @@ function startCapture(
 }
 
 function micSection(draft: Draft): HTMLElement {
-  const section = sectionEl("03", "Microphone", "Cadence records from the moment you press the hotkey until you release it.");
+  const section = sectionEl(
+    "03",
+    "Microphone",
+    "System default (auto) follows whichever microphone Windows is using. Pick one to prefer it — if you unplug it, Cadence uses the default and switches back when it returns.",
+  );
   const select = document.createElement("select");
   select.setAttribute("aria-label", "Microphone");
-  const def = document.createElement("option");
-  def.value = "";
-  def.textContent = "System default";
-  select.append(def);
-  for (const mic of draft.mics) {
-    const option = document.createElement("option");
-    option.value = mic.name;
-    option.textContent = mic.isDefault ? `${mic.name} (system default)` : mic.name;
-    select.append(option);
-  }
-  select.value = draft.settings.microphone ?? "";
+  select.dataset.micSelect = "true";
+  fillMicOptions(select, draft);
   select.addEventListener("change", () => {
     draft.settings.microphone = select.value || null;
     markDirty(draft);
+    const note = section.querySelector<HTMLElement>("[data-mic-note]");
+    if (note) note.textContent = micSummary(draft).note;
     refreshRail(draft);
   });
   const refresh = button("Refresh list", "text");
-  const note = el("p", "field-note");
-  if (draft.mics.length === 0) {
-    note.textContent = "No microphones reported yet. Plug one in and refresh.";
-  }
+  const note = el("p", "field-note", micSummary(draft).note);
+  note.dataset.micNote = "true";
   refresh.addEventListener("click", () => {
     void (async () => {
       try {
-        draft.mics = await api.listMicrophones();
-        const parent = section.parentElement;
-        if (parent) {
-          const replacement = micSection(draft);
-          section.replaceWith(replacement);
-        }
+        const status = await api.getMicStatus();
+        applyDevices(draft, status.devices);
       } catch (error) {
         note.textContent = messageOf(error);
         note.className = "field-note bad";
@@ -436,6 +458,79 @@ function micSection(draft: Draft): HTMLElement {
   });
   section.append(select, refresh, note);
   return section;
+}
+
+function fillMicOptions(select: HTMLSelectElement, draft: Draft): void {
+  const current = draft.settings.microphone ?? "";
+  select.replaceChildren();
+  const auto = document.createElement("option");
+  auto.value = "";
+  auto.textContent = "System default (auto)";
+  select.append(auto);
+  for (const mic of draft.mics) {
+    const option = document.createElement("option");
+    option.value = mic.name;
+    option.textContent = mic.isDefault ? `${mic.name} (system default)` : mic.name;
+    select.append(option);
+  }
+  const match = current ? draft.mics.find((mic) => normMic(mic.name) === normMic(current)) : undefined;
+  if (current && !match) {
+    const missing = document.createElement("option");
+    missing.value = current;
+    missing.textContent = `${current} (not connected)`;
+    select.append(missing);
+  }
+  select.value = match ? match.name : current;
+}
+
+function applyDevices(draft: Draft, devices: MicInfo[]): void {
+  draft.mics = devices;
+  const select = document.querySelector<HTMLSelectElement>("[data-mic-select]");
+  if (select) fillMicOptions(select, draft);
+  const note = document.querySelector<HTMLElement>("[data-mic-note]");
+  if (note) {
+    note.textContent = micSummary(draft).note;
+    note.className = "field-note";
+  }
+  refreshRail(draft);
+}
+
+function normMic(name: string): string {
+  return name.trim().toLowerCase().split(/\s+/).join(" ");
+}
+
+function micSummary(draft: Draft): { value: string; note: string } {
+  const pref = draft.settings.microphone;
+  const def = draft.mics.find((mic) => mic.isDefault) ?? draft.mics[0];
+  if (!pref) {
+    if (!def) {
+      return {
+        value: "No microphone",
+        note: "No microphone is connected. Plug one in and Cadence will use it automatically.",
+      };
+    }
+    return {
+      value: def.name,
+      note: `In use: ${def.name} (system default). This follows Windows when you plug or unplug a headset.`,
+    };
+  }
+  const match = draft.mics.find((mic) => normMic(mic.name) === normMic(pref));
+  if (match) {
+    return {
+      value: match.name,
+      note: `In use: ${match.name}. If you unplug it, Cadence uses the system default and switches back when it returns.`,
+    };
+  }
+  if (!def) {
+    return {
+      value: "Unavailable",
+      note: `${pref} isn't connected, and no other microphone is available.`,
+    };
+  }
+  return {
+    value: def.name,
+    note: `${pref} isn't connected. Using ${def.name} until it's back.`,
+  };
 }
 
 function modelSection(draft: Draft): HTMLElement {
@@ -657,6 +752,17 @@ async function save(draft: Draft, form: HTMLFormElement): Promise<void> {
     buttonEl.textContent = "Saving…";
   }
   try {
+    const keyInput = form.querySelector<HTMLInputElement>("[data-api-key]");
+    if (keyInput && keyInput.value.trim()) {
+      draft.keyStatus = await api.setApiKey(keyInput.value);
+      keyInput.value = "";
+      const keyNoteEl = form.querySelector<HTMLElement>(".key-row + .field-note");
+      if (keyNoteEl) {
+        keyNoteEl.textContent = `Saved in the OS credential store ${draft.keyStatus.hint ?? ""}.`;
+        keyNoteEl.className = "field-note good";
+      }
+      refreshRail(draft);
+    }
     await api.saveSettings(draft.settings);
     draft.dirty = false;
     draft.settings = await api.getSettings();

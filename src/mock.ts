@@ -7,9 +7,15 @@ import type {
   Settings,
 } from "./types";
 
+function previewParam(name: string): string | null {
+  if (typeof location === "undefined") return null;
+  const value = new URLSearchParams(location.search).get(name);
+  return value && value.trim() ? value : null;
+}
+
 const settings: Settings = {
   hotkey: { ctrl: true, alt: false, shift: false, win: true, key: null },
-  microphone: null,
+  microphone: previewParam("mic"),
   model: "whisper-large-v3-turbo",
   cleanupEnabled: false,
   language: "auto",
@@ -92,7 +98,18 @@ export async function mockInvoke<T>(command: string, args?: Record<string, unkno
         listenerRunning: false,
         listenerError: "Global hook preview is Windows-only in this browser session.",
         platform: "linux",
+        lastError: previewParam("error"),
       } satisfies AppInfo as T;
+    case "get_mic_status":
+      return {
+        preference: settings.microphone,
+        activeName: settings.microphone ?? "Microphone Array",
+        usingFallback: settings.microphone != null && !mics.some((mic) => mic.name === settings.microphone),
+        message: null,
+        devices: structuredClone(mics),
+      } as T;
+    case "dismiss_error":
+      return undefined as T;
     case "copy_text":
       await navigator.clipboard.writeText(String(args?.text ?? ""));
       return undefined as T;

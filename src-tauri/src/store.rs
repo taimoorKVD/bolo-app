@@ -211,8 +211,11 @@ mod tests {
     fn missing_fields_use_defaults() {
         let parsed: Settings = serde_json::from_str("{}").unwrap();
         assert_eq!(parsed, Settings::default());
+        assert!(parsed.microphone.is_none());
         assert!(!parsed.cleanup_enabled);
         assert_eq!(parsed.model, WHISPER_TURBO);
+        let blank: Settings = serde_json::from_str(r#"{"microphone":"   "}"#).unwrap();
+        assert!(normalize_settings(blank).microphone.is_none());
     }
 
     #[test]

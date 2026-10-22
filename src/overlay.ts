@@ -81,7 +81,12 @@ function demoEvent(demo: string | null): DictationEvent {
   if (demo === "done") {
     return { phase: "done", message: "Inserted", elapsedMs: 1800, level: 0 };
   }
-  return { phase: "recording", message: null, elapsedMs: 4200, level: 0.62 };
+  return {
+    phase: "recording",
+    message: "Microphone Array · system default",
+    elapsedMs: 4200,
+    level: 0.62,
+  };
 }
 
 function demoSwitcher(apply: (event: DictationEvent) => void): HTMLElement {
