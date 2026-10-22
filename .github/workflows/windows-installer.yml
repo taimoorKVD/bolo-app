@@ -36,11 +36,17 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
       - uses: dtolnay/rust-toolchain@stable
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
-      - name: Microphone, credentials, paste, and Groq
+      - name: Install frontend dependencies
+        run: npm ci
+      - name: Microphone, credentials, paste, Groq, and startup smoke
         run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/selftest.ps1
         env:
           # Optional. When this repository secret is absent the live Groq

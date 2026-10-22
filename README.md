@@ -74,7 +74,9 @@ On Windows, from the repo root:
 npm run test:windows
 ```
 
-That runs `scripts/selftest.ps1`, which prints a pass/fail line for microphone selection and a real capture (skipped when the machine has no input device), the Credential Manager save/read round trip, a paste into a hidden edit control, the Groq transcription and Llama cleanup calls, and the rest of the unit tests. Each group has a time limit. If one hangs, the script stops that process and still runs the groups after it.
+That runs `scripts/selftest.ps1`, which prints a pass/fail line for microphone selection and a real capture (skipped when the machine has no input device), the Credential Manager save/read round trip, a paste into a hidden edit control, the Groq transcription and Llama cleanup calls, the rest of the unit tests, and a startup smoke test. Each group has a time limit. If one hangs, the script stops that process and still runs the groups after it.
+
+The smoke test builds the release app (`npm run build`, then `cargo build --release`) and launches `cadence.exe` with `CADENCE_SMOKE=1`. The settings window, created only after app state is registered, invokes `get_settings` the same way the UI does. The test fails if that command errors, if it does not return, or if a UTF-8 BOM settings file (PowerShell `ConvertTo-Json` shape, microphone null, cleanup on) is not what comes back. Quit Cadence first if it is already running; a second instance exits without running the check.
 
 The paste check does not steal foreground focus and does not send Ctrl+V. It writes the clipboard, then sends `WM_PASTE` to a real Edit control — the message that control handles for Ctrl+V — and fails within a few seconds if any step stalls.
 
@@ -135,6 +137,7 @@ Not verified on a real Windows machine:
 - Ctrl+V restoration timing in Notepad, browsers, and Electron apps
 - The MSI/NSIS installer, SmartScreen, and the startup registry entry
 - A live Groq transcription, Llama cleanup call, or the latency budget (no `GROQ_API_KEY` in this environment)
+- The release-app startup smoke test (`get_settings` from the real settings window). It is part of `scripts/selftest.ps1` and the Windows CI job; this machine is Linux, so the exe was not launched here
 
 ## Next steps on Windows
 

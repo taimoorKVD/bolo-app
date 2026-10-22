@@ -60,4 +60,6 @@ export const api = {
   getAppInfo: () => call<AppInfo>("get_app_info"),
   copyText: (text: string) => call<void>("copy_text", { text }),
   openGroqKeys: () => call<void>("open_groq_keys"),
+  smokeFinished: (ok: boolean, detail: string | null) =>
+    call<void>("smoke_finished", { ok, detail }),
 };

@@ -92,6 +92,136 @@ function Invoke-LimitedCargo {
     return $false
 }
 
+function Invoke-StartupSmoke {
+    $name = "Startup smoke: release app get_settings"
+    $limitSec = 1500
+    Write-Host ""
+    Write-Host "---- $name (limit ${limitSec}s) ----"
+
+    $npm = Get-Command npm.cmd -ErrorAction SilentlyContinue
+    if (-not $npm) { $npm = Get-Command npm -ErrorAction SilentlyContinue }
+    if (-not $npm) {
+        Write-Host "FAIL  $name"
+        Write-Host "npm was not found on PATH."
+        return $false
+    }
+    $cargo = Get-Command cargo.exe -ErrorAction SilentlyContinue
+    if (-not $cargo) { $cargo = Get-Command cargo -ErrorAction SilentlyContinue }
+    if (-not $cargo) {
+        Write-Host "FAIL  $name"
+        Write-Host "cargo was not found on PATH."
+        return $false
+    }
+
+    $started = Get-Date
+    & $npm.Source run build
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "FAIL  $name"
+        Write-Host "npm run build failed."
+        return $false
+    }
+    & $cargo.Source build --release --manifest-path src-tauri/Cargo.toml
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "FAIL  $name"
+        Write-Host "cargo build --release failed."
+        return $false
+    }
+
+    $exe = Join-Path $root "src-tauri\target\release\cadence.exe"
+    if (-not (Test-Path $exe)) {
+        Write-Host "FAIL  $name"
+        Write-Host "Missing $exe"
+        return $false
+    }
+
+    $work = Join-Path ([System.IO.Path]::GetTempPath()) ("cadence-smoke-" + [guid]::NewGuid().ToString("n"))
+    New-Item -ItemType Directory -Path $work | Out-Null
+    $result = Join-Path $work "result.txt"
+    $pretty = @'
+{
+    "hotkey": {
+        "ctrl": true,
+        "alt": false,
+        "shift": false,
+        "win": true,
+        "key": null
+    },
+    "microphone": null,
+    "model": "whisper-large-v3-turbo",
+    "cleanupEnabled": true,
+    "language": "auto",
+    "dictionary": [],
+    "launchAtStartup": false
+}
+'@
+    $utf8Bom = New-Object System.Text.UTF8Encoding $true
+    [System.IO.File]::WriteAllText((Join-Path $work "settings.json"), $pretty.Trim(), $utf8Bom)
+
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $exe
+    $psi.WorkingDirectory = $root
+    $psi.UseShellExecute = $false
+    $psi.EnvironmentVariables["CADENCE_SMOKE"] = "1"
+    $psi.EnvironmentVariables["CADENCE_SMOKE_RESULT"] = $result
+    $psi.EnvironmentVariables["CADENCE_CONFIG_DIR"] = $work
+    $proc = New-Object System.Diagnostics.Process
+    $proc.StartInfo = $psi
+    try {
+        [void]$proc.Start()
+    } catch {
+        Write-Host "FAIL  $name"
+        Write-Host "Could not start ${exe}: $($_.Exception.Message)"
+        return $false
+    }
+
+    $elapsed = [int]((Get-Date) - $started).TotalSeconds
+    $runLimit = [Math]::Max(90, $limitSec - $elapsed)
+    if (-not $proc.WaitForExit($runLimit * 1000)) {
+        Write-Host "FAIL  $name"
+        Write-Host "The release app did not report get_settings within ${runLimit}s."
+        & taskkill.exe /F /T /PID $proc.Id 2>&1 | ForEach-Object { Write-Host $_ }
+        try { $proc.WaitForExit(10000) | Out-Null } catch {}
+        return $false
+    }
+
+    if (-not (Test-Path $result)) {
+        Write-Host "FAIL  $name"
+        Write-Host "No smoke result (exit $($proc.ExitCode)). Cadence may already be running, or the settings page never invoked get_settings."
+        return $false
+    }
+    $raw = [System.IO.File]::ReadAllText($result).Trim()
+    if (-not $raw.StartsWith("OK ")) {
+        Write-Host "FAIL  $name"
+        Write-Host $raw
+        return $false
+    }
+    try {
+        $settings = $raw.Substring(3) | ConvertFrom-Json
+    } catch {
+        Write-Host "FAIL  $name"
+        Write-Host "get_settings did not return JSON: $raw"
+        return $false
+    }
+    if ($settings.cleanupEnabled -ne $true -or $settings.model -ne "whisper-large-v3-turbo") {
+        Write-Host "FAIL  $name"
+        Write-Host "Unexpected settings: $raw"
+        return $false
+    }
+    if ($null -ne $settings.microphone) {
+        Write-Host "FAIL  $name"
+        Write-Host "microphone should be null: $raw"
+        return $false
+    }
+    if (-not $settings.hotkey.ctrl -or -not $settings.hotkey.win) {
+        Write-Host "FAIL  $name"
+        Write-Host "hotkey was not Ctrl+Win: $raw"
+        return $false
+    }
+    Write-Host "PASS  $name"
+    Write-Host "get_settings $($raw.Substring(3))"
+    return $true
+}
+
 $passed = @()
 $failed = @()
 
@@ -103,6 +233,10 @@ foreach ($step in $steps) {
         $failed += $step.Name
     }
 }
+
+$smokeName = "Startup smoke: release app get_settings"
+$smokeOk = Invoke-StartupSmoke
+if ($smokeOk) { $passed += $smokeName } else { $failed += $smokeName }
 
 Write-Host ""
 Write-Host "========"

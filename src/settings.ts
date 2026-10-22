@@ -55,7 +55,11 @@ type Draft = {
   lastError: string | null;
 };
 
-export async function mountSettings(root: HTMLElement): Promise<void> {
+export type SettingsLoad =
+  | { ok: true; detail: string }
+  | { ok: false; error: string };
+
+export async function mountSettings(root: HTMLElement): Promise<SettingsLoad> {
   root.replaceChildren(loadingShell());
   try {
     const [settings, keyStatus, mics, history, info] = await Promise.all([
@@ -79,8 +83,11 @@ export async function mountSettings(root: HTMLElement): Promise<void> {
       live: null,
       lastError: info.lastError,
     });
+    return { ok: true, detail: JSON.stringify(settings) };
   } catch (error) {
-    root.replaceChildren(errorShell(messageOf(error), () => void mountSettings(root)));
+    const message = messageOf(error);
+    root.replaceChildren(errorShell(message, () => void mountSettings(root)));
+    return { ok: false, error: message };
   }
 }
 

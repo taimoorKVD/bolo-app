@@ -57,7 +57,8 @@ pub fn run() {
             dismiss_error,
             get_mic_status,
             copy_text,
-            open_groq_keys
+            open_groq_keys,
+            smoke_finished
         ])
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
@@ -69,10 +70,13 @@ pub fn run() {
             }
         })
         .setup(|app| {
-            let dir = app
-                .path()
-                .app_config_dir()
-                .unwrap_or_else(|_| std::env::temp_dir().join("cadence"));
+            // Windows are created here, not from tauri.conf.json (`create: false`).
+            // Tauri otherwise builds them before this hook, and a release WebView2
+            // loads the bundled page and invokes get_settings before manage().
+            // A setup error then aborts the process with state still missing, so
+            // this hook always returns Ok once state is registered.
+            let smoke = std::env::var("CADENCE_SMOKE").ok().as_deref() == Some("1");
+            let dir = config_dir(app);
             if let Err(err) = std::fs::create_dir_all(&dir) {
                 eprintln!("config directory: {err}");
             }
@@ -81,19 +85,30 @@ pub fn run() {
             let history = store::load_history(&dir);
             let state = AppState::new(settings.clone(), history, dir.clone());
             let listener = state.listener.clone();
-            app.manage(state);
+            if !app.manage(state) {
+                logbuf::log_line(&dir, "error", "app state was already registered");
+            }
+            if app.try_state::<AppState>().is_none() {
+                logbuf::log_line(&dir, "error", "app state is not visible after manage()");
+            }
+
+            if let Err(err) = create_windows(app, smoke) {
+                logbuf::log_line(&dir, "error", &format!("windows: {err}"));
+            }
 
             let (tx, rx) = mpsc::channel::<HotkeyEdge>();
             listener::spawn(listener, tx);
             let handle = app.handle().clone();
-            std::thread::Builder::new()
+            if let Err(err) = std::thread::Builder::new()
                 .name("cadence-dictation".into())
                 .spawn(move || {
                     while let Ok(edge) = rx.recv() {
                         dictation::hotkey(&handle, edge);
                     }
                 })
-                .map_err(|err| format!("couldn't start dictation: {err}"))?;
+            {
+                logbuf::log_line(&dir, "error", &format!("couldn't start dictation: {err}"));
+            }
             let prewarm_dir = dir.clone();
             tauri::async_runtime::spawn(async move {
                 transcribe::prewarm(&prewarm_dir).await;
@@ -115,7 +130,7 @@ pub fn run() {
                 logbuf::log_line(&dir, "error", &format!("startup setting: {err}"));
             }
             let needs_key = !credentials::status().configured;
-            if needs_key || !tray_ok {
+            if smoke || needs_key || !tray_ok {
                 show_settings(app.handle());
             }
             logbuf::log_line(
@@ -128,6 +143,34 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running Cadence");
+}
+
+fn config_dir(app: &tauri::App) -> std::path::PathBuf {
+    if let Some(dir) = std::env::var_os("CADENCE_CONFIG_DIR") {
+        let dir = std::path::PathBuf::from(dir);
+        if !dir.as_os_str().is_empty() {
+            return dir;
+        }
+    }
+    app.path()
+        .app_config_dir()
+        .unwrap_or_else(|_| std::env::temp_dir().join("cadence"))
+}
+
+fn create_windows(app: &tauri::App, smoke: bool) -> Result<(), String> {
+    let configs = app.config().app.windows.clone();
+    for config in configs {
+        if app.get_webview_window(&config.label).is_some() {
+            continue;
+        }
+        let mut builder = tauri::WebviewWindowBuilder::from_config(app.handle(), &config)
+            .map_err(|err| err.to_string())?;
+        if smoke && config.label == "settings" {
+            builder = builder.initialization_script("window.__CADENCE_SMOKE__ = true;");
+        }
+        builder.build().map_err(|err| err.to_string())?;
+    }
+    Ok(())
 }
 
 fn setup_tray(app: &tauri::AppHandle, hotkey: &hotkey::Hotkey) -> tauri::Result<()> {
@@ -356,4 +399,22 @@ fn copy_text(text: String) -> Result<(), String> {
 #[tauri::command]
 fn open_groq_keys() -> Result<(), String> {
     open::that("https://console.groq.com/keys").map_err(|err| err.to_string())
+}
+
+/// Used by the Windows startup smoke test. Ignored unless CADENCE_SMOKE=1,
+/// so a page cannot exit the normal app by calling it.
+#[tauri::command]
+fn smoke_finished(app: tauri::AppHandle, ok: bool, detail: Option<String>) {
+    if std::env::var("CADENCE_SMOKE").ok().as_deref() != Some("1") {
+        return;
+    }
+    if let Some(path) = std::env::var_os("CADENCE_SMOKE_RESULT") {
+        let line = if ok {
+            format!("OK {}\n", detail.unwrap_or_default())
+        } else {
+            format!("FAIL {}\n", detail.unwrap_or_default().replace(['\r', '\n'], " "))
+        };
+        let _ = std::fs::write(path, line);
+    }
+    app.exit(if ok { 0 } else { 1 });
 }

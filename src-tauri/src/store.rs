@@ -129,7 +129,7 @@ pub fn load_settings(dir: &Path) -> Settings {
     let Ok(bytes) = fs::read(&path) else {
         return Settings::default();
     };
-    match serde_json::from_slice::<Settings>(&bytes) {
+    match parse_json(&bytes) {
         Ok(settings) => normalize_settings(settings),
         Err(err) => {
             crate::logbuf::log_line(dir, "error", &format!("settings file ignored: {err}"));
@@ -149,7 +149,32 @@ pub fn load_history(dir: &Path) -> Vec<HistoryEntry> {
     let Ok(bytes) = fs::read(history_path(dir)) else {
         return Vec::new();
     };
-    serde_json::from_slice::<Vec<HistoryEntry>>(&bytes).unwrap_or_default()
+    parse_json::<Vec<HistoryEntry>>(&bytes).unwrap_or_default()
+}
+
+/// PowerShell 5.1 writes JSON as UTF-8 with a BOM, or as UTF-16 LE. Either
+/// prefix would make serde reject an otherwise valid settings file.
+fn parse_json<T: for<'de> Deserialize<'de>>(bytes: &[u8]) -> Result<T, serde_json::Error> {
+    if let Some(rest) = bytes.strip_prefix(b"\xEF\xBB\xBF") {
+        return serde_json::from_slice(rest);
+    }
+    if let Some(rest) = bytes.strip_prefix(&[0xFF, 0xFE]) {
+        let units: Vec<u16> = rest
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect();
+        let text = String::from_utf16_lossy(&units);
+        return serde_json::from_str(&text);
+    }
+    if let Some(rest) = bytes.strip_prefix(&[0xFE, 0xFF]) {
+        let units: Vec<u16> = rest
+            .chunks_exact(2)
+            .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
+            .collect();
+        let text = String::from_utf16_lossy(&units);
+        return serde_json::from_str(&text);
+    }
+    serde_json::from_slice(bytes)
 }
 
 pub fn push_history(entries: &mut Vec<HistoryEntry>, mut entry: HistoryEntry) {
@@ -253,6 +278,41 @@ mod tests {
         assert_eq!(entries.len(), 50);
         assert_eq!(entries[0].id, "59");
         assert_eq!(entries.last().unwrap().id, "10");
+    }
+
+    #[test]
+    fn powershell_bom_and_indentation_still_parse() {
+        let pretty = r#"{
+    "hotkey": {
+        "ctrl": true,
+        "alt": false,
+        "shift": false,
+        "win": true,
+        "key": null
+    },
+    "microphone": null,
+    "model": "whisper-large-v3-turbo",
+    "cleanupEnabled": true,
+    "language": "auto",
+    "dictionary": [],
+    "launchAtStartup": true
+}"#;
+        let mut utf8_bom = vec![0xEF, 0xBB, 0xBF];
+        utf8_bom.extend_from_slice(pretty.as_bytes());
+        let parsed: Settings = parse_json(&utf8_bom).unwrap();
+        let parsed = normalize_settings(parsed);
+        assert!(parsed.microphone.is_none());
+        assert!(parsed.cleanup_enabled);
+        assert!(parsed.launch_at_startup);
+        assert_eq!(parsed.model, WHISPER_TURBO);
+        assert!(parsed.hotkey.ctrl && parsed.hotkey.win && parsed.hotkey.key.is_none());
+
+        let mut utf16 = vec![0xFF, 0xFE];
+        for unit in pretty.encode_utf16() {
+            utf16.extend_from_slice(&unit.to_le_bytes());
+        }
+        let wide: Settings = parse_json(&utf16).unwrap();
+        assert!(normalize_settings(wide).cleanup_enabled);
     }
 
     #[test]
