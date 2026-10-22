@@ -64,6 +64,15 @@ const NAV: Array<[SectionId, string, string]> = [
   ["about", "About", "Bolo.com"],
 ];
 
+function normalizeSettings(settings: Settings): Settings {
+  return {
+    ...settings,
+    historyEnabled: settings.historyEnabled !== false,
+    offlineModel: settings.offlineModel || "base.en",
+    pasteHotkey: settings.pasteHotkey ?? { ctrl: true, alt: false, shift: false, win: true, key: "v" },
+  };
+}
+
 type Draft = {
   settings: Settings;
   keyStatus: ApiKeyStatus;
@@ -76,6 +85,7 @@ type Draft = {
   statusTone: "muted" | "good" | "bad";
   capturing: boolean;
   live: DictationEvent | null;
+  lastEngine: string;
   lastError: string | null;
   section: SectionId;
 };
@@ -95,7 +105,7 @@ export async function mountSettings(root: HTMLElement): Promise<SettingsLoad> {
       api.getAppInfo(),
     ]);
     render(root, {
-      settings: { ...settings, historyEnabled: settings.historyEnabled !== false },
+      settings: normalizeSettings(settings),
       keyStatus,
       mics,
       history,
@@ -110,6 +120,7 @@ export async function mountSettings(root: HTMLElement): Promise<SettingsLoad> {
       statusTone: "muted",
       capturing: false,
       live: null,
+      lastEngine: "Groq",
       lastError: info.lastError,
       section: "general",
     });
@@ -160,12 +171,17 @@ function render(root: HTMLElement, draft: Draft): void {
       const message = visibleMessage(event.message);
       if (message) draft.lastError = message;
     }
-    if (event.phase === "recording") draft.lastError = null;
+    if (event.phase === "recording" || event.phase === "arming") draft.lastError = null;
+    if (event.engine?.trim()) draft.lastEngine = event.engine.trim();
     const banner = form.querySelector<HTMLElement>("[data-live]");
     if (banner) banner.replaceWith(liveBanner(draft));
     placeAlert(form, draft);
-    const test = document.getElementById("test-record");
-    if (test) test.textContent = event.phase === "recording" ? "Stop test" : "Record a test";
+    const test = document.getElementById("test-record") as HTMLButtonElement | null;
+    if (test) {
+      test.textContent =
+        event.phase === "recording" ? "Stop test" : event.phase === "arming" ? "Starting…" : "Record a test";
+      test.disabled = event.phase === "arming" || event.phase === "transcribing" || event.phase === "inserting";
+    }
     if (event.phase === "done" || event.phase === "idle") void refreshHistory(draft);
     refreshPills(draft);
   });
@@ -215,6 +231,7 @@ function buildNav(draft: Draft): HTMLElement {
     pill("key", "Key", draft.keyStatus.configured ? draft.keyStatus.hint ?? "Saved" : "Not set", draft.keyStatus.configured ? "good" : "warn"),
     pill("hotkey", "Hotkey", formatHotkey(draft.settings.hotkey), "neutral"),
     pill("mic", "Mic", micSummary(draft).value, "neutral"),
+    pill("engine", "Engine", draft.lastEngine, "good"),
   );
   rail.append(brand, menu, pills);
   if (draft.info.platform !== "windows") {
@@ -244,6 +261,9 @@ function refreshPills(draft: Draft): void {
   setPill(key, draft.keyStatus.configured ? draft.keyStatus.hint ?? "Saved" : "Not set", draft.keyStatus.configured ? "good" : "warn");
   setPill(hotkey, formatHotkey(draft.settings.hotkey), "neutral");
   setPill(mic, micSummary(draft).value, "neutral");
+  const engine = document.querySelector<HTMLElement>('[data-pill="engine"]');
+  const engineName = draft.live?.engine?.trim() || draft.lastEngine || "Groq";
+  setPill(engine, engineName, engineName === "Groq" ? "good" : "warn");
 }
 
 function setPill(node: HTMLElement | null, value: string, tone: string): void {
@@ -298,9 +318,12 @@ function liveBanner(draft: Draft): HTMLElement {
     return banner;
   }
   const titles: Record<string, string> = {
+    arming: "Starting",
     recording: "Listening",
     transcribing: "Transcribing",
+    inserting: "Inserting",
     done: "Inserted",
+    typed: "Typed",
     error: "Dictation failed",
   };
   banner.textContent = draft.live.message
@@ -466,6 +489,35 @@ function hotkeyPanel(draft: Draft): HTMLElement {
     (document.activeElement as HTMLElement | null)?.blur();
     void api.toggleTestRecording();
   });
+  const pasteLabel = el("label", "stack");
+  pasteLabel.append(el("span", "label", "Paste the last take again"));
+  const pasteRow = el("div", "hotkey-display");
+  const pasteKbd = el("kbd", "hotkey-kbd", formatHotkey(draft.settings.pasteHotkey));
+  const pastePresets = el("div", "presets");
+  const pasteChoices: Array<[string, Hotkey]> = [
+    ["Ctrl + Win + V", { ctrl: true, alt: false, shift: false, win: true, key: "v" }],
+    ["Ctrl + Alt + V", { ctrl: true, alt: true, shift: false, win: false, key: "v" }],
+    ["Alt + V", { ctrl: false, alt: true, shift: false, win: false, key: "v" }],
+  ];
+  for (const [label, hotkey] of pasteChoices) {
+    const preset = button(label, "text");
+    preset.addEventListener("click", () => {
+      draft.settings.pasteHotkey = hotkey;
+      pasteKbd.textContent = formatHotkey(hotkey);
+      markDirty(draft);
+    });
+    pastePresets.append(preset);
+  }
+  pasteRow.append(pasteKbd);
+  pasteLabel.append(
+    pasteRow,
+    pastePresets,
+    el(
+      "p",
+      "field-note",
+      "Press this when a take didn't land, or after Bolo.com starts again. The audio stays on this PC until a paste is confirmed.",
+    ),
+  );
   panel.append(
     display,
     presets,
@@ -474,8 +526,9 @@ function hotkeyPanel(draft: Draft): HTMLElement {
     el(
       "p",
       "field-note",
-      "Record a test uses the selected microphone and pastes into whichever app is focused when you stop.",
+      "Record a test uses the selected microphone and pastes into whichever app is focused when you stop. The first press starts listening.",
     ),
+    pasteLabel,
   );
   return panel;
 }
@@ -748,7 +801,39 @@ function languagePanel(draft: Draft): HTMLElement {
     markDirty(draft);
   });
   langLabel.append(lang);
-  panel.append(grid, langLabel);
+  const offlineLabel = el("label", "stack");
+  offlineLabel.append(el("span", "label", "On-device model"));
+  const offline = document.createElement("select");
+  offline.setAttribute("aria-label", "On-device model");
+  const offlineChoices: Array<[string, string]> = [
+    ["base.en", "base.en — smaller English model"],
+    ["small.en", "small.en — larger English model"],
+    ["off", "Off — Groq only"],
+  ];
+  for (const [value, name] of offlineChoices) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = name;
+    offline.append(option);
+  }
+  const selected = draft.settings.offlineModel === "small.en" || draft.settings.offlineModel === "off"
+    ? draft.settings.offlineModel
+    : "base.en";
+  offline.value = selected;
+  offline.addEventListener("change", () => {
+    draft.settings.offlineModel = offline.value;
+    markDirty(draft);
+    refreshPills(draft);
+  });
+  offlineLabel.append(
+    offline,
+    el(
+      "p",
+      "field-note",
+      "If Groq is rate limiting, down, or unreachable, Bolo.com transcribes this take on the PC with whisper.cpp and tries Groq again on the next one. The model downloads the first time it's needed.",
+    ),
+  );
+  panel.append(grid, langLabel, offlineLabel);
   return panel;
 }
 
@@ -798,7 +883,7 @@ function historyPanel(draft: Draft): HTMLElement {
   const panel = panelEl(
     "history",
     "History",
-    "The last 50 transcripts, newest first, stored only on this PC. Audio is not kept.",
+    "The last 50 transcripts, newest first, stored only on this PC. History keeps the words. A take's audio stays only until the paste is confirmed.",
   );
   const list = el("div", "history-list");
   list.dataset.history = "true";
@@ -813,7 +898,7 @@ function privacyPanel(draft: Draft): HTMLElement {
   const panel = panelEl(
     "privacy",
     "Privacy",
-    "Audio and the transcript go only to Groq, using the key stored on this PC. Bolo.com does not store audio or text on a server of its own. Nothing else receives them. There is no telemetry.",
+    "Audio and the transcript go to Groq, using the key stored on this PC, unless Groq can't take the request. Then the same audio stays on this PC and whisper.cpp transcribes it. Bolo.com does not store audio or text on a server of its own. A take's audio stays in the local spool until the paste is confirmed. There is no telemetry.",
   );
   const list = el("div", "history-list");
   list.dataset.historyPrivacy = "true";
@@ -965,7 +1050,7 @@ async function save(draft: Draft, form: HTMLFormElement): Promise<void> {
     await api.saveSettings(draft.settings);
     draft.dirty = false;
     const saved = await api.getSettings();
-    draft.settings = { ...saved, historyEnabled: saved.historyEnabled !== false };
+    draft.settings = normalizeSettings(saved);
     if (status) {
       status.textContent = "Settings saved.";
       status.className = "save-status good";

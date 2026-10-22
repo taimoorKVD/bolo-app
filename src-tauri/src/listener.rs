@@ -29,9 +29,16 @@ pub struct ListenerStatus {
 
 type StatusHook = Arc<dyn Fn(ListenerStatus) + Send + Sync>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputEvent {
+    Dictation(HotkeyEdge),
+    PasteAgain,
+}
+
 #[derive(Clone)]
 pub struct ListenerControl {
     pub hotkey: Arc<RwLock<Hotkey>>,
+    pub paste_hotkey: Arc<RwLock<Hotkey>>,
     pub paused: Arc<AtomicBool>,
     pub status: Arc<Mutex<ListenerStatus>>,
     on_status: Arc<Mutex<Option<StatusHook>>>,
@@ -41,6 +48,7 @@ impl ListenerControl {
     pub fn new(hotkey: Hotkey) -> Self {
         Self {
             hotkey: Arc::new(RwLock::new(hotkey)),
+            paste_hotkey: Arc::new(RwLock::new(Hotkey::paste_again())),
             paused: Arc::new(AtomicBool::new(false)),
             status: Arc::new(Mutex::new(ListenerStatus {
                 running: false,
@@ -68,9 +76,20 @@ impl ListenerControl {
     pub fn set_hotkey(&self, hotkey: Hotkey) {
         *self.hotkey.write().unwrap_or_else(|err| err.into_inner()) = hotkey;
     }
+
+    pub fn current_paste_hotkey(&self) -> Hotkey {
+        self.paste_hotkey
+            .read()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone()
+    }
+
+    pub fn set_paste_hotkey(&self, hotkey: Hotkey) {
+        *self.paste_hotkey.write().unwrap_or_else(|err| err.into_inner()) = hotkey;
+    }
 }
 
-pub fn spawn(control: ListenerControl, tx: Sender<HotkeyEdge>) {
+pub fn spawn(control: ListenerControl, tx: Sender<InputEvent>) {
     let reported = control.clone();
     let thread_status = reported.clone();
     match thread::Builder::new().name("cadence-hotkey".into()).spawn(move || {
@@ -95,7 +114,7 @@ fn set_status(control: &ListenerControl, running: bool, error: Option<String>) {
 }
 
 #[cfg(windows)]
-fn run_platform(control: ListenerControl, tx: Sender<HotkeyEdge>) -> Result<(), String> {
+fn run_platform(control: ListenerControl, tx: Sender<InputEvent>) -> Result<(), String> {
     use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
     use windows::Win32::UI::WindowsAndMessaging::{
         CallNextHookEx, DispatchMessageW, GetMessageW, SetWindowsHookExW, TranslateMessage,
@@ -104,10 +123,11 @@ fn run_platform(control: ListenerControl, tx: Sender<HotkeyEdge>) -> Result<(), 
 
     struct HookShared {
         control: ListenerControl,
-        tx: Sender<HotkeyEdge>,
+        tx: Sender<InputEvent>,
         down: HashSet<u16>,
         swallowed: HashSet<u16>,
         edges: EdgeListener,
+        paste_edges: EdgeListener,
     }
 
     static HOOK: Mutex<Option<HookShared>> = Mutex::new(None);
@@ -153,6 +173,7 @@ fn run_platform(control: ListenerControl, tx: Sender<HotkeyEdge>) -> Result<(), 
         let kinds: Vec<KeyKind> = shared.down.iter().copied().map(kind_from_vk).collect();
         let snap = snapshot_from_kinds(&kinds);
         let hotkey = shared.control.current_hotkey();
+        let paste_hotkey = shared.control.current_paste_hotkey();
         let paused = shared.control.paused.load(Ordering::SeqCst);
         let kind = kind_from_vk(vk);
         let was_holding = shared.edges.holding();
@@ -161,7 +182,9 @@ fn run_platform(control: ListenerControl, tx: Sender<HotkeyEdge>) -> Result<(), 
         if is_down {
             if repeat {
                 swallow = shared.swallowed.contains(&vk);
-            } else if should_swallow_keydown(&kind, &snap, &hotkey) {
+            } else if should_swallow_keydown(&kind, &snap, &hotkey)
+                || should_swallow_keydown(&kind, &snap, &paste_hotkey)
+            {
                 shared.swallowed.insert(vk);
                 swallow = true;
             }
@@ -176,7 +199,10 @@ fn run_platform(control: ListenerControl, tx: Sender<HotkeyEdge>) -> Result<(), 
         }
 
         if let Some(edge) = shared.edges.observe(is_held(&snap, &hotkey), paused) {
-            let _ = shared.tx.send(edge);
+            let _ = shared.tx.send(InputEvent::Dictation(edge));
+        }
+        if let Some(HotkeyEdge::Pressed) = shared.paste_edges.observe(is_held(&snap, &paste_hotkey), paused) {
+            let _ = shared.tx.send(InputEvent::PasteAgain);
         }
         swallow
     }
@@ -189,6 +215,7 @@ fn run_platform(control: ListenerControl, tx: Sender<HotkeyEdge>) -> Result<(), 
             down: HashSet::new(),
             swallowed: HashSet::new(),
             edges: EdgeListener::default(),
+            paste_edges: EdgeListener::default(),
         });
     }
 
@@ -248,19 +275,24 @@ fn send_silent_key() {
 }
 
 #[cfg(not(windows))]
-fn run_platform(control: ListenerControl, tx: Sender<HotkeyEdge>) -> Result<(), String> {
+fn run_platform(control: ListenerControl, tx: Sender<InputEvent>) -> Result<(), String> {
     use device_query::{DeviceQuery, DeviceState, Keycode};
 
     let device = DeviceState::new();
     set_status(&control, true, None);
     let mut edges = EdgeListener::default();
+    let mut paste_edges = EdgeListener::default();
     loop {
         let hotkey = control.current_hotkey();
+        let paste_hotkey = control.current_paste_hotkey();
         let paused = control.paused.load(Ordering::SeqCst);
         let keys: Vec<Keycode> = device.get_keys();
         let snap = snapshot_from_keycodes(&keys);
         if let Some(edge) = edges.observe(is_held(&snap, &hotkey), paused) {
-            let _ = tx.send(edge);
+            let _ = tx.send(InputEvent::Dictation(edge));
+        }
+        if let Some(HotkeyEdge::Pressed) = paste_edges.observe(is_held(&snap, &paste_hotkey), paused) {
+            let _ = tx.send(InputEvent::PasteAgain);
         }
         thread::sleep(Duration::from_millis(12));
     }

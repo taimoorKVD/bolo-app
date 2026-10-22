@@ -16,7 +16,9 @@ export function mountOverlay(root: HTMLElement): void {
   const barEls = Array.from({ length: 5 }, () => el("span"));
   bars.append(...barEls);
   const timer = el("span", "timer", "0:00");
-  pill.append(lamp, copy, bars, timer);
+  const engine = el("span", "engine");
+  engine.hidden = true;
+  pill.append(lamp, copy, bars, engine, timer);
   pill.setAttribute("role", "status");
   pill.setAttribute("aria-live", "polite");
   root.append(pill);
@@ -29,7 +31,10 @@ export function mountOverlay(root: HTMLElement): void {
     detail.hidden = !event.message;
     timer.textContent = phase === "recording" ? formatElapsed(event.elapsedMs) : "";
     timer.hidden = phase !== "recording";
-    bars.hidden = phase !== "recording";
+    bars.hidden = phase !== "recording" && phase !== "arming";
+    const engineName = event.engine?.trim() ?? "";
+    engine.hidden = engineName.length === 0;
+    engine.textContent = engineName;
     const level = Math.max(0, Math.min(1, event.level));
     barEls.forEach((bar, index) => {
       const shape = [0.45, 0.75, 1, 0.7, 0.4][index] ?? 0.5;
@@ -53,12 +58,18 @@ export function mountOverlay(root: HTMLElement): void {
 
 function phaseTitle(phase: DictationPhase): string {
   switch (phase) {
+    case "arming":
+      return "Starting";
     case "recording":
       return "Listening";
     case "transcribing":
       return "Transcribing";
+    case "inserting":
+      return "Inserting";
     case "done":
       return "Inserted";
+    case "typed":
+      return "Typed";
     case "error":
       return "Not inserted";
     default:
@@ -79,7 +90,13 @@ function demoEvent(demo: string | null): DictationEvent {
     };
   }
   if (demo === "done") {
-    return { phase: "done", message: "Inserted", elapsedMs: 1800, level: 0 };
+    return { phase: "done", message: "Inserted", elapsedMs: 1800, level: 0, engine: "Groq" };
+  }
+  if (demo === "arming") {
+    return { phase: "arming", message: "Opening the microphone", elapsedMs: 0, level: 0 };
+  }
+  if (demo === "typed") {
+    return { phase: "typed", message: "Typed", elapsedMs: 1800, level: 0, engine: "On this PC" };
   }
   return {
     phase: "recording",
@@ -91,7 +108,7 @@ function demoEvent(demo: string | null): DictationEvent {
 
 function demoSwitcher(apply: (event: DictationEvent) => void): HTMLElement {
   const row = el("div", "demo-row");
-  const phases: DictationPhase[] = ["recording", "transcribing", "done", "error"];
+  const phases: DictationPhase[] = ["arming", "recording", "transcribing", "inserting", "done", "typed", "error"];
   for (const phase of phases) {
     const button = document.createElement("button");
     button.type = "button";

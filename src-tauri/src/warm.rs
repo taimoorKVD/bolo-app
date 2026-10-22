@@ -7,6 +7,7 @@
 //! one-shot recording.
 
 use crate::audio::{self, FinishedAudio};
+use crate::chunk;
 use cpal::traits::{HostTrait, StreamTrait};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -35,6 +36,7 @@ struct Armed {
     used_fallback: bool,
     note: String,
     level: Arc<AtomicU32>,
+    chunks: Arc<Mutex<VecDeque<FinishedAudio>>>,
 }
 
 pub struct LiveTake {
@@ -49,9 +51,23 @@ pub struct LiveTake {
     pub open_wait_ms: u64,
     stop: Arc<std::sync::atomic::AtomicBool>,
     level: Arc<AtomicU32>,
+    chunks: Arc<Mutex<VecDeque<FinishedAudio>>>,
 }
 
 impl LiveTake {
+    pub fn drain_chunks(&self) -> Vec<FinishedAudio> {
+        match self.chunks.lock() {
+            Ok(mut queue) => queue.drain(..).collect(),
+            Err(err) => err.into_inner().drain(..).collect(),
+        }
+    }
+}
+
+impl LiveTake {
+    pub fn chunk_bus(&self) -> Arc<Mutex<VecDeque<FinishedAudio>>> {
+        Arc::clone(&self.chunks)
+    }
+
     pub fn meter(&self) -> (Arc<AtomicU32>, Arc<std::sync::atomic::AtomicBool>) {
         (Arc::clone(&self.level), Arc::clone(&self.stop))
     }
@@ -114,7 +130,10 @@ impl WarmMic {
                 reply: reply_tx,
             })
             .map_err(|_| "Microphone watcher stopped.".to_string())?;
-        let armed = match reply_rx.recv_timeout(Duration::from_secs(2)) {
+        // The first open can sit behind a device scan. Eight seconds covers a
+        // slow headset without failing the press that started it. If this
+        // wait expires, the warm thread disarms when the reply is gone.
+        let armed = match reply_rx.recv_timeout(Duration::from_secs(8)) {
             Ok(result) => result?,
             Err(_) => return Err("The microphone didn't respond in time. Try the key again.".into()),
         };
@@ -128,6 +147,7 @@ impl WarmMic {
             open_wait_ms: waited.elapsed().as_millis() as u64,
             stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             level: armed.level,
+            chunks: armed.chunks,
         })
     }
 }
@@ -143,6 +163,8 @@ struct Capture {
     noise_rms: f32,
     error: Option<String>,
     level: Arc<AtomicU32>,
+    chunks: Arc<Mutex<VecDeque<FinishedAudio>>>,
+    take_silence_ms: u32,
 }
 
 impl Capture {
@@ -158,6 +180,8 @@ impl Capture {
             noise_rms: 0.004,
             error: None,
             level,
+            chunks: Arc::new(Mutex::new(VecDeque::new())),
+            take_silence_ms: 0,
         }
     }
 
@@ -180,16 +204,21 @@ fn run(cmd_rx: Receiver<Cmd>, mut preference: Option<String>, level: Arc<AtomicU
     let mut note = String::new();
     let mut next_id = 1u64;
     let mut last_scan = Instant::now() - Duration::from_secs(2);
+    let mut deferred = VecDeque::new();
 
     loop {
-        let cmd = match cmd_rx.try_recv() {
-            Ok(cmd) => Some(cmd),
-            Err(mpsc::TryRecvError::Empty) => match cmd_rx.recv_timeout(LOOP_SLICE) {
+        let cmd = if let Some(cmd) = deferred.pop_front() {
+            Some(cmd)
+        } else {
+            match cmd_rx.try_recv() {
                 Ok(cmd) => Some(cmd),
-                Err(mpsc::RecvTimeoutError::Timeout) => None,
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
-            },
-            Err(mpsc::TryRecvError::Disconnected) => break,
+                Err(mpsc::TryRecvError::Empty) => match cmd_rx.recv_timeout(LOOP_SLICE) {
+                    Ok(cmd) => Some(cmd),
+                    Err(mpsc::RecvTimeoutError::Timeout) => None,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                },
+                Err(mpsc::TryRecvError::Disconnected) => break,
+            }
         };
         if let Some(cmd) = cmd {
             handle_cmd(
@@ -211,15 +240,24 @@ fn run(cmd_rx: Receiver<Cmd>, mut preference: Option<String>, level: Arc<AtomicU
         if !recording && (stream.is_none() || broken || last_scan.elapsed() >= Duration::from_secs(1)) {
             last_scan = Instant::now();
             if stream.is_none() || broken || device_should_change(&host, &preference, &active_name) {
-                let _ = reopen(
-                    &host,
-                    &preference,
-                    &state,
-                    &mut stream,
-                    &mut active_name,
-                    &mut used_fallback,
-                    &mut note,
-                );
+                // Idle scans yield as soon as a Begin arrives, so the first
+                // press is not stuck behind a full device sweep.
+                if matches!(
+                    reopen(
+                        &host,
+                        &preference,
+                        &state,
+                        &mut stream,
+                        &mut active_name,
+                        &mut used_fallback,
+                        &mut note,
+                        Some(&cmd_rx),
+                        &mut deferred,
+                    ),
+                    Reopen::Yielded
+                ) {
+                    continue;
+                }
             }
         }
     }
@@ -244,9 +282,32 @@ fn handle_cmd(
             *preference = asked;
             let broken = state.lock().ok().and_then(|guard| guard.error.clone()).is_some();
             if stream.is_none() || broken {
-                let _ = reopen(host, preference, state, stream, active_name, used_fallback, note);
+                let mut ignored = VecDeque::new();
+                let _ = reopen(
+                    host,
+                    preference,
+                    state,
+                    stream,
+                    active_name,
+                    used_fallback,
+                    note,
+                    None,
+                    &mut ignored,
+                );
             }
-            let _ = reply.send(arm_take(state, next_id, active_name, *used_fallback, note));
+            match arm_take(state, next_id, active_name, *used_fallback, note) {
+                Ok(armed) => {
+                    let id = armed.id;
+                    if reply.send(Ok(armed)).is_err() {
+                        // The press already gave up. Don't leave this take armed
+                        // or the next press ends the wrong buffer.
+                        let _ = disarm_take(state, id);
+                    }
+                }
+                Err(err) => {
+                    let _ = reply.send(Err(err));
+                }
+            }
         }
         Cmd::End { id, reply } => {
             let _ = reply.send(disarm_take(state, id));
@@ -267,6 +328,13 @@ fn device_should_change(host: &cpal::Host, preference: &Option<String>, active_n
     audio::normalize_mic_name(&choice.active_name) != audio::normalize_mic_name(active_name)
 }
 
+enum Reopen {
+    Ready,
+    Yielded,
+    #[allow(dead_code)]
+    Failed(String),
+}
+
 fn reopen(
     host: &cpal::Host,
     preference: &Option<String>,
@@ -275,20 +343,31 @@ fn reopen(
     active_name: &mut String,
     used_fallback: &mut bool,
     note: &mut String,
-) -> Result<(), String> {
+    interrupt: Option<&Receiver<Cmd>>,
+    deferred: &mut VecDeque<Cmd>,
+) -> Reopen {
+    if pull_interrupt(interrupt, deferred) {
+        return Reopen::Yielded;
+    }
     *stream = None;
     if let Ok(mut guard) = state.lock() {
         guard.error = None;
     }
-    let devices = audio::host_mics(host).map_err(|err| err.to_string())?;
+    let devices = match audio::host_mics(host) {
+        Ok(devices) => devices,
+        Err(err) => return Reopen::Failed(err.to_string()),
+    };
     let order = audio::open_order(&devices, preference.as_deref());
     if order.is_empty() {
         active_name.clear();
-        return Err("No microphone is available.".into());
+        return Reopen::Failed("No microphone is available.".into());
     }
     let mut failures = Vec::new();
     for name in &order {
-        match open_one(host, name, state) {
+        if pull_interrupt(interrupt, deferred) {
+            return Reopen::Yielded;
+        }
+        match open_one(host, name, state, interrupt, deferred) {
             Ok(opened) => {
                 let pref = preference.as_deref().map(str::trim).filter(|value| !value.is_empty());
                 let opened_preference =
@@ -301,24 +380,49 @@ fn reopen(
                 *note = audio::usage_line(pref, name, *used_fallback);
                 *active_name = name.clone();
                 *stream = Some(opened);
-                return Ok(());
+                return Reopen::Ready;
             }
-            Err(err) => failures.push(format!("{name}: {err:#}")),
+            Err(OpenFail::Yielded) => return Reopen::Yielded,
+            Err(OpenFail::Failed(err)) => failures.push(format!("{name}: {err:#}")),
         }
     }
     active_name.clear();
-    Err(if failures.is_empty() {
+    Reopen::Failed(if failures.is_empty() {
         "Couldn't open a microphone.".into()
     } else {
         format!("Couldn't open a microphone. {}", failures.join(" "))
     })
 }
 
-fn open_one(host: &cpal::Host, name: &str, state: &Arc<Mutex<Capture>>) -> anyhow::Result<cpal::Stream> {
+fn pull_interrupt(interrupt: Option<&Receiver<Cmd>>, deferred: &mut VecDeque<Cmd>) -> bool {
+    let Some(rx) = interrupt else {
+        return false;
+    };
+    let mut pulled = false;
+    while let Ok(cmd) = rx.try_recv() {
+        deferred.push_back(cmd);
+        pulled = true;
+    }
+    pulled
+}
+
+enum OpenFail {
+    Yielded,
+    Failed(anyhow::Error),
+}
+
+fn open_one(
+    host: &cpal::Host,
+    name: &str,
+    state: &Arc<Mutex<Capture>>,
+    interrupt: Option<&Receiver<Cmd>>,
+    deferred: &mut VecDeque<Cmd>,
+) -> Result<cpal::Stream, OpenFail> {
     use cpal::traits::DeviceTrait;
     let wanted = audio::normalize_mic_name(name);
     let device = host
-        .input_devices()?
+        .input_devices()
+        .map_err(|err| OpenFail::Failed(anyhow::anyhow!("couldn't list microphones: {err}")))?
         .find(|device| {
             device
                 .name()
@@ -326,10 +430,11 @@ fn open_one(host: &cpal::Host, name: &str, state: &Arc<Mutex<Capture>>) -> anyho
                 .map(|found| audio::normalize_mic_name(&found) == wanted)
                 .unwrap_or(false)
         })
-        .ok_or_else(|| anyhow::anyhow!("microphone \"{name}\" disappeared"))?;
+        .ok_or_else(|| anyhow::anyhow!("microphone \"{name}\" disappeared"))
+        .map_err(OpenFail::Failed)?;
     let supported = device
         .default_input_config()
-        .map_err(|err| anyhow::anyhow!("{name} has no default input format: {err}"))?;
+        .map_err(|err| OpenFail::Failed(anyhow::anyhow!("{name} has no default input format: {err}")))?;
     let channels = supported.channels();
     let sample_rate = supported.sample_rate().0;
     let sample_format = supported.sample_format();
@@ -350,14 +455,21 @@ fn open_one(host: &cpal::Host, name: &str, state: &Arc<Mutex<Capture>>) -> anyho
                 guard.error = Some(format!("Microphone error: {err}"));
             }
         },
-    )?;
-    stream.play().map_err(|err| anyhow::anyhow!("couldn't start {name}: {err}"))?;
+    )
+    .map_err(OpenFail::Failed)?;
+    stream
+        .play()
+        .map_err(|err| OpenFail::Failed(anyhow::anyhow!("couldn't start {name}: {err}")))?;
     // Give the callback a moment to report an immediate invalidation.
+    // An idle scan bails here if a press arrived, so that press opens the mic itself.
     let bridge = Arc::clone(state);
     for _ in 0..4 {
         std::thread::sleep(Duration::from_millis(20));
+        if pull_interrupt(interrupt, deferred) {
+            return Err(OpenFail::Yielded);
+        }
         if let Some(err) = bridge.lock().ok().and_then(|guard| guard.error.clone()) {
-            return Err(anyhow::anyhow!(err));
+            return Err(OpenFail::Failed(anyhow::anyhow!(err)));
         }
     }
     Ok(stream)
@@ -377,29 +489,84 @@ fn push_samples(state: &Mutex<Capture>, samples: impl IntoIterator<Item = f32>) 
             state.ring.pop_front();
         }
         if let Some(take) = state.take.as_mut() {
-            if take.len() < audio::MAX_SAMPLES {
-                take.push(sample);
-            }
+            take.push(sample);
         }
         chunk.push(sample);
         if chunk.len() >= 480 {
             let energy = rms(&chunk);
-            note_energy(&mut state, energy);
+            let frame_ms = frame_duration_ms(chunk.len(), state.sample_rate, state.channels);
+            note_energy(&mut state, energy, frame_ms);
             chunk.clear();
         }
     }
     if !chunk.is_empty() {
         let energy = rms(&chunk);
-        note_energy(&mut state, energy);
+        let frame_ms = frame_duration_ms(chunk.len(), state.sample_rate, state.channels);
+        note_energy(&mut state, energy, frame_ms);
     }
 }
 
-fn note_energy(state: &mut Capture, energy: f32) {
+fn frame_duration_ms(samples: usize, sample_rate: u32, channels: u16) -> u32 {
+    let channels = usize::from(channels.max(1));
+    let rate = sample_rate.max(1) as usize;
+    ((samples / channels) as u64 * 1000 / rate as u64) as u32
+}
+
+fn note_energy(state: &mut Capture, energy: f32, frame_ms: u32) {
     state.last_rms = energy;
     state.level.store(energy.to_bits(), Ordering::Relaxed);
     if state.take.is_none() && energy < 0.02 {
         state.noise_rms = state.noise_rms * 0.9 + energy * 0.1;
+        return;
     }
+    if state.take.is_some() {
+        let threshold = audio::speech_threshold(state.noise_rms);
+        if energy >= threshold {
+            state.take_silence_ms = 0;
+        } else {
+            state.take_silence_ms = state.take_silence_ms.saturating_add(frame_ms.max(1));
+        }
+        maybe_cut(state);
+    }
+}
+
+fn maybe_cut(state: &mut Capture) {
+    let Some(samples) = state.take.as_ref() else {
+        return;
+    };
+    let channels = usize::from(state.channels.max(1));
+    if channels == 0 || samples.is_empty() {
+        return;
+    }
+    let frames = samples.len() / channels;
+    let buffered_ms = (frames as u64 * 1000 / u64::from(state.sample_rate.max(1))) as u32;
+    if !chunk::should_cut(buffered_ms, state.take_silence_ms) {
+        return;
+    }
+    let overlap = chunk::overlap_samples(state.sample_rate, state.channels);
+    let Some(mut all) = state.take.take() else {
+        return;
+    };
+    if all.len() <= overlap {
+        state.take = Some(all);
+        return;
+    }
+    let next = all[all.len() - overlap..].to_vec();
+    let noise = state.noise_rms;
+    let channels_n = state.channels;
+    let sample_rate = state.sample_rate;
+    let bus = Arc::clone(&state.chunks);
+    state.take = Some(next);
+    state.take_silence_ms = 0;
+    let mut queue = bus.lock().unwrap_or_else(|err| err.into_inner());
+    queue.push_back(FinishedAudio {
+        interleaved: all.split_off(0),
+        channels: channels_n,
+        sample_rate,
+        elapsed_ms: u64::from(buffered_ms),
+        noise_rms: noise,
+    });
+    drop(queue);
 }
 
 fn rms(chunk: &[f32]) -> f32 {
@@ -426,6 +593,9 @@ fn arm_take(
     let id = *next_id;
     *next_id = next_id.wrapping_add(1);
     guard.take_id = id;
+    guard.take_silence_ms = 0;
+    let chunks = Arc::new(Mutex::new(VecDeque::new()));
+    guard.chunks = Arc::clone(&chunks);
     guard.take = Some(guard.ring.iter().copied().collect());
     Ok(Armed {
         id,
@@ -433,6 +603,7 @@ fn arm_take(
         used_fallback,
         note: note.to_string(),
         level: Arc::clone(&guard.level),
+        chunks,
     })
 }
 
@@ -456,5 +627,26 @@ fn disarm_take(state: &Mutex<Capture>, id: u64) -> Result<FinishedAudio, String>
         elapsed_ms: 0,
         noise_rms: guard.noise_rms,
     })
+}
+
+#[cfg(all(test, windows))]
+#[test]
+fn first_press_starts_capture() {
+    // Decision coverage also lives in dictation. Here the first Begin has to
+    // arm a real device when Windows has one, and a second Begin has to arm too.
+    let warm = WarmMic::spawn(None);
+    std::thread::sleep(Duration::from_millis(250));
+    match warm.begin(None) {
+        Ok(take) => {
+            std::thread::sleep(Duration::from_millis(180));
+            let finished = take.finish().expect("the first press should stop cleanly");
+            assert!(finished.sample_rate > 0, "the first press did not open a capture stream");
+            let second = warm.begin(None).expect("the second press should arm");
+            let _ = second.finish();
+        }
+        Err(err) => {
+            eprintln!("SKIP first_press_starts_capture: {err}");
+        }
+    }
 }
 

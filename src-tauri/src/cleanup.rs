@@ -360,7 +360,9 @@ pub(crate) fn groq_error_message(status: u16, body: &str) -> String {
     match status {
         401 | 403 => "Groq rejected the API key. Check it in Settings.".into(),
         413 => "The recording was too large to upload.".into(),
-        429 => format!("Groq rate limit reached. {detail}"),
+        429 => format!(
+            "Groq is rate limiting requests right now ({detail}). Bolo.com will use the on-device model for this take if it's ready, then try Groq again next time."
+        ),
         _ => format!("Groq returned {status}. {detail}"),
     }
 }

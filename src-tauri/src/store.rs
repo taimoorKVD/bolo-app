@@ -3,6 +3,7 @@
 //! The API key is intentionally not a field here. It lives in the OS credential store.
 
 use crate::hotkey::{validate_hotkey, Hotkey};
+use crate::offline;
 use crate::transcribe::{normalize_language, normalize_model, WHISPER_TURBO};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -27,6 +28,20 @@ pub struct Settings {
     /// Local transcript history. Missing in older files, so it stays on.
     #[serde(default = "history_on")]
     pub history_enabled: bool,
+    /// Inserts the previous transcript again. Missing files keep Ctrl+Win+V.
+    #[serde(default = "paste_again_hotkey")]
+    pub paste_hotkey: Hotkey,
+    /// `base.en`, `small.en`, or `off`. Missing files download base.en on demand.
+    #[serde(default = "default_offline_model")]
+    pub offline_model: String,
+}
+
+fn paste_again_hotkey() -> Hotkey {
+    Hotkey::paste_again()
+}
+
+fn default_offline_model() -> String {
+    "base.en".into()
 }
 
 fn history_on() -> bool {
@@ -44,6 +59,8 @@ impl Default for Settings {
             dictionary: Vec::new(),
             launch_at_startup: false,
             history_enabled: true,
+            paste_hotkey: Hotkey::paste_again(),
+            offline_model: "base.en".into(),
         }
     }
 }
@@ -73,6 +90,11 @@ pub fn prepare_settings(mut settings: Settings) -> Settings {
         let key = key.trim().to_ascii_lowercase();
         settings.hotkey.key = if key.is_empty() { None } else { Some(key) };
     }
+    if let Some(key) = settings.paste_hotkey.key {
+        let key = key.trim().to_ascii_lowercase();
+        settings.paste_hotkey.key = if key.is_empty() { None } else { Some(key) };
+    }
+    settings.offline_model = offline::normalize_model(&settings.offline_model).to_string();
     settings.dictionary = settings
         .dictionary
         .into_iter()
@@ -103,6 +125,11 @@ pub fn validate_settings(settings: &Settings) -> Result<(), String> {
             return Err("That microphone name is too long.".into());
         }
     }
+    validate_hotkey(&settings.paste_hotkey)?;
+    match offline::normalize_model(&settings.offline_model) {
+        "off" | "base.en" | "small.en" => {}
+        _ => return Err("Choose base.en, small.en, or off for the on-device model.".into()),
+    }
     Ok(())
 }
 
@@ -129,6 +156,10 @@ pub fn normalize_settings(mut settings: Settings) -> Settings {
             settings.microphone = None;
         }
     }
+    if validate_hotkey(&settings.paste_hotkey).is_err() {
+        settings.paste_hotkey = Hotkey::paste_again();
+    }
+    settings.offline_model = offline::normalize_model(&settings.offline_model).to_string();
     settings
 }
 
@@ -340,6 +371,9 @@ mod tests {
         assert!(parsed.launch_at_startup);
         assert_eq!(parsed.model, WHISPER_TURBO);
         assert!(parsed.hotkey.ctrl && parsed.hotkey.win && parsed.hotkey.key.is_none());
+        assert_eq!(parsed.offline_model, "base.en");
+        assert!(parsed.paste_hotkey.ctrl && parsed.paste_hotkey.win);
+        assert_eq!(parsed.paste_hotkey.key.as_deref(), Some("v"));
 
         let mut utf16 = vec![0xFF, 0xFE];
         for unit in pretty.encode_utf16() {

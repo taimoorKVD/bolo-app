@@ -32,6 +32,19 @@ impl Default for Hotkey {
     }
 }
 
+impl Hotkey {
+    /// Paste the previous take again. Configurable in Settings.
+    pub fn paste_again() -> Self {
+        Self {
+            ctrl: true,
+            alt: false,
+            shift: false,
+            win: true,
+            key: Some("v".into()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HotkeyEdge {
     Pressed,

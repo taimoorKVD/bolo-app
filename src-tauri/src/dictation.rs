@@ -5,7 +5,7 @@
 //! briefly for a second press, which latches hands-free mode. A normal hold
 //! stops on release with no extra wait.
 
-use crate::audio::{self, SpeechError};
+use crate::audio::FinishedAudio;
 use crate::cleanup;
 use crate::context;
 use crate::credentials::SecretKey;
@@ -13,6 +13,8 @@ use crate::hotkey::{display, HotkeyEdge};
 use crate::insert::{self, InsertMethod};
 use crate::listener::ListenerControl;
 use crate::logbuf::log_line;
+use crate::pipeline::{self, Product};
+use crate::spool;
 use crate::store::{self, HistoryEntry, Settings};
 use crate::transcribe;
 use crate::warm::{self, LiveTake};
@@ -22,7 +24,6 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, PhysicalSize, WebviewWindow};
 
-const MAX_RECORDING: Duration = Duration::from_secs(120);
 /// A release shorter than this may be the first half of a double-tap.
 const TAP_MS: u64 = 240;
 /// How long a short release waits for the second tap.
@@ -37,10 +38,15 @@ pub struct DictationEvent {
     pub message: Option<String>,
     pub elapsed_ms: u64,
     pub level: f32,
+    /// "Groq", "On this PC", or "Groq + on this PC" once a take has a transcript.
+    #[serde(default)]
+    pub engine: Option<String>,
 }
 
 enum Phase {
     Idle,
+    /// The mic is opening. A release here must not cancel the take.
+    Arming,
     Recording,
     Busy,
 }
@@ -50,7 +56,12 @@ struct Engine {
     take: Option<LiveTake>,
     generation: u64,
     /// The hotkey went up before the microphone had armed this take.
+    /// Kept so a release during arming is remembered, not used to drop audio.
     stop_requested: bool,
+    /// Key-down time. Hold length is measured from here, not from when the mic arms.
+    press_at: Option<Instant>,
+    released_during_arm: bool,
+    spool_id: Option<String>,
     hands_free: bool,
     awaiting_second: bool,
     /// The release that ended (or will end) this take was a short tap.
@@ -70,11 +81,18 @@ pub struct AppState {
     pub config_dir: std::path::PathBuf,
     pub last_error: Mutex<Option<String>>,
     pub warm: warm::WarmMic,
+    slots: Arc<pipeline::Slots>,
+    jobs: Mutex<pipeline::Jobs>,
+    /// Held from the moment chunks are drained until they are queued to transcribe,
+    /// so stop cannot miss a chunk the meter already took.
+    pump_gate: Mutex<()>,
+    last_text: Mutex<Option<String>>,
 }
 
 impl AppState {
     pub fn new(settings: Settings, history: Vec<HistoryEntry>, config_dir: std::path::PathBuf) -> Self {
         let listener = ListenerControl::new(settings.hotkey.clone());
+        listener.set_paste_hotkey(settings.paste_hotkey.clone());
         let warm = warm::WarmMic::spawn(settings.microphone.clone());
         Self {
             settings: Mutex::new(settings),
@@ -89,11 +107,18 @@ impl AppState {
                 short_release: false,
                 release_held_ms: 0,
                 release_mark: None,
+                press_at: None,
+                released_during_arm: false,
+                spool_id: None,
             }),
             listener,
             config_dir,
             last_error: Mutex::new(None),
             warm,
+            slots: pipeline::Slots::new(2),
+            jobs: Mutex::new(pipeline::Jobs::new()),
+            pump_gate: Mutex::new(()),
+            last_text: Mutex::new(None),
         }
     }
 }
@@ -122,6 +147,7 @@ struct Staged {
     paste_ms: u64,
     tone: String,
     release_started: Instant,
+    engine: String,
 }
 
 struct Outcome {
@@ -131,6 +157,8 @@ struct Outcome {
     duration_ms: u64,
     model: String,
     staged: Staged,
+    spool_id: String,
+    engine: Option<String>,
 }
 
 struct TakeError {
@@ -151,8 +179,30 @@ pub(crate) enum PressDecision {
 pub(crate) enum ReleaseDecision {
     EndNow,
     ArmDoubleTap,
-    CancelOpen,
+    /// The key came up while the microphone was still opening. Keep the take.
+    NoteArmRelease,
     Ignore,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AfterArm {
+    /// The key is still down. This is the first press starting capture.
+    Listen,
+    /// They let go after a real hold. Transcribe what was captured.
+    EndTake,
+    /// A short tap. Wait to see if it becomes hands-free.
+    WaitSecondTap,
+}
+
+/// What to do once the microphone finishes opening.
+pub(crate) fn after_arm(released_during_arm: bool, press_age_ms: u64) -> AfterArm {
+    if !released_during_arm {
+        AfterArm::Listen
+    } else if press_age_ms < TAP_MS {
+        AfterArm::WaitSecondTap
+    } else {
+        AfterArm::EndTake
+    }
 }
 
 pub(crate) fn press_decision(hands_free: bool, awaiting_second: bool, idle: bool) -> PressDecision {
@@ -172,12 +222,20 @@ pub(crate) fn release_decision(
     recording: bool,
     take_ready: bool,
     held_ms: u64,
+    arming: bool,
 ) -> ReleaseDecision {
-    if hands_free || !recording {
+    if hands_free {
         return ReleaseDecision::Ignore;
     }
-    if !take_ready {
-        return ReleaseDecision::CancelOpen;
+    // A release before the take exists used to cancel it. That made the first
+    // press look like a failure: the key-up queued during a slow open was
+    // treated as a zero-length tap, the audio was dropped, and the overlay
+    // said "Not inserted". Remember the release and start capture anyway.
+    if arming || (recording && !take_ready) {
+        return ReleaseDecision::NoteArmRelease;
+    }
+    if !recording {
+        return ReleaseDecision::Ignore;
     }
     if held_ms < TAP_MS {
         ReleaseDecision::ArmDoubleTap
@@ -250,10 +308,18 @@ fn on_press(app: &AppHandle) {
                     message: recording_caption(true, &note),
                     elapsed_ms: started,
                     level: 0.0,
+                    engine: None,
                 },
             );
         }
-        PressDecision::Begin => begin(app),
+        PressDecision::Begin => {
+            insert::note_foreground();
+            {
+                let mut engine = lock(&state.engine);
+                engine.press_at = Some(Instant::now());
+            }
+            begin(app);
+        }
         PressDecision::Ignore => {}
     }
 }
@@ -263,15 +329,21 @@ fn on_release(app: &AppHandle) {
     let action = {
         let mut engine = lock(&state.engine);
         let held_ms = engine
-            .take
-            .as_ref()
-            .map(|take| take.started.elapsed().as_millis() as u64)
+            .press_at
+            .map(|start| start.elapsed().as_millis() as u64)
+            .or_else(|| {
+                engine
+                    .take
+                    .as_ref()
+                    .map(|take| take.started.elapsed().as_millis() as u64)
+            })
             .unwrap_or(0);
         let decision = release_decision(
             engine.hands_free,
             matches!(engine.phase, Phase::Recording),
             engine.take.is_some(),
             held_ms,
+            matches!(engine.phase, Phase::Arming),
         );
         match decision {
             ReleaseDecision::ArmDoubleTap => {
@@ -281,10 +353,11 @@ fn on_release(app: &AppHandle) {
                 engine.release_mark = Some(Instant::now());
                 Some((decision, engine.generation))
             }
-            ReleaseDecision::CancelOpen => {
-                engine.stop_requested = true;
-                engine.short_release = true;
+            ReleaseDecision::NoteArmRelease => {
+                engine.released_during_arm = true;
+                engine.short_release = held_ms < TAP_MS;
                 engine.release_held_ms = held_ms;
+                engine.release_mark = Some(Instant::now());
                 None
             }
             ReleaseDecision::EndNow => {
@@ -326,14 +399,21 @@ pub fn begin(app: &AppHandle) {
         if !matches!(engine.phase, Phase::Idle) {
             return;
         }
-        engine.phase = Phase::Recording;
+        // Arming, not Recording: the hotkey thread stays free to see the key-up,
+        // and Record a test cannot toggle itself off before the mic is open.
+        engine.phase = Phase::Arming;
         engine.generation = engine.generation.wrapping_add(1);
         engine.stop_requested = false;
+        engine.released_during_arm = false;
         engine.hands_free = false;
         engine.awaiting_second = false;
         engine.short_release = false;
         engine.release_held_ms = 0;
         engine.release_mark = None;
+        if engine.press_at.is_none() {
+            engine.press_at = Some(Instant::now());
+        }
+        engine.spool_id = Some(store::new_history_id());
         engine.generation
     };
     *lock(&state.last_error) = None;
@@ -341,14 +421,41 @@ pub fn begin(app: &AppHandle) {
     if let Some(tray) = app.tray_by_id("bolo") {
         let _ = tray.set_tooltip(Some(format!("Bolo.com — hold {}", display(&settings.hotkey))));
     }
-    let take = match state.warm.begin(settings.microphone.as_deref()) {
-        Ok(take) => take,
-        Err(err) => {
-            mark_idle(app);
-            fail(app, &err);
-            return;
-        }
-    };
+    publish(
+        app,
+        &DictationEvent {
+            phase: "arming".into(),
+            message: Some("Opening the microphone".into()),
+            elapsed_ms: 0,
+            level: 0.0,
+            engine: None,
+        },
+    );
+    let app = app.clone();
+    std::thread::Builder::new()
+        .name("bolo-arm".into())
+        .spawn(move || {
+            let state = app.state::<AppState>();
+            let preference = lock(&state.settings).microphone.clone();
+            match state.warm.begin(preference.as_deref()) {
+                Ok(take) => on_armed(&app, take, generation),
+                Err(err) => {
+                    let still = {
+                        let engine = lock(&state.engine);
+                        engine.generation == generation && matches!(engine.phase, Phase::Arming)
+                    };
+                    if still {
+                        mark_idle(&app);
+                        fail(&app, &err);
+                    }
+                }
+            }
+        })
+        .ok();
+}
+
+fn on_armed(app: &AppHandle, take: LiveTake, generation: u64) {
+    let state = app.state::<AppState>();
     if take.used_fallback {
         if let Some(message) = &take.device_note {
             log_line(&state.config_dir, "info", message);
@@ -357,68 +464,113 @@ pub fn begin(app: &AppHandle) {
     let (level, stop_flag) = take.meter();
     let started = take.started;
     let note = take.device_note.clone();
-    {
+    let action = {
         let mut engine = lock(&state.engine);
-        let cancelled = engine.stop_requested
-            || engine.generation != generation
-            || !matches!(engine.phase, Phase::Recording);
-        if cancelled {
-            engine.phase = Phase::Idle;
-            engine.take = None;
-            engine.stop_requested = false;
+        if engine.generation != generation || !matches!(engine.phase, Phase::Arming) {
             drop(engine);
             let _ = take.finish();
             return;
         }
+        let released = engine.released_during_arm;
+        let age = engine
+            .press_at
+            .map(|start| start.elapsed().as_millis() as u64)
+            .unwrap_or(0);
+        engine.released_during_arm = false;
+        engine.stop_requested = false;
         engine.take = Some(take);
+        engine.phase = Phase::Recording;
+        after_arm(released, age)
+    };
+    match action {
+        AfterArm::Listen => {
+            publish(
+                app,
+                &DictationEvent {
+                    phase: "recording".into(),
+                    message: note.clone(),
+                    elapsed_ms: 0,
+                    level: 0.0,
+                    engine: None,
+                },
+            );
+            spawn_meter(app.clone(), level, stop_flag, started, note, generation);
+        }
+        AfterArm::WaitSecondTap => {
+            publish(
+                app,
+                &DictationEvent {
+                    phase: "recording".into(),
+                    message: note.clone(),
+                    elapsed_ms: 0,
+                    level: 0.0,
+                    engine: None,
+                },
+            );
+            spawn_meter(app.clone(), level, stop_flag, started, note, generation);
+            {
+                let mut engine = lock(&state.engine);
+                engine.awaiting_second = true;
+            }
+            arm_double_tap(app.clone(), generation);
+        }
+        AfterArm::EndTake => end(app),
     }
-    publish(
-        app,
-        &DictationEvent {
-            phase: "recording".into(),
-            message: note.clone(),
-            elapsed_ms: 0,
-            level: 0.0,
-        },
-    );
-    spawn_meter(app.clone(), level, stop_flag, started, note, generation);
 }
 
 pub fn end(app: &AppHandle) {
     let state = app.state::<AppState>();
-    let (take, generation, short_press, hint_held_ms, release_started) = {
+    let (take, generation, short_press, hint_held_ms, release_started, held_ms, spool_id) = {
         let mut engine = lock(&state.engine);
         engine.awaiting_second = false;
         if !matches!(engine.phase, Phase::Recording) {
             return;
         }
         if engine.take.is_none() {
-            engine.stop_requested = true;
+            // Still arming would be a different phase. If we got here with no
+            // take, remember the release instead of dropping the next one.
+            engine.released_during_arm = true;
             return;
         }
         let release_started = engine.release_mark.take().unwrap_or_else(Instant::now);
         let short_press = engine.short_release;
+        let held_ms = engine
+            .press_at
+            .map(|start| start.elapsed().as_millis() as u64)
+            .unwrap_or_else(|| {
+                engine
+                    .take
+                    .as_ref()
+                    .map(|take| take.started.elapsed().as_millis() as u64)
+                    .unwrap_or(0)
+            });
         let hint_held_ms = if engine.release_held_ms > 0 {
             engine.release_held_ms
         } else {
-            engine
-                .take
-                .as_ref()
-                .map(|take| take.started.elapsed().as_millis() as u64)
-                .unwrap_or(0)
+            held_ms
         };
+        let spool_id = engine.spool_id.clone().unwrap_or_else(store::new_history_id);
         engine.short_release = false;
         engine.hands_free = false;
         engine.release_held_ms = 0;
         engine.phase = Phase::Busy;
-        (engine.take.take(), engine.generation, short_press, hint_held_ms, release_started)
+        (
+            engine.take.take(),
+            engine.generation,
+            short_press,
+            hint_held_ms,
+            release_started,
+            held_ms,
+            spool_id,
+        )
     };
     let Some(take) = take else {
         mark_idle(app);
         return;
     };
     let open_wait_ms = take.open_wait_ms;
-    let held_ms = take.started.elapsed().as_millis() as u64;
+    let bus = take.chunk_bus();
+    enqueue(app, take.drain_chunks());
     let stop_started = Instant::now();
     let finished = match take.finish() {
         Ok(mut finished) => {
@@ -432,12 +584,22 @@ pub fn end(app: &AppHandle) {
         }
     };
     let stop_ms = stop_started.elapsed().as_millis() as u64;
-    let settings = lock(&state.settings).clone();
-    let recent: Vec<String> = lock(&state.history)
-        .iter()
-        .take(2)
-        .map(|entry| entry.text.clone())
-        .collect();
+    let (flights, settings) = {
+        // The meter holds this from drain through enqueue. Waiting for it means
+        // a chunk it already pulled is in the flight list before we take it.
+        let _gate = lock(&state.pump_gate);
+        let mut tail = Vec::new();
+        if let Ok(mut queue) = bus.lock() {
+            tail.extend(queue.drain(..));
+        }
+        if !finished.interleaved.is_empty() {
+            tail.push(finished);
+        }
+        enqueue(app, tail);
+        let flights = lock(&state.jobs).take();
+        let settings = lock(&state.settings).clone();
+        (flights, settings)
+    };
     let clock = Clock {
         release_started,
         held_ms,
@@ -453,11 +615,15 @@ pub fn end(app: &AppHandle) {
             message: None,
             elapsed_ms: held_ms,
             level: 0.0,
+            engine: None,
         },
     );
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
-        match process(finished, settings, clock, recent).await {
+        let products = tauri::async_runtime::spawn_blocking(move || pipeline::collect(flights))
+            .await
+            .unwrap_or_default();
+        match process(products, settings, clock, spool_id).await {
             Ok(outcome) => deliver(&app, outcome, generation).await,
             Err(err) => {
                 let release_ms = err.staged.release_started.elapsed().as_millis() as u64;
@@ -473,13 +639,149 @@ pub fn end(app: &AppHandle) {
     });
 }
 
-pub fn toggle(app: &AppHandle) {
+fn enqueue(app: &AppHandle, audios: Vec<FinishedAudio>) {
+    if audios.is_empty() {
+        return;
+    }
     let state = app.state::<AppState>();
-    let recording = matches!(lock(&state.engine).phase, Phase::Recording);
-    if recording {
-        end(app);
-    } else {
-        begin(app);
+    let settings = lock(&state.settings).clone();
+    let recent: Vec<String> = lock(&state.history)
+        .iter()
+        .take(2)
+        .map(|entry| entry.text.clone())
+        .collect();
+    let spool_id = lock(&state.engine)
+        .spool_id
+        .clone()
+        .unwrap_or_else(store::new_history_id);
+    pipeline::launch(
+        &state.slots,
+        &state.jobs,
+        audios,
+        pipeline::JobEnv {
+            settings,
+            recent,
+            config_dir: state.config_dir.clone(),
+            spool_id,
+        },
+    );
+}
+
+pub fn toggle(app: &AppHandle) {
+    insert::note_foreground();
+    let state = app.state::<AppState>();
+    let phase = {
+        let engine = lock(&state.engine);
+        if matches!(engine.phase, Phase::Recording) {
+            "recording"
+        } else if matches!(engine.phase, Phase::Arming) {
+            "arming"
+        } else if matches!(engine.phase, Phase::Idle) {
+            "idle"
+        } else {
+            "busy"
+        }
+    };
+    match phase {
+        "recording" => end(app),
+        // A second click while the first is still opening used to cancel it.
+        "arming" => {}
+        "idle" => {
+            {
+                let mut engine = lock(&state.engine);
+                if engine.press_at.is_none() {
+                    engine.press_at = Some(Instant::now());
+                }
+            }
+            begin(app);
+        }
+        _ => {}
+    }
+}
+
+pub fn paste_last(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    let busy = {
+        let engine = lock(&state.engine);
+        !matches!(engine.phase, Phase::Idle)
+    };
+    if busy {
+        return;
+    }
+    let text = lock(&state.last_text).clone().or_else(|| {
+        spool::latest(&state.config_dir).and_then(|recovered| recovered.text)
+    });
+    let Some(text) = text.filter(|text| !text.trim().is_empty()) else {
+        fail(app, "There's no take to paste again yet.");
+        return;
+    };
+    let app = app.clone();
+    std::thread::spawn(move || {
+        insert::note_foreground();
+        match insert::insert_text(&text) {
+            Ok(inserted) if inserted.verified && matches!(inserted.method, InsertMethod::Clipboard) => {
+                let state = app.state::<AppState>();
+                if let Some(recovered) = spool::latest(&state.config_dir) {
+                    if recovered.text.as_deref() == Some(text.as_str()) {
+                        spool::remove(&state.config_dir, &recovered.id);
+                    }
+                }
+                publish(
+                    &app,
+                    &DictationEvent {
+                        phase: "done".into(),
+                        message: Some("Inserted".into()),
+                        elapsed_ms: 0,
+                        level: 0.0,
+                        engine: None,
+                    },
+                );
+                let generation = lock(&app.state::<AppState>().engine).generation;
+                schedule_hide(app, generation, 1_600);
+            }
+            Ok(_) => {
+                publish(
+                    &app,
+                    &DictationEvent {
+                        phase: "typed".into(),
+                        message: Some("Typed".into()),
+                        elapsed_ms: 0,
+                        level: 0.0,
+                        engine: None,
+                    },
+                );
+                schedule_hide(app.clone(), lock(&app.state::<AppState>().engine).generation, 1_600);
+            }
+            Err(err) => fail(&app, &format!("Couldn't paste the last take ({err}).")),
+        }
+    });
+}
+
+pub fn recover_spool(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    let Some(recovered) = spool::latest(&state.config_dir) else {
+        return;
+    };
+    if let Some(text) = recovered.text {
+        *lock(&state.last_text) = Some(text.clone());
+        log_line(
+            &state.config_dir,
+            "info",
+            &format!(
+                "recovered take {} ({} chars) that hadn't finished pasting",
+                recovered.id,
+                text.chars().count()
+            ),
+        );
+    } else if !recovered.audio.is_empty() {
+        log_line(
+            &state.config_dir,
+            "info",
+            &format!(
+                "recovered take {} audio that hadn't been transcribed; paste-again will retry it",
+                recovered.id
+            ),
+        );
     }
 }
 
@@ -493,11 +795,8 @@ fn spawn_meter(
 ) {
     std::thread::spawn(move || {
         while !stop.load(Ordering::Relaxed) {
+            pump_chunks(&app);
             let elapsed = started.elapsed();
-            if elapsed >= MAX_RECORDING {
-                end_if_generation(&app, generation);
-                break;
-            }
             let hands_free = app
                 .state::<AppState>()
                 .engine
@@ -512,82 +811,77 @@ fn spawn_meter(
                     message: recording_caption(hands_free, &note),
                     elapsed_ms: elapsed.as_millis() as u64,
                     level: (rms * 4.5).clamp(0.0, 1.0),
+                    engine: None,
                 },
             );
             std::thread::sleep(Duration::from_millis(80));
         }
+        pump_chunks(&app);
+        let _ = generation;
     });
 }
 
-fn end_if_generation(app: &AppHandle, generation: u64) {
+fn pump_chunks(app: &AppHandle) {
     let state = app.state::<AppState>();
-    let should_stop = {
+    let _gate = lock(&state.pump_gate);
+    let queued = {
         let engine = lock(&state.engine);
-        matches!(engine.phase, Phase::Recording) && engine.generation == generation
+        match engine.take.as_ref() {
+            Some(take) => take.drain_chunks(),
+            None => Vec::new(),
+        }
     };
-    if should_stop {
-        end(app);
-    }
+    enqueue(app, queued);
 }
 
 async fn process(
-    finished: audio::FinishedAudio,
+    products: Vec<Product>,
     settings: Settings,
     clock: Clock,
-    recent: Vec<String>,
+    spool_id: String,
 ) -> Result<Outcome, TakeError> {
+    let engine = pipeline::engine_label(&products).unwrap_or_default();
     let mut staged = Staged {
         held_ms: clock.held_ms,
         open_wait_ms: clock.open_wait_ms,
         stop_ms: clock.stop_ms,
-        encode_ms: 0,
-        bytes: 0,
-        encode_fmt: String::new(),
-        groq_ms: 0,
-        groq_tries: 0,
+        encode_ms: products.iter().map(|product| product.encode_ms).max().unwrap_or(0),
+        bytes: products.iter().map(|product| product.bytes).sum(),
+        encode_fmt: products
+            .iter()
+            .find(|product| !product.format.is_empty())
+            .map(|product| product.format.clone())
+            .unwrap_or_else(|| "flac".into()),
+        groq_ms: products.iter().map(|product| product.remote_ms).max().unwrap_or(0),
+        groq_tries: products.iter().map(|product| product.tries).max().unwrap_or(0),
         cleanup_ms: 0,
         cleanup_why: String::new(),
         paste_ms: 0,
         tone: "none".into(),
         release_started: clock.release_started,
+        engine: engine.clone(),
     };
-    let encode_started = Instant::now();
-    let prompt = transcribe::whisper_prompt_with(&settings.dictionary, &recent);
-    let encoded = tauri::async_runtime::spawn_blocking(move || audio::prepare_speech(&finished)).await;
-    let encoded = match encoded {
-        Ok(Ok(encoded)) => encoded,
-        Ok(Err(err)) => {
-            staged.encode_ms = encode_started.elapsed().as_millis() as u64;
-            if matches!(err, SpeechError::Silent | SpeechError::Empty) {
-                return Err(TakeError {
-                    message: silence_hint(clock.hint_held_ms, clock.short_press).into(),
-                    hint: true,
-                    staged,
-                });
-            }
+    let stitched = match pipeline::stitch_products(&products) {
+        Ok(text) => text,
+        Err(message) => {
+            let hint = products.iter().all(|product| product.silence || product.error.is_none())
+                && products.iter().any(|product| product.silence);
             return Err(TakeError {
-                message: err.to_string(),
-                hint: false,
-                staged,
-            });
-        }
-        Err(err) => {
-            staged.encode_ms = encode_started.elapsed().as_millis() as u64;
-            return Err(TakeError {
-                message: format!("Couldn't encode audio: {err}"),
-                hint: false,
+                message,
+                hint: hint && products.iter().all(|product| product.error.is_none()),
                 staged,
             });
         }
     };
-    staged.encode_ms = encode_started.elapsed().as_millis() as u64;
-    staged.bytes = encoded.bytes.len();
-    staged.encode_fmt = encoded.format.to_string();
-    let wav = encoded.bytes;
-    if wav.len() > 20 * 1024 * 1024 {
+    if stitched.trim().is_empty() {
+        let only_silence = products.iter().all(|product| product.error.is_none());
         return Err(TakeError {
-            message: "The recording is too large to upload.".into(),
-            hint: false,
+            message: if only_silence {
+                silence_hint(clock.hint_held_ms, clock.short_press).into()
+            } else {
+                "Nothing to insert.".into()
+            },
+            hint: true,
             staged,
         });
     }
@@ -596,43 +890,27 @@ async fn process(
     let key = match SecretKey::load() {
         Ok(key) => key,
         Err(err) => {
-            return Err(TakeError {
-                message: err.to_string(),
-                hint: false,
+            // The transcript already exists. Keep it so paste-again can use it
+            // even when cleanup cannot reach Groq.
+            let _ = err;
+            return Ok(Outcome {
+                text: stitched,
+                cleaned: false,
+                note: None,
+                duration_ms: clock.held_ms,
+                model: settings.model.clone(),
                 staged,
+                spool_id,
+                engine: pipeline::engine_label(&products),
             });
         }
     };
     let model = settings.model.clone();
-    let groq_started = Instant::now();
-    let transcript = match transcribe::transcribe(
-        transcribe::http_client(),
-        key.expose(),
-        wav,
-        &model,
-        &settings.language,
-        prompt,
-    )
-    .await
-    {
-        Ok(text) => text,
-        Err(err) => {
-            staged.groq_ms = groq_started.elapsed().as_millis() as u64;
-            staged.groq_tries = 1;
-            return Err(TakeError {
-                message: err.to_string(),
-                hint: false,
-                staged,
-            });
-        }
-    };
-    staged.groq_ms = groq_started.elapsed().as_millis() as u64;
-    staged.groq_tries = transcript.tries;
     let cleanup_started = Instant::now();
     let cleaned = cleanup::clean_transcript(
         transcribe::http_client(),
         key.expose(),
-        &transcript.text,
+        &stitched,
         settings.cleanup_enabled,
         tone,
     )
@@ -655,25 +933,40 @@ async fn process(
         duration_ms: clock.held_ms,
         model,
         staged,
+        spool_id,
+        engine: pipeline::engine_label(&products),
     })
 }
 
 async fn deliver(app: &AppHandle, mut outcome: Outcome, generation: u64) {
     absorb_dictionary(app, &outcome.text);
+    let state = app.state::<AppState>();
+    spool::write_text(&state.config_dir, &outcome.spool_id, &outcome.text);
+    *lock(&state.last_text) = Some(outcome.text.clone());
     let text = outcome.text.clone();
+    publish(
+        app,
+        &DictationEvent {
+            phase: "inserting".into(),
+            message: outcome.engine.clone(),
+            elapsed_ms: outcome.duration_ms,
+            level: 0.0,
+            engine: outcome.engine.clone(),
+        },
+    );
     let paste_started = Instant::now();
     let inserted = tauri::async_runtime::spawn_blocking(move || insert::insert_text(&text)).await;
     outcome.staged.paste_ms = paste_started.elapsed().as_millis() as u64;
     let release_ms = outcome.staged.release_started.elapsed().as_millis() as u64;
-    let method = match inserted {
-        Ok(Ok(method)) => Some(method),
+    let inserted = match inserted {
+        Ok(Ok(inserted)) => inserted,
         Ok(Err(err)) => {
             log_stages(app, &outcome.staged, release_ms);
             remember(app, &outcome);
             mark_idle(app);
             fail(
                 app,
-                &format!("Couldn't insert the text ({err}). It's saved in History."),
+                &format!("Couldn't insert the text ({err}). It's saved in History. Paste it again with the paste hotkey."),
             );
             return;
         }
@@ -681,36 +974,52 @@ async fn deliver(app: &AppHandle, mut outcome: Outcome, generation: u64) {
             log_stages(app, &outcome.staged, release_ms);
             remember(app, &outcome);
             mark_idle(app);
-            fail(app, &format!("Couldn't insert the text ({err}). It's saved in History."));
+            fail(
+                app,
+                &format!("Couldn't insert the text ({err}). It's saved in History. Paste it again with the paste hotkey."),
+            );
             return;
         }
     };
+    // "Inserted" only after the target accepted the paste. Typing is reported
+    // as Typed, including when the field can't be read back.
+    let word = insert::status_word(inserted.method, inserted.verified);
+    let verified_paste = word == "Inserted";
+    if verified_paste {
+        spool::remove(&state.config_dir, &outcome.spool_id);
+    }
     log_stages(app, &outcome.staged, release_ms);
-    let state = app.state::<AppState>();
     log_line(
         &state.config_dir,
         "info",
         &format!(
-            "inserted chars={} cleaned={} via={}",
+            "inserted chars={} cleaned={} via={} verified={} engine={}",
             outcome.text.chars().count(),
             outcome.cleaned,
-            match method {
-                Some(InsertMethod::Clipboard) => "clipboard",
-                Some(InsertMethod::Typed) => "typed",
-                None => "unknown",
-            }
+            match inserted.method {
+                InsertMethod::Clipboard => "clipboard",
+                InsertMethod::Typed => "typed",
+            },
+            inserted.verified,
+            outcome.engine.as_deref().unwrap_or("none")
         ),
     );
     remember(app, &outcome);
     mark_idle(app);
-    let message = outcome.note.clone().unwrap_or_else(|| "Inserted".into());
+    let (phase, fallback) = if verified_paste {
+        ("done", "Inserted")
+    } else {
+        ("typed", "Typed")
+    };
+    let message = outcome.note.clone().unwrap_or_else(|| fallback.into());
     publish(
         app,
         &DictationEvent {
-            phase: "done".into(),
+            phase: phase.into(),
             message: Some(message),
             elapsed_ms: outcome.duration_ms,
             level: 0.0,
+            engine: outcome.engine.clone(),
         },
     );
     schedule_hide(app.clone(), generation, 1_600);
@@ -753,7 +1062,7 @@ fn stage_line(staged: &Staged, release_ms: u64) -> String {
     } else {
         staged.encode_fmt.as_str()
     };
-    format!(
+    let mut line = format!(
         "stages held={} open_wait={} stop={} encode={} bytes={} fmt={} groq={} tries={} cleanup={}{why} paste={} release={} tone={}",
         staged.held_ms,
         staged.open_wait_ms,
@@ -767,7 +1076,12 @@ fn stage_line(staged: &Staged, release_ms: u64) -> String {
         staged.paste_ms,
         release_ms,
         staged.tone
-    )
+    );
+    if !staged.engine.is_empty() {
+        line.push_str(" engine=");
+        line.push_str(&staged.engine);
+    }
+    line
 }
 
 fn quote_log(value: &str) -> String {
@@ -820,6 +1134,7 @@ fn show_problem(app: &AppHandle, message: &str, hide_ms: u64) {
             message: Some(message.to_string()),
             elapsed_ms: 0,
             level: 0.0,
+            engine: None,
         },
     );
     schedule_hide(app.clone(), generation, hide_ms);
@@ -841,6 +1156,7 @@ fn schedule_hide(app: AppHandle, generation: u64, delay_ms: u64) {
                     message: None,
                     elapsed_ms: 0,
                     level: 0.0,
+                    engine: None,
                 },
             );
         }
@@ -855,6 +1171,8 @@ fn mark_idle(app: &AppHandle) {
     engine.stop_requested = false;
     engine.hands_free = false;
     engine.awaiting_second = false;
+    engine.press_at = None;
+    engine.released_during_arm = false;
 }
 
 fn publish(app: &AppHandle, event: &DictationEvent) {
@@ -918,25 +1236,25 @@ mod tests {
     fn double_tap_does_not_delay_a_normal_hold() {
         assert_eq!(press_decision(false, false, true), PressDecision::Begin);
         assert_eq!(
-            release_decision(false, true, true, TAP_MS),
+            release_decision(false, true, true, TAP_MS, false),
             ReleaseDecision::EndNow
         );
         assert_eq!(
-            release_decision(false, true, true, TAP_MS - 1),
+            release_decision(false, true, true, TAP_MS - 1, false),
             ReleaseDecision::ArmDoubleTap
         );
         assert_eq!(
             press_decision(false, true, false),
             PressDecision::LatchHandsFree
         );
-        assert_eq!(release_decision(true, true, true, 20), ReleaseDecision::Ignore);
+        assert_eq!(release_decision(true, true, true, 20, false), ReleaseDecision::Ignore);
         assert_eq!(press_decision(true, false, false), PressDecision::StopHandsFree);
         assert_eq!(press_decision(false, false, false), PressDecision::Ignore);
         assert_eq!(
-            release_decision(false, true, false, 0),
-            ReleaseDecision::CancelOpen
+            release_decision(false, true, false, 0, true),
+            ReleaseDecision::NoteArmRelease
         );
-        assert_eq!(release_decision(false, false, false, 0), ReleaseDecision::Ignore);
+        assert_eq!(release_decision(false, false, false, 0, false), ReleaseDecision::Ignore);
     }
 
     #[test]
@@ -966,6 +1284,7 @@ mod tests {
                 paste_ms: 39,
                 tone: "casual".into(),
                 release_started: Instant::now(),
+                engine: "Groq".into(),
             },
             304,
         );
@@ -974,6 +1293,27 @@ mod tests {
         assert!(line.contains("cleanup=56"));
         assert!(line.contains("cleanup_why=\"couldn't reach Groq: timed out\""));
         assert!(line.contains("tone=casual"));
+        assert!(line.contains("engine=Groq"));
         assert!(!line.contains("cleanup_why=\"\""));
+    }
+
+    #[test]
+    fn first_press_starts_capture() {
+        // Still holding when the mic opens: listen. This is the first press.
+        assert_eq!(after_arm(false, 40), AfterArm::Listen);
+        assert_eq!(after_arm(false, 2_000), AfterArm::Listen);
+        // A key-up during arming must not cancel the take.
+        assert_eq!(
+            release_decision(false, false, false, 0, true),
+            ReleaseDecision::NoteArmRelease
+        );
+        // Hold time is the age of the key-down, so a slow open is not a tap.
+        assert_eq!(
+            release_decision(false, true, true, 800, false),
+            ReleaseDecision::EndNow
+        );
+        assert_eq!(after_arm(true, 800), AfterArm::EndTake);
+        assert_eq!(after_arm(true, 80), AfterArm::WaitSecondTap);
+        assert!(crate::chunk::recording_cap().is_none());
     }
 }

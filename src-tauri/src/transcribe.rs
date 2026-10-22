@@ -1,13 +1,71 @@
 //! Groq Whisper transcription. Audio is sent only to api.groq.com.
 
 use crate::cleanup::groq_error_message;
-use anyhow::{anyhow, Context};
+use anyhow::Context;
 use serde::Deserialize;
 use std::sync::OnceLock;
 use std::time::Duration;
 
 pub const WHISPER_TURBO: &str = "whisper-large-v3-turbo";
 pub const WHISPER_LARGE: &str = "whisper-large-v3";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailKind {
+    /// HTTP 429. One backoff, then the on-device model may take the chunk.
+    RateLimit,
+    /// Network failure or HTTP 5xx. A few backoffs, then the on-device model.
+    Unavailable,
+    /// The key was rejected. Do not hide that behind the on-device model.
+    Rejected,
+    Other,
+}
+
+#[derive(Debug)]
+pub struct GroqFailure {
+    pub message: String,
+    pub kind: FailKind,
+}
+
+impl std::fmt::Display for GroqFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for GroqFailure {}
+
+pub fn failure_kind(err: &anyhow::Error) -> Option<FailKind> {
+    err.downcast_ref::<GroqFailure>().map(|failure| failure.kind)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetryPlan {
+    /// Wait, then try the same request again.
+    Backoff { ms: u64 },
+    /// Stop retrying. `fallback` means whisper.cpp should take this chunk.
+    Stop { fallback: bool },
+}
+
+/// `attempt` is how many failures have already been seen, starting at 0.
+pub fn retry_plan(kind: FailKind, attempt: u32) -> RetryPlan {
+    match kind {
+        FailKind::Rejected | FailKind::Other => RetryPlan::Stop { fallback: false },
+        FailKind::RateLimit => {
+            if attempt == 0 {
+                RetryPlan::Backoff { ms: 700 }
+            } else {
+                RetryPlan::Stop { fallback: true }
+            }
+        }
+        FailKind::Unavailable => {
+            if attempt < 2 {
+                RetryPlan::Backoff { ms: 250 * 3u64.pow(attempt) }
+            } else {
+                RetryPlan::Stop { fallback: true }
+            }
+        }
+    }
+}
 
 pub fn http_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
@@ -199,7 +257,38 @@ async fn request_transcript(
     language: &str,
     prompt: Option<&str>,
 ) -> anyhow::Result<Attempt> {
-    let part = audio_part(audio)?;
+    let mut attempt = 0u32;
+    loop {
+        match request_transcript_once(client, api_key, audio.clone(), model, language, prompt).await {
+            Ok(parsed) => return Ok(parsed),
+            Err(failure) => match retry_plan(failure.kind, attempt) {
+                RetryPlan::Backoff { ms } => {
+                    std::thread::sleep(Duration::from_millis(ms));
+                    attempt += 1;
+                }
+                RetryPlan::Stop { .. } => return Err(anyhow::Error::from(failure)),
+            },
+        }
+    }
+}
+
+async fn request_transcript_once(
+    client: &reqwest::Client,
+    api_key: &str,
+    audio: Vec<u8>,
+    model: &str,
+    language: &str,
+    prompt: Option<&str>,
+) -> Result<Attempt, GroqFailure> {
+    let part = match audio_part(audio) {
+        Ok(part) => part,
+        Err(err) => {
+            return Err(GroqFailure {
+                message: err.to_string(),
+                kind: FailKind::Other,
+            })
+        }
+    };
     let mut form = reqwest::multipart::Form::new()
         .part("file", part)
         .text("model", model.to_string())
@@ -211,19 +300,52 @@ async fn request_transcript(
     if let Some(prompt) = prompt {
         form = form.text("prompt", prompt.to_string());
     }
-    let response = client
+    let response = match client
         .post("https://api.groq.com/openai/v1/audio/transcriptions")
         .bearer_auth(api_key)
         .multipart(form)
         .send()
         .await
-        .context("couldn't reach Groq")?;
+    {
+        Ok(response) => response,
+        Err(err) => {
+            return Err(GroqFailure {
+                message: format!("couldn't reach Groq: {err}"),
+                kind: FailKind::Unavailable,
+            })
+        }
+    };
     let status = response.status();
-    let body = response.text().await.context("empty transcription response")?;
+    let body = match response.text().await {
+        Ok(body) => body,
+        Err(err) => {
+            return Err(GroqFailure {
+                message: format!("empty transcription response: {err}"),
+                kind: if status.is_server_error() {
+                    FailKind::Unavailable
+                } else {
+                    FailKind::Other
+                },
+            })
+        }
+    };
     if !status.is_success() {
-        return Err(anyhow!(groq_error_message(status.as_u16(), &body)));
+        let code = status.as_u16();
+        let kind = match code {
+            401 | 403 => FailKind::Rejected,
+            429 => FailKind::RateLimit,
+            500..=599 => FailKind::Unavailable,
+            _ => FailKind::Other,
+        };
+        return Err(GroqFailure {
+            message: groq_error_message(code, &body),
+            kind,
+        });
     }
-    parse_attempt(&body)
+    parse_attempt(&body).map_err(|err| GroqFailure {
+        message: err.to_string(),
+        kind: FailKind::Other,
+    })
 }
 
 fn audio_part(bytes: Vec<u8>) -> anyhow::Result<reqwest::multipart::Part> {
@@ -347,6 +469,18 @@ mod tests {
         assert!((attempt.no_speech_prob.unwrap() - 0.2).abs() < 0.001);
         let plain = parse_attempt(r#"{"text":"hello"}"#).unwrap();
         assert_eq!(plain.text, "hello");
+        assert_eq!(retry_plan(FailKind::RateLimit, 0), RetryPlan::Backoff { ms: 700 });
+        assert_eq!(retry_plan(FailKind::RateLimit, 1), RetryPlan::Stop { fallback: true });
+        assert_eq!(retry_plan(FailKind::Unavailable, 0), RetryPlan::Backoff { ms: 250 });
+        assert_eq!(retry_plan(FailKind::Unavailable, 1), RetryPlan::Backoff { ms: 750 });
+        assert_eq!(retry_plan(FailKind::Unavailable, 2), RetryPlan::Stop { fallback: true });
+        assert_eq!(retry_plan(FailKind::Rejected, 0), RetryPlan::Stop { fallback: false });
+        let failure = GroqFailure {
+            message: "Groq is rate limiting requests right now".into(),
+            kind: FailKind::RateLimit,
+        };
+        let wrapped = anyhow::Error::from(failure);
+        assert_eq!(failure_kind(&wrapped), Some(FailKind::RateLimit));
         assert!(plain.avg_logprob.is_none());
     }
 

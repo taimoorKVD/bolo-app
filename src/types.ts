@@ -17,6 +17,8 @@ export type Settings = {
   dictionary: string[];
   launchAtStartup: boolean;
   historyEnabled: boolean;
+  pasteHotkey: Hotkey;
+  offlineModel: "base.en" | "small.en" | "off" | string;
 };
 
 export type ApiKeyStatus = {
@@ -60,11 +62,20 @@ export type MicStatus = {
   devices: MicInfo[];
 };
 
-export type DictationPhase = "idle" | "recording" | "transcribing" | "done" | "error";
+export type DictationPhase =
+  | "idle"
+  | "arming"
+  | "recording"
+  | "transcribing"
+  | "inserting"
+  | "done"
+  | "typed"
+  | "error";
 
 export type DictationEvent = {
   phase: DictationPhase;
   message: string | null;
   elapsedMs: number;
   level: number;
+  engine?: string | null;
 };

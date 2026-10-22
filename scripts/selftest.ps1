@@ -292,6 +292,12 @@ function Invoke-StartupSmoke {
                 if ($null -eq $detail -and $settings.historyEnabled -ne $true) {
                     $detail = "historyEnabled should stay on when the file omits it: $raw"
                 }
+                if ($null -eq $detail -and $settings.offlineModel -ne "base.en") {
+                    $detail = "offlineModel should default to base.en when the file omits it: $raw"
+                }
+                if ($null -eq $detail -and ($settings.pasteHotkey.ctrl -ne $true -or $settings.pasteHotkey.win -ne $true -or $settings.pasteHotkey.key -ne "v")) {
+                    $detail = "pasteHotkey should default to Ctrl+Win+V when the file omits it: $raw"
+                }
                 if ($null -eq $detail -and $null -ne $settings.microphone) {
                     $detail = "microphone should be null: $raw"
                 }

@@ -1,4 +1,5 @@
 mod audio;
+mod chunk;
 mod cleanup;
 mod context;
 mod credentials;
@@ -8,6 +9,9 @@ mod insert;
 mod listener;
 mod logbuf;
 mod micwatch;
+mod offline;
+mod pipeline;
+mod spool;
 mod store;
 mod transcribe;
 mod warm;
@@ -17,7 +21,8 @@ mod live_tests;
 
 use crate::credentials::ApiKeyStatus;
 use crate::dictation::AppState;
-use crate::hotkey::{display, HotkeyEdge};
+use crate::hotkey::display;
+use crate::listener::InputEvent;
 use crate::store::{prepare_settings, HistoryEntry, Settings};
 use serde::Serialize;
 use std::sync::mpsc;
@@ -101,7 +106,7 @@ pub fn run() {
             listener.set_on_status(move |status| {
                 let _ = emit_app.emit("listener-status", &status);
             });
-            let (tx, rx) = mpsc::channel::<HotkeyEdge>();
+            let (tx, rx) = mpsc::channel::<InputEvent>();
             listener::spawn(listener, tx);
 
             if let Err(err) = create_windows(app, smoke) {
@@ -111,8 +116,11 @@ pub fn run() {
             if let Err(err) = std::thread::Builder::new()
                 .name("cadence-dictation".into())
                 .spawn(move || {
-                    while let Ok(edge) = rx.recv() {
-                        dictation::hotkey(&handle, edge);
+                    while let Ok(event) = rx.recv() {
+                        match event {
+                            InputEvent::Dictation(edge) => dictation::hotkey(&handle, edge),
+                            InputEvent::PasteAgain => dictation::paste_last(&handle),
+                        }
                     }
                 })
             {
@@ -150,6 +158,8 @@ pub fn run() {
                 &format!("Bolo.com ready, hold {}", display(&settings.hotkey)),
             );
             micwatch::spawn(app.handle().clone());
+            dictation::recover_spool(app.handle());
+            offline::prefetch(dir.clone(), settings.offline_model.clone());
             Ok(())
         })
         .run(tauri::generate_context!())
@@ -306,6 +316,7 @@ fn save_settings(
         return Err(err);
     }
     state.listener.set_hotkey(settings.hotkey.clone());
+    state.listener.set_paste_hotkey(settings.paste_hotkey.clone());
     state.warm.retarget(settings.microphone.clone());
     update_tooltip(&app, &settings.hotkey);
     *state

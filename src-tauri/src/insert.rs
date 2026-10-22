@@ -13,26 +13,71 @@ use std::time::Duration;
 const CLIPBOARD_PUBLISH_DELAY: Duration = Duration::from_millis(8);
 const PASTE_SETTLE_DELAY: Duration = Duration::from_millis(25);
 
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum InsertMethod {
     Clipboard,
     Typed,
 }
 
-pub fn insert_text(text: &str) -> anyhow::Result<InsertMethod> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Insertion {
+    pub method: InsertMethod,
+    pub verified: bool,
+}
+
+/// "Inserted" only when a paste was confirmed. Typing is always "Typed".
+pub fn status_word(method: InsertMethod, verified: bool) -> &'static str {
+    if verified && matches!(method, InsertMethod::Clipboard) {
+        "Inserted"
+    } else {
+        "Typed"
+    }
+}
+
+/// The phrase showed up in the control, and the control changed.
+pub fn text_landed(before: &str, after: &str, phrase: &str) -> bool {
+    let phrase = phrase.trim();
+    if phrase.is_empty() || after == before || !after.contains(phrase) {
+        return false;
+    }
+    !before.contains(phrase)
+        || after.chars().count() + 2 >= before.chars().count() + phrase.chars().count()
+}
+
+pub fn insert_text(text: &str) -> anyhow::Result<Insertion> {
     let text = text.trim();
     if text.is_empty() {
         return Err(anyhow!("nothing to insert"));
     }
-    match paste_via_clipboard(text) {
-        Ok(()) => Ok(InsertMethod::Clipboard),
-        Err(err) => {
-            eprintln!("clipboard paste unavailable ({err}); typing the transcript");
-            type_text(text).context("couldn't type the transcript either")?;
-            Ok(InsertMethod::Typed)
+    #[cfg(windows)]
+    {
+        return insert_text_windows(text);
+    }
+    #[cfg(not(windows))]
+    {
+        // Linux has no read-back. The Windows path is the one that verifies.
+        match paste_via_clipboard(text) {
+            Ok(()) => Ok(Insertion {
+                method: InsertMethod::Clipboard,
+                verified: true,
+            }),
+            Err(err) => {
+                eprintln!("clipboard paste unavailable ({err}); typing the transcript");
+                type_text(text).context("couldn't type the transcript either")?;
+                Ok(Insertion {
+                    method: InsertMethod::Typed,
+                    verified: true,
+                })
+            }
         }
     }
+}
+
+/// Remember the app the user was typing in, before the tally is shown.
+pub fn note_foreground() {
+    #[cfg(windows)]
+    note_foreground_windows();
 }
 
 pub fn set_clipboard_text(text: &str) -> anyhow::Result<()> {
@@ -43,6 +88,7 @@ pub fn set_clipboard_text(text: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg_attr(windows, allow(dead_code))]
 fn paste_via_clipboard(text: &str) -> anyhow::Result<()> {
     let mut clipboard = Clipboard::new().context("couldn't open the clipboard")?;
     let previous_text = clipboard.get_text().ok();
@@ -61,6 +107,10 @@ fn paste_via_clipboard(text: &str) -> anyhow::Result<()> {
     restore_text(&mut clipboard, previous_text);
     Ok(())
 }
+
+/// How long a non-edit target may take to read the clipboard before we type instead.
+#[cfg(windows)]
+const VERIFY_WAIT: Duration = Duration::from_millis(400);
 
 fn restore_text(clipboard: &mut Clipboard, previous: Option<String>) {
     let restored = if let Some(previous) = previous {
@@ -180,6 +230,399 @@ fn type_text(text: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(windows)]
+fn insert_text_windows(text: &str) -> anyhow::Result<Insertion> {
+    release_stuck_modifiers();
+    let target = foreground_target();
+    if let Some(hwnd) = target {
+        if let Some(edit) = edit_target(hwnd) {
+            return insert_into_edit(edit, text);
+        }
+    }
+    match clipboard_paste_verified(text) {
+        Ok(()) => Ok(Insertion {
+            method: InsertMethod::Clipboard,
+            verified: true,
+        }),
+        Err(err) => {
+            eprintln!("clipboard paste was not confirmed ({err}); typing the transcript");
+            type_text(text).context("couldn't type the transcript either")?;
+            if let Some(edit) = target.and_then(edit_target) {
+                if window_text(edit).contains(text) {
+                    return Ok(Insertion {
+                        method: InsertMethod::Typed,
+                        verified: true,
+                    });
+                }
+            }
+            Ok(Insertion {
+                method: InsertMethod::Typed,
+                verified: false,
+            })
+        }
+    }
+}
+
+#[cfg(windows)]
+fn insert_into_edit(
+    hwnd: windows::Win32::Foundation::HWND,
+    text: &str,
+) -> anyhow::Result<Insertion> {
+    use windows::Win32::UI::WindowsAndMessaging::{SendMessageW, WM_PASTE};
+
+    let before = window_text(hwnd);
+    if clipboard_is_image() {
+        replace_selection(hwnd, text);
+        let after = window_text(hwnd);
+        if text_landed(&before, &after, text) {
+            return Ok(Insertion {
+                method: InsertMethod::Typed,
+                verified: true,
+            });
+        }
+        return Err(anyhow!("the text did not appear in the text field"));
+    }
+    let previous = Clipboard::new().ok().and_then(|mut clipboard| clipboard.get_text().ok());
+    if let Err(err) = set_clipboard_text(text) {
+        replace_selection(hwnd, text);
+        let after = window_text(hwnd);
+        if text_landed(&before, &after, text) {
+            return Ok(Insertion {
+                method: InsertMethod::Typed,
+                verified: true,
+            });
+        }
+        return Err(err);
+    }
+    // WM_PASTE is synchronous for an Edit control, so the read-back happens
+    // before the previous clipboard value is put back. Restoring first was
+    // why a second take could report Inserted while the field kept the old text.
+    unsafe {
+        SendMessageW(hwnd, WM_PASTE, None, None);
+    }
+    let after = window_text(hwnd);
+    if let Ok(mut clipboard) = Clipboard::new() {
+        restore_text(&mut clipboard, previous.clone());
+    }
+    if text_landed(&before, &after, text) {
+        return Ok(Insertion {
+            method: InsertMethod::Clipboard,
+            verified: true,
+        });
+    }
+    replace_selection(hwnd, text);
+    let typed = window_text(hwnd);
+    if text_landed(&before, &typed, text) {
+        return Ok(Insertion {
+            method: InsertMethod::Typed,
+            verified: true,
+        });
+    }
+    Err(anyhow!("the text did not appear in the text field"))
+}
+
+#[cfg(windows)]
+fn clipboard_is_image() -> bool {
+    let Ok(mut clipboard) = Clipboard::new() else {
+        return false;
+    };
+    clipboard.get_text().is_err() && clipboard.get_image().is_ok()
+}
+
+#[cfg(windows)]
+fn replace_selection(hwnd: windows::Win32::Foundation::HWND, text: &str) {
+    use windows::Win32::Foundation::{LPARAM, WPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::SendMessageW;
+    let mut wide: Vec<u16> = text.encode_utf16().collect();
+    wide.push(0);
+    unsafe {
+        SendMessageW(
+            hwnd,
+            0x00C2,
+            Some(WPARAM(1)),
+            Some(LPARAM(wide.as_ptr() as isize)),
+        );
+    }
+}
+
+#[cfg(windows)]
+fn window_text(hwnd: windows::Win32::Foundation::HWND) -> String {
+    use windows::Win32::UI::WindowsAndMessaging::GetWindowTextW;
+    let mut buffer = vec![0u16; 32_768];
+    let length = unsafe { GetWindowTextW(hwnd, &mut buffer) }.max(0) as usize;
+    String::from_utf16_lossy(&buffer[..length.min(buffer.len())])
+}
+
+#[cfg(windows)]
+fn edit_target(hwnd: windows::Win32::Foundation::HWND) -> Option<windows::Win32::Foundation::HWND> {
+    if is_edit_class(hwnd) {
+        return Some(hwnd);
+    }
+    use windows::Win32::UI::WindowsAndMessaging::{GetGUIThreadInfo, GetWindowThreadProcessId, GUITHREADINFO};
+    let thread = unsafe { GetWindowThreadProcessId(hwnd, None) };
+    let mut info = GUITHREADINFO {
+        cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
+        ..Default::default()
+    };
+    if unsafe { GetGUIThreadInfo(thread, &mut info) }.is_err() {
+        return None;
+    }
+    let focus = info.hwndFocus;
+    if focus.0.is_null() {
+        return None;
+    }
+    if is_edit_class(focus) {
+        Some(focus)
+    } else {
+        None
+    }
+}
+
+#[cfg(windows)]
+fn is_edit_class(hwnd: windows::Win32::Foundation::HWND) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::GetClassNameW;
+    let mut buffer = [0u16; 64];
+    let length = unsafe { GetClassNameW(hwnd, &mut buffer) }.max(0) as usize;
+    let name = String::from_utf16_lossy(&buffer[..length.min(buffer.len())]).to_ascii_lowercase();
+    name == "edit" || name.contains("richedit") || name.contains("scintilla")
+}
+
+#[cfg(windows)]
+fn foreground_target() -> Option<windows::Win32::Foundation::HWND> {
+    use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+    let foreground = unsafe { GetForegroundWindow() };
+    if !foreground.0.is_null() && !is_our_process(foreground) {
+        remember_target(foreground);
+        return Some(foreground);
+    }
+    last_target()
+}
+
+#[cfg(windows)]
+fn note_foreground_windows() {
+    use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+    let foreground = unsafe { GetForegroundWindow() };
+    if !foreground.0.is_null() && !is_our_process(foreground) {
+        remember_target(foreground);
+    }
+}
+
+#[cfg(windows)]
+fn is_our_process(hwnd: windows::Win32::Foundation::HWND) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
+    let mut pid = 0u32;
+    unsafe {
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+    }
+    pid == std::process::id()
+}
+
+#[cfg(windows)]
+fn remember_target(hwnd: windows::Win32::Foundation::HWND) {
+    if let Ok(mut slot) = LAST_TARGET.lock() {
+        *slot = Some(hwnd.0 as isize);
+    }
+}
+
+#[cfg(windows)]
+fn last_target() -> Option<windows::Win32::Foundation::HWND> {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::IsWindow;
+    let raw = LAST_TARGET.lock().ok().and_then(|slot| *slot)?;
+    let hwnd = HWND(raw as *mut core::ffi::c_void);
+    if unsafe { IsWindow(Some(hwnd)) }.as_bool() {
+        Some(hwnd)
+    } else {
+        None
+    }
+}
+
+#[cfg(windows)]
+static LAST_TARGET: std::sync::Mutex<Option<isize>> = std::sync::Mutex::new(None);
+
+#[cfg(windows)]
+fn release_stuck_modifiers() {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        GetAsyncKeyState, SendInput, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
+    };
+    let stuck = [VK_CONTROL, VK_MENU, VK_SHIFT, VK_LWIN, VK_RWIN]
+        .into_iter()
+        .filter(|vk| unsafe { GetAsyncKeyState(vk.0 as i32) } < 0)
+        .collect::<Vec<_>>();
+    if stuck.is_empty() {
+        return;
+    }
+    let inputs: Vec<_> = stuck.into_iter().map(|vk| key_input(vk, key_up_flag())).collect();
+    unsafe {
+        let _ = SendInput(&inputs, std::mem::size_of::<windows::Win32::UI::Input::KeyboardAndMouse::INPUT>() as i32);
+    }
+    thread::sleep(Duration::from_millis(20));
+}
+
+#[cfg(windows)]
+fn key_up_flag() -> windows::Win32::UI::Input::KeyboardAndMouse::KEYBD_EVENT_FLAGS {
+    windows::Win32::UI::Input::KeyboardAndMouse::KEYEVENTF_KEYUP
+}
+
+#[cfg(windows)]
+fn clipboard_paste_verified(text: &str) -> anyhow::Result<()> {
+    if clipboard_is_image() {
+        return Err(anyhow!("clipboard holds an image"));
+    }
+    let previous = Clipboard::new().ok().and_then(|mut clipboard| clipboard.get_text().ok());
+    // Own the clipboard with delayed rendering. The target's paste calls
+    // GetClipboardData, which asks us to render. If that never arrives, the
+    // paste did not land and the caller types instead.
+    let rendered = render_until_read(text)?;
+    if let Ok(mut clipboard) = Clipboard::new() {
+        restore_text(&mut clipboard, previous);
+    }
+    if rendered {
+        Ok(())
+    } else {
+        Err(anyhow!("the focused app did not read the clipboard"))
+    }
+}
+
+#[cfg(windows)]
+fn render_until_read(text: &str) -> anyhow::Result<bool> {
+    use windows::Win32::System::DataExchange::{
+        CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, DestroyWindow, DispatchMessageW, PeekMessageW, RegisterClassW, HWND_MESSAGE, MSG,
+        PM_REMOVE, WINDOW_EX_STYLE, WINDOW_STYLE, WNDCLASSW,
+    };
+    use windows::core::PCWSTR;
+
+    let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+    {
+        let mut job = RENDER.lock().unwrap_or_else(|err| err.into_inner());
+        *job = Some(RenderJob {
+            wide,
+            rendered: false,
+        });
+    }
+    unsafe {
+        let class_name: Vec<u16> = format!("BoloClip{}\0", std::process::id()).encode_utf16().collect();
+        let class = WNDCLASSW {
+            lpfnWndProc: Some(clip_wnd_proc),
+            lpszClassName: PCWSTR(class_name.as_ptr()),
+            ..Default::default()
+        };
+        let _ = RegisterClassW(&class);
+        let hwnd = CreateWindowExW(
+            WINDOW_EX_STYLE::default(),
+            PCWSTR(class_name.as_ptr()),
+            PCWSTR(class_name.as_ptr()),
+            WINDOW_STYLE::default(),
+            0,
+            0,
+            0,
+            0,
+            Some(HWND_MESSAGE),
+            None,
+            None,
+            None,
+        )
+        .map_err(|err| anyhow!("couldn't own the clipboard: {err}"))?;
+        if OpenClipboard(Some(hwnd)).is_err() {
+            let _ = DestroyWindow(hwnd);
+            return Err(anyhow!("couldn't open the clipboard"));
+        }
+        if EmptyClipboard().is_err() {
+            let _ = CloseClipboard();
+            let _ = DestroyWindow(hwnd);
+            return Err(anyhow!("couldn't clear the clipboard"));
+        }
+        // NULL data means delayed rendering. Format 13 is CF_UNICODETEXT.
+        if SetClipboardData(13, None).is_err() {
+            let _ = CloseClipboard();
+            let _ = DestroyWindow(hwnd);
+            return Err(anyhow!("couldn't publish the transcript"));
+        }
+        let _ = CloseClipboard();
+        if let Some(target) = last_target() {
+            focus_target(target);
+        }
+        send_ctrl_v()?;
+        let deadline = std::time::Instant::now() + VERIFY_WAIT;
+        let mut message = MSG::default();
+        while std::time::Instant::now() < deadline {
+            while PeekMessageW(&mut message, Some(hwnd), 0, 0, PM_REMOVE).as_bool() {
+                let _ = DispatchMessageW(&message);
+            }
+            if RENDER.lock().ok().and_then(|job| job.as_ref().map(|job| job.rendered)) == Some(true) {
+                let _ = DestroyWindow(hwnd);
+                return Ok(true);
+            }
+            thread::sleep(Duration::from_millis(15));
+        }
+        let _ = DestroyWindow(hwnd);
+    }
+    Ok(false)
+}
+
+#[cfg(windows)]
+struct RenderJob {
+    wide: Vec<u16>,
+    rendered: bool,
+}
+
+#[cfg(windows)]
+static RENDER: std::sync::Mutex<Option<RenderJob>> = std::sync::Mutex::new(None);
+
+#[cfg(windows)]
+unsafe extern "system" fn clip_wnd_proc(
+    hwnd: windows::Win32::Foundation::HWND,
+    msg: u32,
+    wparam: windows::Win32::Foundation::WPARAM,
+    lparam: windows::Win32::Foundation::LPARAM,
+) -> windows::Win32::Foundation::LRESULT {
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::DataExchange::SetClipboardData;
+    use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+    use windows::Win32::UI::WindowsAndMessaging::DefWindowProcW;
+    const WM_RENDERFORMAT: u32 = 0x0305;
+    const WM_RENDERALLFORMATS: u32 = 0x0306;
+    if msg == WM_RENDERFORMAT || msg == WM_RENDERALLFORMATS {
+        if let Ok(mut job) = RENDER.lock() {
+            if let Some(job) = job.as_mut() {
+                let bytes = job.wide.len() * 2;
+                if let Ok(handle) = unsafe { GlobalAlloc(GMEM_MOVEABLE, bytes) } {
+                    let pointer = unsafe { GlobalLock(handle) };
+                    if !pointer.is_null() {
+                        unsafe {
+                            std::ptr::copy_nonoverlapping(job.wide.as_ptr() as *const u8, pointer as *mut u8, bytes);
+                            let _ = GlobalUnlock(handle);
+                            let _ = SetClipboardData(13, Some(HANDLE(handle.0)));
+                        }
+                        job.rendered = true;
+                    }
+                }
+            }
+        }
+    }
+    unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+}
+
+#[cfg(windows)]
+fn focus_target(hwnd: windows::Win32::Foundation::HWND) {
+    use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
+    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId, SetForegroundWindow};
+    unsafe {
+        let foreground = GetForegroundWindow();
+        let foreground_thread = GetWindowThreadProcessId(foreground, None);
+        let target_thread = GetWindowThreadProcessId(hwnd, None);
+        let ours = GetCurrentThreadId();
+        let _ = AttachThreadInput(ours, foreground_thread, true);
+        let _ = AttachThreadInput(ours, target_thread, true);
+        let _ = SetForegroundWindow(hwnd);
+        let _ = AttachThreadInput(ours, foreground_thread, false);
+        let _ = AttachThreadInput(ours, target_thread, false);
+    }
+}
+
 /// Paste into a real Win32 EDIT control without taking foreground focus.
 ///
 /// Ctrl+V via SendInput only reaches whichever window is foreground, and a
@@ -250,6 +693,56 @@ fn pastes_into_a_real_edit_control() {
         text.to_lowercase().contains(PHRASE),
         "paste test: WM_PASTE did not insert the clipboard text. The edit control contained {text:?}."
     );
+}
+
+/// Two takes into one field. Restoring the clipboard before the control reads
+/// it must not be reported as Inserted; the real insert path confirms each one.
+#[cfg(all(test, windows))]
+#[test]
+fn consecutive_takes_both_land_in_the_edit_control() {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{SendMessageW, WM_PASTE};
+
+    eprintln!("consecutive paste test: creating a hidden edit control");
+    let mut host = EditHost::spawn();
+    let edit = match host.ready() {
+        Ok(edit) => edit,
+        Err(err) => panic!("consecutive paste test: {err}"),
+    };
+    let previous = match capture_clipboard() {
+        Ok(saved) => saved,
+        Err(message) => {
+            eprintln!("SKIP consecutive_takes_both_land_in_the_edit_control: {message}");
+            host.shutdown();
+            return;
+        }
+    };
+    let _restore = ClipboardGuard { previous };
+    let hwnd = HWND(edit as *mut core::ffi::c_void);
+
+    set_clipboard_text("beta take").expect("clipboard");
+    if let Ok(mut clipboard) = Clipboard::new() {
+        restore_text(&mut clipboard, Some("old clipboard".into()));
+    }
+    unsafe {
+        SendMessageW(hwnd, WM_PASTE, None, None);
+    }
+    let raced = window_text(hwnd);
+    assert!(
+        !text_landed("", &raced, "beta take"),
+        "restoring the clipboard before the paste must not count as inserting beta, control was {raced:?}"
+    );
+
+    let first = insert_into_edit(hwnd, "alpha take").expect("first take");
+    assert!(first.verified, "first take was not verified");
+    let second = insert_into_edit(hwnd, "beta take").expect("second take");
+    assert!(second.verified, "second take was not verified");
+    assert_eq!(status_word(second.method, second.verified), if second.method == InsertMethod::Clipboard { "Inserted" } else { "Typed" });
+    let text = window_text(hwnd);
+    let alpha = text.find("alpha take").unwrap_or_else(|| panic!("missing first take in {text:?}"));
+    let beta = text.find("beta take").unwrap_or_else(|| panic!("missing second take in {text:?}"));
+    assert!(alpha < beta, "takes landed out of order: {text:?}");
+    host.shutdown();
 }
 
 #[cfg(all(test, windows))]
@@ -500,9 +993,14 @@ mod delay_tests {
 
     #[test]
     fn clipboard_paste_does_not_sleep_through_the_take() {
-        assert!(CLIPBOARD_PUBLISH_DELAY <= Duration::from_millis(15));
-        assert!(PASTE_SETTLE_DELAY <= Duration::from_millis(40));
-    }
+    assert!(CLIPBOARD_PUBLISH_DELAY <= Duration::from_millis(15));
+    assert!(PASTE_SETTLE_DELAY <= Duration::from_millis(40));
+    assert!(!text_landed("alpha take", "alpha take", "beta take"));
+    assert!(text_landed("alpha take", "alpha take beta take", "beta take"));
+    assert_eq!(status_word(InsertMethod::Clipboard, true), "Inserted");
+    assert_eq!(status_word(InsertMethod::Clipboard, false), "Typed");
+    assert_eq!(status_word(InsertMethod::Typed, true), "Typed");
+}
 }
 
 #[cfg(all(test, windows))]

@@ -22,6 +22,8 @@ const settings: Settings = {
   dictionary: ["Bolo.com", "Groq"],
   launchAtStartup: false,
   historyEnabled: true,
+  pasteHotkey: { ctrl: true, alt: false, shift: false, win: true, key: "v" },
+  offlineModel: "base.en",
 };
 
 let apiKey: string | null = null;
@@ -159,6 +161,7 @@ async function runDemoTake(): Promise<void> {
       message: "Inserted",
       elapsedMs: 1800,
       level: 0,
+      engine: "Groq",
     });
     window.dispatchEvent(new CustomEvent("bolo-history"));
     await delay(900);
@@ -166,6 +169,14 @@ async function runDemoTake(): Promise<void> {
     return;
   }
   recording = true;
+  emitLocalDictation({
+    phase: "arming",
+    message: "Opening the microphone",
+    elapsedMs: 0,
+    level: 0,
+  });
+  await delay(160);
+  if (!recording) return;
   const started = Date.now();
   emitLocalDictation({ phase: "recording", message: null, elapsedMs: 0, level: 0.2 });
   const timer = window.setInterval(() => {
