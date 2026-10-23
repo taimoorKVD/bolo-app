@@ -61,7 +61,7 @@ npm install
 npm run tauri build
 ```
 
-The installer product name is Bolo.com. The app icon is a gold speech bubble with a voice inside it, from `src-tauri/icons/icon-source.svg` (1024×1024). `npm run tauri icon src-tauri/icons/icon-source.svg` regenerates `icon.ico` (16, 24, 32, 48, 64, and 256), `icon.icns`, and the PNG sizes. That icon is the exe, the tray, the window, the NSIS setup and uninstaller, and the WiX product icon shown in Add/Remove Programs. The settings sidebar and the installer artwork use the horizontal lockup: the bubble, Bolo.com, and بولو.
+The installer product name is Bolo.com. The app icon is the Urdu word بولو (Bolo, speak) in gold Nastaliq on a dark tile, with sound waves beside it, from `src-tauri/icons/icon-source.png` (1024×1024). `npm run tauri icon src-tauri/icons/icon-source.png` regenerates the icon set. `python3 scripts/render-icon.py` runs that and redraws the 16, 24, and 32 pixel sizes with a larger word and the waves omitted, so the letters stay readable. That icon is the exe, the tray, the window, the NSIS setup and uninstaller, and the WiX product icon shown in Add/Remove Programs. The settings sidebar and the installer artwork use the horizontal lockup: the tile, Bolo.com, and بولو.
 
 Tauri writes both packages:
 
