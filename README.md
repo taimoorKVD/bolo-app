@@ -42,7 +42,7 @@ Hold **Ctrl + Win** (the default), speak, and release. Ctrl + Space and a few ot
 | Launch at startup | Current-user startup registration. |
 | Privacy | Audio and text go only to Groq. History is a local file. There is no telemetry. |
 
-Recordings longer than two minutes stop and transcribe on their own. Silence-only takes are not uploaded. A single click is not treated as speech. Quiet speech is boosted before it is encoded; loud speech is left alone.
+A long take keeps going and is cut into pieces while you are still speaking. Silence-only takes are not uploaded. A single click is not treated as speech. Quiet speech is boosted before it is encoded; loud speech is left alone.
 
 ### Where files live
 
@@ -61,7 +61,9 @@ npm install
 npm run tauri build
 ```
 
-The installer product name is Bolo.com. Tauri writes both packages:
+The installer product name is Bolo.com. The app icon is the gold lowercase b in `src-tauri/icons/icon-source.svg` (1024×1024). `npm run tauri icon src-tauri/icons/icon-source.svg` regenerates `icon.ico` (16, 24, 32, 48, 64, and 256), `icon.icns`, and the PNG sizes. That icon is the exe, the tray, the window, the NSIS setup and uninstaller, and the WiX product icon shown in Add/Remove Programs. The NSIS header and sidebar, and the WiX banner and dialog, use the same mark.
+
+Tauri writes both packages:
 
 - `src-tauri/target/release/bundle/msi/` — MSI
 - `src-tauri/target/release/bundle/nsis/` — NSIS `.exe` setup
@@ -80,7 +82,9 @@ On Windows, from the repo root:
 npm run test:windows
 ```
 
-That runs `scripts/selftest.ps1`, which prints a pass/fail line for microphone selection and a real capture (skipped when the machine has no input device), the Credential Manager save/read round trip, settings and key carryover from Cadence, a paste into a hidden edit control, the Groq transcription and Llama cleanup calls, the rest of the unit tests, and a startup smoke test. Each group has a time limit. If one hangs, the script stops that process and still runs the groups after it.
+That runs `scripts/selftest.ps1`, which prints a pass/fail line for microphone selection and a real capture (skipped when the machine has no input device), the Credential Manager save/read round trip, settings and key carryover from Cadence, a paste into a hidden edit control, the Groq transcription and Llama cleanup calls, the rest of the unit tests, a startup smoke test, and an icon check. Each group has a time limit. If one hangs, the script stops that process and still runs the groups after it.
+
+The icon check builds the NSIS setup (`npm run tauri -- build --bundles nsis`) and reads the icon resources out of `cadence.exe` and the setup `.exe`. Each image inside `src-tauri/icons/icon.ico` has to be present, byte for byte, in both files. The WiX package uses that same `.ico` as `ARPPRODUCTICON` when `npm run tauri build` produces the MSI.
 
 The smoke test builds the release app with `npm run tauri -- build --no-bundle`. That is the same frontend embedding the installer uses: the Tauri CLI passes `tauri/custom-protocol` and embeds `frontendDist`. A plain `cargo build --release` does not, so that exe loads `http://localhost:1420` and the window shows a connection error. The test launches `cadence.exe` with `CADENCE_SMOKE=1`. The settings window is created only after app state is registered, parked off-screen, kept off the taskbar, and not focused. It still loads the bundled page and invokes `get_settings` the same way the UI does. The test fails if that command errors, if it does not return, or if a UTF-8 BOM settings file (PowerShell `ConvertTo-Json` shape, microphone null, cleanup on, history left on when the field is omitted) is not what comes back. Afterwards the script kills that process tree, including a WebView2 child that outlives the exe. Quit Bolo.com first if it is already running; a second instance exits without running the check.
 

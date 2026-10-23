@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!--
+    Bolo.com mark. Gold tile, warm black lowercase b.
+    The bowl is joined into the stem, and the counter is large enough to stay open at 16px.
+  -->
+  <rect x="28" y="28" width="968" height="968" rx="220" fill="#C6A15A"/>
+  <mask id="letter">
+    <rect width="1024" height="1024" fill="#000"/>
+    <rect x="260" y="110" width="170" height="810" rx="44" fill="#fff"/>
+    <circle cx="400" cy="590" r="330" fill="#fff"/>
+    <circle cx="590" cy="608" r="96" fill="#000"/>
+  </mask>
+  <rect width="1024" height="1024" fill="#14120E" mask="url(#letter)"/>
+</svg>

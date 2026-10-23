@@ -330,6 +330,238 @@ function Invoke-StartupSmoke {
     return $true
 }
 
+function Initialize-IconHash {
+    if ("BoloIconHash" -as [type]) { return $true }
+    $source = @'
+using System;
+using System.Collections.Generic;
+using System.Security.Cryptography;
+public static class BoloIconHash {
+    static int U16(byte[] d, int o) { return d[o] | (d[o + 1] << 8); }
+    static uint U32(byte[] d, int o) {
+        return (uint)d[o] | ((uint)d[o + 1] << 8) | ((uint)d[o + 2] << 16) | ((uint)d[o + 3] << 24);
+    }
+    static string Sha(byte[] blob) {
+        using (var sha = SHA256.Create()) {
+            return BitConverter.ToString(sha.ComputeHash(blob)).Replace("-", "").ToLowerInvariant();
+        }
+    }
+    public static int[] IcoSizes(byte[] data) {
+        if (U16(data, 2) != 1) throw new InvalidOperationException("icon.ico is not an icon directory");
+        int count = U16(data, 4);
+        int[] sizes = new int[count];
+        for (int i = 0; i < count; i++) {
+            int width = data[6 + i * 16];
+            sizes[i] = width == 0 ? 256 : width;
+        }
+        return sizes;
+    }
+    public static string[] IcoHashes(byte[] data) {
+        int count = U16(data, 4);
+        var hashes = new string[count];
+        for (int i = 0; i < count; i++) {
+            int entry = 6 + i * 16;
+            int nbytes = (int)U32(data, entry + 8);
+            int offset = (int)U32(data, entry + 12);
+            byte[] blob = new byte[nbytes];
+            Buffer.BlockCopy(data, offset, blob, 0, nbytes);
+            hashes[i] = Sha(blob);
+        }
+        return hashes;
+    }
+    static int RvaToOff(uint rva, uint[] va, uint[] vsz, uint[] raw, uint[] rsz) {
+        for (int i = 0; i < va.Length; i++) {
+            uint span = vsz[i] > rsz[i] ? vsz[i] : rsz[i];
+            if (rva >= va[i] && rva < va[i] + span) return (int)(raw[i] + (rva - va[i]));
+        }
+        throw new InvalidOperationException("icon resource RVA is outside the executable sections");
+    }
+    static void ReadDir(byte[] data, int off, out uint[] names, out uint[] values) {
+        int n = U16(data, off + 12) + U16(data, off + 14);
+        names = new uint[n];
+        values = new uint[n];
+        int p = off + 16;
+        for (int i = 0; i < n; i++) {
+            names[i] = U32(data, p);
+            values[i] = U32(data, p + 4);
+            p += 8;
+        }
+    }
+    public static string[] PeIconHashes(byte[] data) {
+        if (data.Length < 64 || data[0] != (byte)'M' || data[1] != (byte)'Z') {
+            throw new InvalidOperationException("file is not a Windows executable");
+        }
+        int lfanew = (int)U32(data, 0x3C);
+        if (data[lfanew] != (byte)'P' || data[lfanew + 1] != (byte)'E') {
+            throw new InvalidOperationException("file has no PE header");
+        }
+        int coff = lfanew + 4;
+        int nsections = U16(data, coff + 2);
+        int optSize = U16(data, coff + 16);
+        int opt = coff + 20;
+        int magic = U16(data, opt);
+        int ddOff = magic == 0x20B ? opt + 112 : magic == 0x10B ? opt + 96 : -1;
+        if (ddOff < 0) throw new InvalidOperationException("unknown PE optional header");
+        uint resRva = U32(data, ddOff + 16);
+        if (resRva == 0) throw new InvalidOperationException("executable has no resource directory");
+        var va = new uint[nsections];
+        var vsz = new uint[nsections];
+        var raw = new uint[nsections];
+        var rsz = new uint[nsections];
+        int sec = opt + optSize;
+        for (int i = 0; i < nsections; i++) {
+            int o = sec + i * 40;
+            vsz[i] = U32(data, o + 8);
+            va[i] = U32(data, o + 12);
+            rsz[i] = U32(data, o + 16);
+            raw[i] = U32(data, o + 20);
+        }
+        int resBase = RvaToOff(resRva, va, vsz, raw, rsz);
+        uint[] types, typeVals;
+        ReadDir(data, resBase, out types, out typeVals);
+        var hashes = new List<string>();
+        for (int i = 0; i < types.Length; i++) {
+            if (types[i] != 3 || (typeVals[i] & 0x80000000) == 0) continue;
+            uint[] ids, idVals;
+            ReadDir(data, resBase + (int)(typeVals[i] & 0x7FFFFFFF), out ids, out idVals);
+            for (int j = 0; j < idVals.Length; j++) {
+                if ((idVals[j] & 0x80000000) == 0) continue;
+                uint[] langs, langVals;
+                ReadDir(data, resBase + (int)(idVals[j] & 0x7FFFFFFF), out langs, out langVals);
+                for (int k = 0; k < langVals.Length; k++) {
+                    if ((langVals[k] & 0x80000000) != 0) continue;
+                    int leaf = resBase + (int)langVals[k];
+                    int start = RvaToOff(U32(data, leaf), va, vsz, raw, rsz);
+                    int size = (int)U32(data, leaf + 4);
+                    byte[] blob = new byte[size];
+                    Buffer.BlockCopy(data, start, blob, 0, size);
+                    hashes.Add(Sha(blob));
+                }
+            }
+        }
+        return hashes.ToArray();
+    }
+}
+'@
+    try {
+        Add-Type -TypeDefinition $source -ErrorAction Stop
+        return $true
+    } catch {
+        Write-Host "Could not compile the icon reader ($($_.Exception.Message))."
+        return $false
+    }
+}
+
+function Test-IconEmbedded {
+    param(
+        [string]$Label,
+        [string]$Path,
+        [string[]]$Expected
+    )
+    $bytes = [System.IO.File]::ReadAllBytes($Path)
+    $found = @([BoloIconHash]::PeIconHashes($bytes))
+    $missing = @()
+    foreach ($hash in $Expected) {
+        if ($found -notcontains $hash) { $missing += $hash }
+    }
+    if ($missing.Count -gt 0) {
+        Write-Host "$Label is missing $($missing.Count) of $($Expected.Count) icon images from icon.ico."
+        Write-Host "Found $($found.Count) RT_ICON resources in $Path."
+        return $false
+    }
+    Write-Host "$Label embeds all $($Expected.Count) icon.ico images."
+    return $true
+}
+
+function Invoke-EmbeddedIcons {
+    $name = "Embedded app and setup icon"
+    $limitSec = 1200
+    Write-Host ""
+    Write-Host "---- $name (limit ${limitSec}s) ----"
+
+    $ico = Join-Path $root "src-tauri\icons\icon.ico"
+    if (-not (Test-Path $ico)) {
+        Write-Host "FAIL  $name"
+        Write-Host "Missing $ico"
+        return $false
+    }
+    if (-not (Initialize-IconHash)) {
+        Write-Host "FAIL  $name"
+        return $false
+    }
+    $icoBytes = [System.IO.File]::ReadAllBytes($ico)
+    $sizes = @([BoloIconHash]::IcoSizes($icoBytes))
+    $expectedSizes = @(16, 24, 32, 48, 64, 256)
+    $have = @{}
+    foreach ($size in $sizes) { $have[[int]$size] = $true }
+    $missingSize = @()
+    foreach ($want in $expectedSizes) {
+        if (-not $have.ContainsKey($want)) { $missingSize += $want }
+    }
+    if ($sizes.Count -ne $expectedSizes.Count -or $missingSize.Count -gt 0) {
+        Write-Host "FAIL  $name"
+        Write-Host "icon.ico sizes are $($sizes -join ', '); expected $($expectedSizes -join ', ')."
+        return $false
+    }
+    $expected = @([BoloIconHash]::IcoHashes($icoBytes))
+
+    $npm = Get-Command npm.cmd -ErrorAction SilentlyContinue
+    if (-not $npm) { $npm = Get-Command npm -ErrorAction SilentlyContinue }
+    if (-not $npm) {
+        Write-Host "FAIL  $name"
+        Write-Host "npm was not found on PATH."
+        return $false
+    }
+
+    # npm.cmd is a batch file. UseShellExecute=false cannot launch it, so go through cmd.exe.
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = Join-Path $env:SystemRoot "System32\cmd.exe"
+    $psi.Arguments = "/c `"$($npm.Source)`" run tauri -- build --bundles nsis"
+    $psi.WorkingDirectory = $root
+    $psi.UseShellExecute = $false
+    $proc = New-Object System.Diagnostics.Process
+    $proc.StartInfo = $psi
+    try {
+        [void]$proc.Start()
+    } catch {
+        Write-Host "FAIL  $name"
+        Write-Host "Could not start the NSIS build: $($_.Exception.Message)"
+        return $false
+    }
+    $limitMs = [Math]::Min($limitSec * 1000, [int]::MaxValue)
+    if (-not $proc.WaitForExit($limitMs)) {
+        Write-Host "FAIL  $name"
+        Write-Host "NSIS build timed out after ${limitSec}s."
+        & taskkill.exe /F /T /PID $proc.Id 2>&1 | ForEach-Object { Write-Host $_ }
+        try { $proc.WaitForExit(10000) | Out-Null } catch {}
+        return $false
+    }
+    if ($proc.ExitCode -ne 0) {
+        Write-Host "FAIL  $name"
+        Write-Host "tauri build --bundles nsis failed (exit $($proc.ExitCode))."
+        return $false
+    }
+
+    $exe = Join-Path $root "src-tauri\target\release\cadence.exe"
+    $nsisDir = Join-Path $root "src-tauri\target\release\bundle\nsis"
+    $setup = Get-ChildItem -Path $nsisDir -Filter "*setup.exe" -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime -Descending |
+        Select-Object -First 1
+    if (-not (Test-Path $exe) -or $null -eq $setup) {
+        Write-Host "FAIL  $name"
+        Write-Host "Expected $exe and an NSIS *setup.exe under $nsisDir."
+        return $false
+    }
+    $appOk = Test-IconEmbedded "cadence.exe" $exe $expected
+    $setupOk = Test-IconEmbedded "setup exe" $setup.FullName $expected
+    if ($appOk -and $setupOk) {
+        Write-Host "PASS  $name"
+        return $true
+    }
+    Write-Host "FAIL  $name"
+    return $false
+}
+
 $passed = @()
 $failed = @()
 
@@ -345,6 +577,10 @@ foreach ($step in $steps) {
 $smokeName = "Startup smoke: bundled app get_settings"
 $smokeOk = Invoke-StartupSmoke
 if ($smokeOk) { $passed += $smokeName } else { $failed += $smokeName }
+
+$iconName = "Embedded app and setup icon"
+$iconOk = Invoke-EmbeddedIcons
+if ($iconOk) { $passed += $iconName } else { $failed += $iconName }
 
 Write-Host ""
 Write-Host "========"
