@@ -357,17 +357,59 @@ public static class BoloIconHash {
         return sizes;
     }
     public static string[] IcoHashes(byte[] data) {
+        var images = IcoImages(data);
+        var hashes = new string[images.Length];
+        for (int i = 0; i < images.Length; i++) hashes[i] = images[i].Sha;
+        return hashes;
+    }
+    public static BoloIconImage[] IcoImages(byte[] data) {
+        if (U16(data, 2) != 1) throw new InvalidOperationException("icon.ico is not an icon directory");
         int count = U16(data, 4);
-        var hashes = new string[count];
+        var images = new BoloIconImage[count];
         for (int i = 0; i < count; i++) {
             int entry = 6 + i * 16;
+            int width = data[entry];
             int nbytes = (int)U32(data, entry + 8);
             int offset = (int)U32(data, entry + 12);
             byte[] blob = new byte[nbytes];
             Buffer.BlockCopy(data, offset, blob, 0, nbytes);
-            hashes[i] = Sha(blob);
+            images[i] = new BoloIconImage();
+            images[i].Width = width == 0 ? 256 : width;
+            images[i].Bytes = blob;
+            images[i].Sha = Sha(blob);
         }
-        return hashes;
+        return images;
+    }
+    public static string IcoProblem(byte[] data) {
+        int[] want = new int[] { 32, 16, 24, 48, 64, 128, 256 };
+        var images = IcoImages(data);
+        if (images.Length != want.Length) return "icon.ico has " + images.Length + " images, expected " + want.Length;
+        for (int i = 0; i < want.Length; i++) {
+            if (images[i].Width != want[i]) return "icon.ico image " + i + " is " + images[i].Width + "px, expected " + want[i] + "px";
+            byte[] blob = images[i].Bytes;
+            if (blob.Length >= 8 && blob[0] == 0x89 && blob[1] == 0x50 && blob[2] == 0x4E && blob[3] == 0x47) {
+                return images[i].Width + "px image is a PNG. ExtractAssociatedIcon would show an unrelated 32px icon.";
+            }
+            if (blob.Length < 40) return images[i].Width + "px image is too small to be a bitmap";
+            int biSize = (int)U32(blob, 0);
+            int biWidth = blob[4] | (blob[5] << 8) | (blob[6] << 16) | (blob[7] << 24);
+            int biHeight = blob[8] | (blob[9] << 8) | (blob[10] << 16) | (blob[11] << 24);
+            int biBit = blob[14] | (blob[15] << 8);
+            if (biSize != 40 || biBit != 32 || biWidth != images[i].Width || biHeight != images[i].Width * 2) {
+                return images[i].Width + "px image is not a 32-bit DIB";
+            }
+        }
+        return null;
+    }
+    public static bool SameIcon(byte[] embedded, byte[] expected) {
+        if (embedded == null || expected == null || embedded.Length < expected.Length) return false;
+        for (int i = 0; i < expected.Length; i++) {
+            if (embedded[i] != expected[i]) return false;
+        }
+        for (int i = expected.Length; i < embedded.Length; i++) {
+            if (embedded[i] != 0) return false;
+        }
+        return true;
     }
     static int RvaToOff(uint rva, uint[] va, uint[] vsz, uint[] raw, uint[] rsz) {
         for (int i = 0; i < va.Length; i++) {
@@ -441,6 +483,90 @@ public static class BoloIconHash {
         }
         return hashes.ToArray();
     }
+    public static BoloIconImage[] PePrimaryIcons(byte[] data) {
+        if (data.Length < 64 || data[0] != (byte)'M' || data[1] != (byte)'Z') {
+            throw new InvalidOperationException("file is not a Windows executable");
+        }
+        int lfanew = (int)U32(data, 0x3C);
+        if (data[lfanew] != (byte)'P' || data[lfanew + 1] != (byte)'E') {
+            throw new InvalidOperationException("file has no PE header");
+        }
+        int coff = lfanew + 4;
+        int nsections = U16(data, coff + 2);
+        int optSize = U16(data, coff + 16);
+        int opt = coff + 20;
+        int magic = U16(data, opt);
+        int ddOff = magic == 0x20B ? opt + 112 : magic == 0x10B ? opt + 96 : -1;
+        if (ddOff < 0) throw new InvalidOperationException("unknown PE optional header");
+        uint resRva = U32(data, ddOff + 16);
+        if (resRva == 0) throw new InvalidOperationException("executable has no resource directory");
+        var va = new uint[nsections];
+        var vsz = new uint[nsections];
+        var raw = new uint[nsections];
+        var rsz = new uint[nsections];
+        int sec = opt + optSize;
+        for (int i = 0; i < nsections; i++) {
+            int o = sec + i * 40;
+            vsz[i] = U32(data, o + 8);
+            va[i] = U32(data, o + 12);
+            rsz[i] = U32(data, o + 16);
+            raw[i] = U32(data, o + 20);
+        }
+        int resBase = RvaToOff(resRva, va, vsz, raw, rsz);
+        uint[] types, typeVals;
+        ReadDir(data, resBase, out types, out typeVals);
+        var icons = new Dictionary<int, byte[]>();
+        byte[] group = null;
+        int bestGroupId = int.MaxValue;
+        for (int i = 0; i < types.Length; i++) {
+            uint type = types[i];
+            if ((type != 3 && type != 14) || (typeVals[i] & 0x80000000) == 0) continue;
+            uint[] ids, idVals;
+            ReadDir(data, resBase + (int)(typeVals[i] & 0x7FFFFFFF), out ids, out idVals);
+            for (int j = 0; j < idVals.Length; j++) {
+                if ((idVals[j] & 0x80000000) == 0) continue;
+                uint[] langs, langVals;
+                ReadDir(data, resBase + (int)(idVals[j] & 0x7FFFFFFF), out langs, out langVals);
+                if ((ids[j] & 0x80000000) != 0) continue;
+                if (langVals.Length == 0 || (langVals[0] & 0x80000000) != 0) continue;
+                int leaf = resBase + (int)langVals[0];
+                int start = RvaToOff(U32(data, leaf), va, vsz, raw, rsz);
+                int size = (int)U32(data, leaf + 4);
+                byte[] blob = new byte[size];
+                Buffer.BlockCopy(data, start, blob, 0, size);
+                int id = (int)ids[j];
+                if (type == 3) icons[id] = blob;
+                else if (id < bestGroupId) {
+                    bestGroupId = id;
+                    group = blob;
+                }
+            }
+        }
+        if (group == null || group.Length < 6) throw new InvalidOperationException("executable has no icon group");
+        int count = U16(group, 4);
+        var images = new List<BoloIconImage>();
+        for (int n = 0; n < count; n++) {
+            int entry = 6 + n * 14;
+            if (entry + 14 > group.Length) break;
+            int width = group[entry];
+            int id = U16(group, entry + 12);
+            byte[] blob;
+            if (!icons.TryGetValue(id, out blob)) {
+                throw new InvalidOperationException("icon group points at missing image " + id);
+            }
+            var image = new BoloIconImage();
+            image.Width = width == 0 ? 256 : width;
+            image.Bytes = blob;
+            image.Sha = Sha(blob);
+            images.Add(image);
+        }
+        return images.ToArray();
+    }
+}
+public class BoloIconImage {
+    public int Width;
+    public byte[] Bytes;
+    public string Sha;
 }
 '@
     try {
@@ -452,25 +578,55 @@ public static class BoloIconHash {
     }
 }
 
-function Test-IconEmbedded {
+function Test-DisplayedIcon {
     param(
         [string]$Label,
         [string]$Path,
-        [string[]]$Expected
+        [object[]]$Expected
     )
     $bytes = [System.IO.File]::ReadAllBytes($Path)
-    $found = @([BoloIconHash]::PeIconHashes($bytes))
-    $missing = @()
-    foreach ($hash in $Expected) {
-        if ($found -notcontains $hash) { $missing += $hash }
-    }
-    if ($missing.Count -gt 0) {
-        Write-Host "$Label is missing $($missing.Count) of $($Expected.Count) icon images from icon.ico."
-        Write-Host "Found $($found.Count) RT_ICON resources in $Path."
+    try {
+        $group = @([BoloIconHash]::PePrimaryIcons($bytes))
+    } catch {
+        Write-Host "$Label icon could not be read ($($_.Exception.Message))."
         return $false
     }
-    Write-Host "$Label embeds all $($Expected.Count) icon.ico images."
-    return $true
+    if ($group.Count -eq 0) {
+        Write-Host "$Label has no icon for Windows to display."
+        return $false
+    }
+    $ok = $true
+    foreach ($want in $Expected) {
+        $matched = $false
+        foreach ($got in $group) {
+            if ($got.Width -eq $want.Width -and [BoloIconHash]::SameIcon($got.Bytes, $want.Bytes)) {
+                $matched = $true
+                break
+            }
+        }
+        if (-not $matched) {
+            Write-Host "$Label does not display the $($want.Width)px Bolo.com icon."
+            $ok = $false
+        }
+    }
+    foreach ($got in $group) {
+        $known = $false
+        foreach ($want in $Expected) {
+            if ([BoloIconHash]::SameIcon($got.Bytes, $want.Bytes)) {
+                $known = $true
+                break
+            }
+        }
+        if (-not $known) {
+            Write-Host "$Label is showing a $($got.Width)px image that is not the Bolo.com icon."
+            $ok = $false
+        }
+    }
+    if ($ok) {
+        $widths = ($group | ForEach-Object { $_.Width }) -join ", "
+        Write-Host "$Label displays the Bolo.com icon ($widths)."
+    }
+    return $ok
 }
 
 function Invoke-EmbeddedIcons {
@@ -490,20 +646,13 @@ function Invoke-EmbeddedIcons {
         return $false
     }
     $icoBytes = [System.IO.File]::ReadAllBytes($ico)
-    $sizes = @([BoloIconHash]::IcoSizes($icoBytes))
-    $expectedSizes = @(16, 24, 32, 48, 64, 256)
-    $have = @{}
-    foreach ($size in $sizes) { $have[[int]$size] = $true }
-    $missingSize = @()
-    foreach ($want in $expectedSizes) {
-        if (-not $have.ContainsKey($want)) { $missingSize += $want }
-    }
-    if ($sizes.Count -ne $expectedSizes.Count -or $missingSize.Count -gt 0) {
+    $problem = [BoloIconHash]::IcoProblem($icoBytes)
+    if ($problem) {
         Write-Host "FAIL  $name"
-        Write-Host "icon.ico sizes are $($sizes -join ', '); expected $($expectedSizes -join ', ')."
+        Write-Host $problem
         return $false
     }
-    $expected = @([BoloIconHash]::IcoHashes($icoBytes))
+    $expected = @([BoloIconHash]::IcoImages($icoBytes))
 
     $npm = Get-Command npm.cmd -ErrorAction SilentlyContinue
     if (-not $npm) { $npm = Get-Command npm -ErrorAction SilentlyContinue }
@@ -552,8 +701,8 @@ function Invoke-EmbeddedIcons {
         Write-Host "Expected $exe and an NSIS *setup.exe under $nsisDir."
         return $false
     }
-    $appOk = Test-IconEmbedded "cadence.exe" $exe $expected
-    $setupOk = Test-IconEmbedded "setup exe" $setup.FullName $expected
+    $appOk = Test-DisplayedIcon "cadence.exe" $exe $expected
+    $setupOk = Test-DisplayedIcon "setup exe" $setup.FullName $expected
     if ($appOk -and $setupOk) {
         Write-Host "PASS  $name"
         return $true

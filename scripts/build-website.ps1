@@ -66,7 +66,7 @@ $html = [System.IO.File]::ReadAllText($indexPath)
 $pattern = '(?s)(<script type="application/json" id="bolo-release">).*?(</script>)'
 $replacement = '${1}' + "`n" + $json.TrimEnd() + "`n" + '${2}'
 $updated = [regex]::Replace($html, $pattern, $replacement, 1)
-if ($updated -eq $html) {
+if (-not [regex]::IsMatch($html, $pattern)) {
     throw "index.html is missing the bolo-release JSON block."
 }
 [System.IO.File]::WriteAllText($indexPath, $updated, $utf8)

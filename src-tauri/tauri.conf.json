@@ -58,6 +58,8 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
+    "publisher": "Bolo.com",
+    "copyright": "Copyright © 2026 Bolo.com",
     "shortDescription": "Push-to-talk voice dictation",
     "longDescription": "Hold a hotkey, speak, and Bolo.com inserts the transcript at your cursor using Groq Whisper.",
     "category": "Utility",
@@ -68,6 +70,7 @@
       },
       "nsis": {
         "installMode": "currentUser",
+        "template": "nsis/installer.nsi",
         "installerIcon": "icons/icon.ico",
         "uninstallerIcon": "icons/icon.ico",
         "headerImage": "icons/nsis-header.bmp",

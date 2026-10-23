@@ -114,6 +114,117 @@ def png_bytes(image: Image.Image) -> bytes:
     return buffer.getvalue()
 
 
+def dib_bytes(image: Image.Image) -> bytes:
+    """Uncompressed 32-bit icon image (BGRA, bottom-up) plus an empty AND mask.
+
+    NSIS copies icon images into fixed slots and Windows `ExtractAssociatedIcon`
+    reads a 32px bitmap. A PNG stuffed in that slot is shown as an unrelated
+    32px image, and Chrome's download list then falls back to a generic icon.
+    """
+    image = image.convert("RGBA")
+    width, height = image.size
+    raw = image.tobytes()
+    pixels = bytearray()
+    for y in range(height - 1, -1, -1):
+        row = raw[y * width * 4 : (y + 1) * width * 4]
+        bgra = bytearray(width * 4)
+        for x in range(width):
+            red, green, blue, alpha = row[x * 4 : x * 4 + 4]
+            bgra[x * 4 : x * 4 + 4] = bytes((blue, green, red, alpha))
+        pixels += bgra
+    stride = ((width + 31) // 32) * 4
+    mask = bytes(stride * height)
+    header = struct.pack(
+        "<IiiHHIIiiII",
+        40,
+        width,
+        height * 2,
+        1,
+        32,
+        0,
+        len(pixels) + len(mask),
+        0,
+        0,
+        0,
+        0,
+    )
+    return header + bytes(pixels) + mask
+
+
+def write_ico(path: Path, images: list[Image.Image]) -> None:
+    blobs = [dib_bytes(image) for image in images]
+    out = bytearray(struct.pack("<HHH", 0, 1, len(blobs)))
+    cursor = 6 + 16 * len(blobs)
+    directory = bytearray()
+    payload = bytearray()
+    for image, blob in zip(images, blobs):
+        width = 0 if image.width >= 256 else image.width
+        height = 0 if image.height >= 256 else image.height
+        directory += struct.pack("<BBBBHHII", width, height, 0, 0, 1, 32, len(blob), cursor)
+        payload += blob
+        cursor += len(blob)
+    path.write_bytes(out + directory + payload)
+
+
+def assert_ico(path: Path, sizes: tuple[int, ...]) -> None:
+    data = path.read_bytes()
+    count = struct.unpack_from("<H", data, 4)[0]
+    found: list[int] = []
+    for index in range(count):
+        width, _height, _pal, _res, _planes, bpp, size, offset = struct.unpack_from(
+            "<BBBBHHII", data, 6 + 16 * index
+        )
+        width = width or 256
+        blob = data[offset : offset + size]
+        found.append(width)
+        if blob[:8] == b"\x89PNG\r\n\x1a\n":
+            raise SystemExit(f"{path.name} size {width} is a PNG; Windows would show a bad 32px icon")
+        bi_size, bi_width, bi_height, _planes, bi_bit, compression = struct.unpack_from("<IiiHHI", blob, 0)
+        if bi_size != 40 or bi_bit != 32 or compression != 0 or bi_width != width or bi_height != width * 2:
+            raise SystemExit(f"{path.name} size {width} is not a 32-bit DIB")
+        if bpp != 32:
+            raise SystemExit(f"{path.name} size {width} directory is not 32-bit")
+    if tuple(found) != sizes:
+        raise SystemExit(f"{path.name} sizes {found} != {list(sizes)}")
+
+
+def windows_frames(master: Image.Image) -> list[Image.Image]:
+    """32px first, then the rest. Small sizes keep the readable word; larger
+    sizes are the sound-wave master."""
+    small = {size: simplified(size) for size in (16, 24, 32)}
+    order = (32, 16, 24, 48, 64, 128, 256)
+    frames: list[Image.Image] = []
+    for size in order:
+        if size in small:
+            frames.append(small[size])
+        else:
+            frames.append(master.resize((size, size), Image.Resampling.LANCZOS))
+    return frames
+
+
+def rebuild_windows_icons(master: Image.Image) -> None:
+    frames = windows_frames(master)
+    write_ico(ICONS / "icon.ico", frames)
+    assert_ico(ICONS / "icon.ico", tuple(frame.width for frame in frames))
+    favicon = [frame for frame in frames if frame.width in (16, 32, 48)]
+    # Browsers want 16 then 32. Keep 32 available without making it the only image.
+    favicon.sort(key=lambda frame: frame.width)
+    website = ROOT / "website" / "assets"
+    write_ico(website / "favicon.ico", favicon)
+    assert_ico(website / "favicon.ico", tuple(frame.width for frame in favicon))
+    next(frame for frame in frames if frame.width == 32).save(website / "favicon-32.png")
+    desktop = {
+        32: ICONS / "32x32.png",
+        64: ICONS / "64x64.png",
+        128: ICONS / "128x128.png",
+        256: ICONS / "128x128@2x.png",
+    }
+    for frame in frames:
+        path = desktop.get(frame.width)
+        if path is not None:
+            frame.save(path)
+
+
 def patch_ico(path: Path, replacements: dict[int, Image.Image]) -> None:
     data = path.read_bytes()
     count = struct.unpack_from("<H", data, 4)[0]
@@ -282,6 +393,8 @@ def update_readme() -> None:
         "`npm run tauri icon src-tauri/icons/icon-source.png` regenerates the icon set. "
         "`python3 scripts/render-icon.py` runs that and redraws the 16, 24, and 32 pixel "
         "sizes with a larger word and the waves omitted, so the letters stay readable. "
+        "`icon.ico` holds 32, 16, 24, 48, 64, 128, and 256 as uncompressed 32-bit images "
+        "so the NSIS setup, Explorer, and Chrome show this icon instead of a generic one. "
         "That icon is the exe, the tray, the window, the NSIS setup and uninstaller, and "
         "the WiX product icon shown in Add/Remove Programs. The settings sidebar and the "
         f"installer artwork use the horizontal lockup: the tile, Bolo.com, and {WORD}."
@@ -294,15 +407,19 @@ def main() -> None:
         raise SystemExit(f"missing {MASTER}")
     held = Path("/tmp/bolo-icon-master.png")
     held.write_bytes(MASTER.read_bytes())
-    svg = ICONS / "icon-source.svg"
-    if svg.exists():
-        svg.unlink()
-    run_tauri(held)
+    if "--ico-only" not in sys.argv:
+        svg = ICONS / "icon-source.svg"
+        if svg.exists():
+            svg.unlink()
+        run_tauri(held)
     MASTER.write_bytes(held.read_bytes())
-    small = {size: simplified(size) for size in (16, 20, 24, 29, 30, 32)}
-    patch_ico(ICONS / "icon.ico", {16: small[16], 24: small[24], 32: small[32]})
-    replace_small_pngs(small)
     mark = Image.open(MASTER).convert("RGBA")
+    rebuild_windows_icons(mark)
+    small = {size: simplified(size) for size in (16, 20, 24, 29, 30, 32)}
+    replace_small_pngs(small)
+    if "--ico-only" in sys.argv:
+        print("windows icon.ico updated")
+        return
     installer_art(mark)
     lockup_svg(mark)
     update_readme()
