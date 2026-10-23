@@ -109,6 +109,7 @@ fn live_llama_cleanup_applies_a_spoken_correction() {
         true,
         Tone::Plain,
         false,
+        cleanup::CLEANUP_MODEL,
     ));
     assert!(
         outcome.used_model,
@@ -209,6 +210,7 @@ fn live_latency_stages_stay_under_the_budget() {
         true,
         Tone::Plain,
         false,
+        cleanup::CLEANUP_MODEL,
     ));
     let cleanup_ms = cleanup_started.elapsed().as_millis();
     eprintln!(

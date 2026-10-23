@@ -4,14 +4,57 @@
 //! removed. With it on, the transcript is sent to a Llama model hosted by Groq
 //! to fix punctuation and apply spoken self-corrections. No other provider is used.
 
-use anyhow::{anyhow, Context};
+use anyhow::anyhow;
 use serde::Deserialize;
 use zeroize::Zeroize;
 
-/// Groq's smallest fast chat model. Cleanup has a hard timeout and falls back
-/// to the local editor, so a slow response never holds the paste.
-pub const CLEANUP_MODEL: &str = "llama-3.1-8b-instant";
+/// Fast Groq instruct model. `llama-3.1-8b-instant` was removed for the
+/// developer tier on 16 Aug 2026 and now returns 404.
+pub const CLEANUP_MODEL: &str = "openai/gpt-oss-20b";
+
+/// Tried in order when the preferred model is missing. The saved setting is
+/// first; these follow so a 404 does not fail the paste.
+pub const CLEANUP_MODELS: &[&str] = &[
+    "openai/gpt-oss-20b",
+    "openai/gpt-oss-120b",
+    "qwen/qwen3.6-27b",
+];
 const CLEANUP_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1200);
+
+fn model_order(preferred: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let preferred = preferred.trim();
+    if !preferred.is_empty() {
+        out.push(preferred.to_string());
+    }
+    for model in CLEANUP_MODELS {
+        if !out.iter().any(|have| have == *model) {
+            out.push((*model).to_string());
+        }
+    }
+    if out.is_empty() {
+        out.push(CLEANUP_MODEL.to_string());
+    }
+    out
+}
+
+fn is_missing_model(status: u16, body: &str) -> bool {
+    if status == 404 {
+        return true;
+    }
+    if status == 400 {
+        let lower = body.to_ascii_lowercase();
+        return lower.contains("does not exist")
+            || lower.contains("model_not_found")
+            || lower.contains("you do not have access");
+    }
+    false
+}
+
+enum CleanupFail {
+    Missing,
+    Other(String),
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tone {
@@ -53,6 +96,7 @@ pub async fn clean_transcript(
     enabled: bool,
     tone: Tone,
     verbatim: bool,
+    model: &str,
 ) -> CleanOutcome {
     if verbatim {
         return skipped(transcript.trim().to_string(), "verbatim");
@@ -67,29 +111,85 @@ pub async fn clean_transcript(
     if transcript.trim().is_empty() {
         return skipped(fallback, "empty");
     }
-    let first = request_cleanup(client, api_key, transcript, tone, false).await;
-    let first_outcome = outcome_from_model(transcript, first);
-    if first_outcome.used_model {
-        return first_outcome;
-    }
-    // The happy path is one request. A failure gets one simpler retry, and the
-    // stage log keeps both reasons.
-    let second = request_cleanup(client, api_key, transcript, tone, true).await;
-    let second_outcome = outcome_from_model(transcript, second);
-    if second_outcome.used_model {
-        return CleanOutcome {
-            text: second_outcome.text,
-            used_model: true,
-            note: None,
-            why: compact_why(&format!("applied after retry ({})", first_outcome.why)),
-        };
+    let models = model_order(model);
+    let mut missed = Vec::new();
+    for model_id in &models {
+        match request_cleanup(client, api_key, transcript, tone, false, model_id).await {
+            Err(CleanupFail::Missing) => {
+                missed.push(model_id.clone());
+                continue;
+            }
+            other => {
+                let first_outcome = outcome_from_model(transcript, cleanup_result(other));
+                if first_outcome.used_model {
+                    return note_model(first_outcome, model_id, &missed);
+                }
+                // A 404 already moved on. Any other failure gets one simpler retry
+                // on this model, then the local edit. Timeouts do not walk the list.
+                match request_cleanup(client, api_key, transcript, tone, true, model_id).await {
+                    Err(CleanupFail::Missing) => {
+                        missed.push(model_id.clone());
+                        continue;
+                    }
+                    second => {
+                        let second_outcome = outcome_from_model(transcript, cleanup_result(second));
+                        if second_outcome.used_model {
+                            return note_model(
+                                CleanOutcome {
+                                    text: second_outcome.text,
+                                    used_model: true,
+                                    note: None,
+                                    why: compact_why(&format!(
+                                        "applied after retry ({})",
+                                        first_outcome.why
+                                    )),
+                                },
+                                model_id,
+                                &missed,
+                            );
+                        }
+                        let mut why = format!("{}; retry: {}", first_outcome.why, second_outcome.why);
+                        if !missed.is_empty() {
+                            why = format!("model missing: {}; {why}", missed.join(", "));
+                        }
+                        return CleanOutcome {
+                            text: second_outcome.text,
+                            used_model: false,
+                            note: second_outcome.note.or(first_outcome.note),
+                            why: compact_why(&why),
+                        };
+                    }
+                }
+            }
+        }
     }
     CleanOutcome {
-        text: second_outcome.text,
+        text: polish_locally(transcript),
         used_model: false,
-        note: second_outcome.note.or(first_outcome.note),
-        why: compact_why(&format!("{}; retry: {}", first_outcome.why, second_outcome.why)),
+        note: None,
+        why: compact_why(&format!("model missing: {}", missed.join(", "))),
     }
+}
+
+fn cleanup_result(result: Result<String, CleanupFail>) -> anyhow::Result<String> {
+    match result {
+        Ok(text) => Ok(text),
+        Err(CleanupFail::Missing) => Err(anyhow!("model missing")),
+        Err(CleanupFail::Other(message)) => Err(anyhow!(message)),
+    }
+}
+
+fn note_model(mut outcome: CleanOutcome, model: &str, missed: &[String]) -> CleanOutcome {
+    outcome.why = if missed.is_empty() {
+        compact_why(&format!("{} model={model}", outcome.why))
+    } else {
+        compact_why(&format!(
+            "{} model={model} after {}",
+            outcome.why,
+            missed.join(", ")
+        ))
+    };
+    outcome
 }
 
 fn skipped(text: String, why: &str) -> CleanOutcome {
@@ -230,6 +330,7 @@ pub async fn translate_preserving(
     client: &reqwest::Client,
     api_key: &str,
     transcript: &str,
+    model: &str,
 ) -> CleanOutcome {
     let original = transcript.trim();
     if original.is_empty() {
@@ -237,64 +338,56 @@ pub async fn translate_preserving(
     }
     let system = "Translate this transcript into English. Preserve the meaning exactly. Do not add, drop, explain, or summarize. Keep names, numbers, and words that are already English unchanged. If the speech mixes Urdu and English, or Roman Urdu, translate only the parts that are not English. Return only the English text, with no preamble and no quotes.";
     let max_tokens = (original.chars().count() as u32 / 2 + 96).clamp(64, 400);
-    let body = serde_json::json!({
-        "model": CLEANUP_MODEL,
-        "temperature": 0,
-        "max_tokens": max_tokens,
-        "messages": [
-            { "role": "system", "content": system },
-            { "role": "user", "content": original }
-        ]
-    });
-    let result = async {
-        let response = client
-            .post("https://api.groq.com/openai/v1/chat/completions")
-            .timeout(CLEANUP_TIMEOUT)
-            .bearer_auth(api_key)
-            .json(&body)
-            .send()
-            .await
-            .context("couldn't reach Groq")?;
-        let status = response.status();
-        let bytes = response.text().await.context("empty translation response")?;
-        if !status.is_success() {
-            return Err(anyhow!(groq_error_message(status.as_u16(), &bytes)));
-        }
-        let parsed: ChatResponse = serde_json::from_str(&bytes).context("translation response was not JSON")?;
-        let message = parsed
-            .choices
-            .into_iter()
-            .next()
-            .map(|choice| choice.message)
-            .context("translation response had no text")?;
-        message_text(message.content.as_ref()).context("translation response had no text")
-    }
-    .await;
-    match result {
-        Ok(text) => {
-            let text = salvage_model_text(&text);
-            if accept_translation(original, &text) {
-                CleanOutcome {
-                    text,
-                    used_model: true,
+    let models = model_order(model);
+    let mut missed = Vec::new();
+    for model_id in &models {
+        match post_chat(client, api_key, model_id, system, original, max_tokens).await {
+            Err(CleanupFail::Missing) => {
+                missed.push(model_id.clone());
+                continue;
+            }
+            Err(CleanupFail::Other(err)) => {
+                let why = if missed.is_empty() {
+                    err
+                } else {
+                    format!("model missing: {}; {err}", missed.join(", "))
+                };
+                return CleanOutcome {
+                    text: original.to_string(),
+                    used_model: false,
                     note: None,
-                    why: "translated".into(),
+                    why: compact_why(&why),
+                };
+            }
+            Ok(text) => {
+                let text = salvage_model_text(&text);
+                if accept_translation(original, &text) {
+                    let why = if missed.is_empty() {
+                        format!("translated model={model_id}")
+                    } else {
+                        format!("translated model={model_id} after {}", missed.join(", "))
+                    };
+                    return CleanOutcome {
+                        text,
+                        used_model: true,
+                        note: None,
+                        why: compact_why(&why),
+                    };
                 }
-            } else {
-                CleanOutcome {
+                return CleanOutcome {
                     text: original.to_string(),
                     used_model: false,
                     note: None,
                     why: "rejected translation".into(),
-                }
+                };
             }
         }
-        Err(err) => CleanOutcome {
-            text: original.to_string(),
-            used_model: false,
-            note: None,
-            why: compact_why(&format!("{err:#}")),
-        },
+    }
+    CleanOutcome {
+        text: original.to_string(),
+        used_model: false,
+        note: None,
+        why: compact_why(&format!("model missing: {}", missed.join(", "))),
     }
 }
 
@@ -411,7 +504,8 @@ async fn request_cleanup(
     transcript: &str,
     tone: Tone,
     plain: bool,
-) -> anyhow::Result<String> {
+    model: &str,
+) -> Result<String, CleanupFail> {
     let system = if plain {
         "Correct this dictation. Return only the corrected words, with no introduction and no quotes.".to_string()
     } else {
@@ -422,8 +516,23 @@ async fn request_cleanup(
     };
     let user = transcript.trim();
     let max_tokens = (transcript.chars().count() as u32 / 2 + if plain { 96 } else { 48 }).clamp(48, 320);
+    let text = post_chat(client, api_key, model, &system, user, max_tokens).await?;
+    if text.trim().is_empty() {
+        return Err(CleanupFail::Other("cleanup response had no text".into()));
+    }
+    Ok(text)
+}
+
+async fn post_chat(
+    client: &reqwest::Client,
+    api_key: &str,
+    model: &str,
+    system: &str,
+    user: &str,
+    max_tokens: u32,
+) -> Result<String, CleanupFail> {
     let body = serde_json::json!({
-        "model": CLEANUP_MODEL,
+        "model": model,
         "temperature": 0,
         "max_tokens": max_tokens,
         "messages": [
@@ -431,33 +540,42 @@ async fn request_cleanup(
             { "role": "user", "content": user }
         ]
     });
-    let response = client
+    let response = match client
         .post("https://api.groq.com/openai/v1/chat/completions")
         .timeout(CLEANUP_TIMEOUT)
         .bearer_auth(api_key)
         .json(&body)
         .send()
         .await
-        .context("couldn't reach Groq")?;
+    {
+        Ok(response) => response,
+        Err(err) => return Err(CleanupFail::Other(format!("couldn't reach Groq: {err}"))),
+    };
     let status = response.status();
-    let bytes = response.text().await.context("empty cleanup response")?;
+    let bytes = match response.text().await {
+        Ok(bytes) => bytes,
+        Err(err) => return Err(CleanupFail::Other(format!("empty cleanup response: {err}"))),
+    };
     if !status.is_success() {
-        return Err(anyhow!(groq_error_message(status.as_u16(), &bytes)));
+        if is_missing_model(status.as_u16(), &bytes) {
+            return Err(CleanupFail::Missing);
+        }
+        return Err(CleanupFail::Other(groq_error_message(status.as_u16(), &bytes)));
     }
-    let parsed: ChatResponse = serde_json::from_str(&bytes).context("cleanup response was not JSON")?;
-    let message = parsed
-        .choices
-        .into_iter()
-        .next()
-        .map(|choice| choice.message)
-        .context("cleanup response had no text")?;
+    let parsed: ChatResponse = match serde_json::from_str(&bytes) {
+        Ok(parsed) => parsed,
+        Err(_) => return Err(CleanupFail::Other("cleanup response was not JSON".into())),
+    };
+    let Some(message) = parsed.choices.into_iter().next().map(|choice| choice.message) else {
+        return Err(CleanupFail::Other("cleanup response had no text".into()));
+    };
     if let Some(text) = message_text(message.content.as_ref()) {
         return Ok(text);
     }
     if let Some(refusal) = message.refusal.filter(|text| !text.trim().is_empty()) {
-        return Err(anyhow!(compact_why(&refusal)));
+        return Err(CleanupFail::Other(compact_why(&refusal)));
     }
-    Err(anyhow!("cleanup response had no text"))
+    Err(CleanupFail::Other("cleanup response had no text".into()))
 }
 
 fn message_text(value: Option<&serde_json::Value>) -> Option<String> {
@@ -704,6 +822,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn missing_model_falls_through_the_list() {
+        let order = model_order("llama-3.1-8b-instant");
+        assert_eq!(order[0], "llama-3.1-8b-instant");
+        assert_eq!(order[1], "openai/gpt-oss-20b");
+        assert_eq!(order[2], "openai/gpt-oss-120b");
+        assert_eq!(order[3], "qwen/qwen3.6-27b");
+        assert_eq!(model_order(""), vec![
+            "openai/gpt-oss-20b".to_string(),
+            "openai/gpt-oss-120b".to_string(),
+            "qwen/qwen3.6-27b".to_string(),
+        ]);
+        assert_eq!(model_order("openai/gpt-oss-20b").len(), 3);
+        let gone = r#"{"error":{"message":"The model `llama-3.1-8b-instant` does not exist or you do not have access to it."}}"#;
+        assert!(is_missing_model(404, gone));
+        assert!(is_missing_model(400, "The model does not exist"));
+        assert!(!is_missing_model(429, gone));
+        assert!(!is_missing_model(401, "invalid api key"));
+        assert_eq!(CLEANUP_MODEL, "openai/gpt-oss-20b");
+    }
+
+    #[test]
     fn strips_only_um_and_uh() {
         assert_eq!(strip_fillers("Um, I think so"), "I think so");
         assert_eq!(strip_fillers("hello um world"), "hello world");
@@ -738,6 +877,7 @@ mod tests {
             true,
             Tone::Plain,
             true,
+            CLEANUP_MODEL,
         ));
         assert!(!outcome.used_model);
         assert_eq!(outcome.why, "verbatim");
@@ -781,6 +921,7 @@ mod tests {
             true,
             Tone::Verbatim,
             false,
+            CLEANUP_MODEL,
         ));
         assert!(!outcome.used_model);
         assert_eq!(outcome.why, "verbatim");
@@ -796,6 +937,7 @@ mod tests {
             false,
             Tone::Plain,
             false,
+            CLEANUP_MODEL,
         ));
         assert!(!outcome.used_model);
         assert_eq!(outcome.why, "off");

@@ -241,6 +241,7 @@ async fn recognize(bytes: Vec<u8>, env: &JobEnv) -> Result<Recognized, String> {
     let model = env.settings.model.clone();
     let language = env.settings.language.clone();
     let output = env.settings.output.clone();
+    let cleanup_model = env.settings.cleanup_model.clone();
     match SecretKey::load() {
         Ok(key) => {
             let groq = speech_with_groq(
@@ -251,6 +252,7 @@ async fn recognize(bytes: Vec<u8>, env: &JobEnv) -> Result<Recognized, String> {
                 &language,
                 &output,
                 prompt.as_deref(),
+                &cleanup_model,
             )
             .await;
             drop(key);
@@ -306,6 +308,7 @@ async fn speech_with_groq(
     language: &str,
     output: &str,
     prompt: Option<&str>,
+    cleanup_model: &str,
 ) -> anyhow::Result<Recognized> {
     if transcribe::direct_translate(output, language) {
         let translated = transcribe::translate_audio(client, api_key, audio, prompt).await?;
@@ -340,7 +343,7 @@ async fn speech_with_groq(
             })
         }
         SpeechRoute::Mixed => {
-            let outcome = cleanup::translate_preserving(client, api_key, &spoken.text).await;
+            let outcome = cleanup::translate_preserving(client, api_key, &spoken.text, cleanup_model).await;
             if outcome.used_model {
                 return Ok(Recognized {
                     text: outcome.text,

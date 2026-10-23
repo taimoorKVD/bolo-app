@@ -1361,7 +1361,7 @@ mod tests {
             eprintln!("SKIP listening_overlay_is_under_100ms_and_keeps_the_first_200ms: CI=true");
             return;
         }
-        let warm = crate::warm::WarmMic::spawn(None);
+        let warm = crate::warm::WarmMic::spawn(None, None);
         let deadline = Instant::now() + Duration::from_secs(3);
         while !warm.is_live() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(20));

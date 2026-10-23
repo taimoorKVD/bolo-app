@@ -1,18 +1,18 @@
 //! A microphone stream that stays open between takes.
 //!
-//! Opening WASAPI on key-down cost seconds and showed "Starting" before
-//! "Listening". This thread opens the preferred device (or the current
-//! default) at startup, keeps about a second of pre-roll, and starts a take
-//! by copying that buffer. Key-down never opens a device. If the stream has
-//! died, it is reopened on this thread after the take is already marked.
-//! Device changes are picked up while idle, using the same fallback order as
-//! a one-shot recording.
+//! The capture thread opens the preferred device (or the Windows default) once
+//! at launch and leaves it playing. Key-down only copies the one-second ring,
+//! so the press does not wait on WASAPI. The stream is closed only when a new
+//! one is already playing: a dead stream, a saved microphone change, or a
+//! Windows default-device notification whose device actually differs. A name
+//! poll never reopens it.
 
 use crate::audio::{self, FinishedAudio};
 use crate::chunk;
 use cpal::traits::{HostTrait, StreamTrait};
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -79,11 +79,17 @@ impl LiveTake {
         (Arc::clone(&self.level), Arc::clone(&self.stop))
     }
 
-    /// Milliseconds from `keydown` to the first sample that arrived after the
-    /// pre-roll was copied. `None` until that callback lands.
+    /// Milliseconds from `keydown` to audio that covers that instant.
+    ///
+    /// Pre-roll already holds samples from before the key, so the wait is 0.
+    /// With an empty ring this is the wait for the next callback.
     pub fn first_sample_ms_since(&self, keydown: Instant) -> Option<u64> {
-        let at = self.first_sample.lock().ok().and_then(|guard| *guard)?;
-        Some(at.saturating_duration_since(keydown).as_millis() as u64)
+        reported_first_sample_ms(
+            self.pre_roll_samples,
+            self.first_sample.lock().ok().and_then(|guard| *guard).map(|at| {
+                at.saturating_duration_since(keydown).as_millis() as u64
+            }),
+        )
     }
 
     pub fn finish(self) -> Result<FinishedAudio, String> {
@@ -109,17 +115,19 @@ pub struct WarmMic {
 }
 
 impl WarmMic {
-    pub fn spawn(preference: Option<String>) -> Self {
+    pub fn spawn(preference: Option<String>, config_dir: Option<PathBuf>) -> Self {
         let (cmd_tx, cmd_rx) = mpsc::channel();
         let level = Arc::new(AtomicU32::new(0));
         let live = Arc::new(AtomicBool::new(false));
-        let initial = preference.clone();
+        let watch = Arc::new(Watch::new(preference.clone(), config_dir));
         let shared = Arc::clone(&level);
         let shared_live = Arc::clone(&live);
+        let shared_watch = Arc::clone(&watch);
         let _ = std::thread::Builder::new().name("bolo-warm".into()).spawn(move || {
-            run(cmd_rx, initial, shared, shared_live);
+            run(cmd_rx, shared_watch, shared, shared_live);
         });
-        // Ask the thread to open this preference even if spawn raced.
+        // Ask the thread to record this preference even if spawn raced.
+        // The same name does not reopen the stream.
         let _ = cmd_tx.send(Cmd::Retarget(preference));
         Self { cmd: cmd_tx, level, live }
     }
@@ -215,7 +223,9 @@ impl Capture {
         }
     }
 
-    fn apply_format(&mut self, channels: u16, sample_rate: u32, preserve_take: bool) {
+    /// Keep the ring across an open. Samples are dropped only when the device
+    /// format changes, because the old rate would no longer match the take.
+    fn apply_format(&mut self, channels: u16, sample_rate: u32) {
         let channels = channels.max(1);
         let sample_rate = sample_rate.max(1);
         let samples = (u64::from(sample_rate) * u64::from(channels) * u64::from(PRE_ROLL_MS) / 1000) as usize;
@@ -223,113 +233,148 @@ impl Capture {
         let format_changed = self.channels != channels || self.sample_rate != sample_rate;
         self.channels = channels;
         self.sample_rate = sample_rate;
-        if preserve_take && self.take.is_some() {
-            if format_changed {
-                self.ring.clear();
-            }
+        if format_changed {
+            self.ring.clear();
+        }
+        while self.ring.len() > self.cap {
+            self.ring.pop_front();
+        }
+    }
+}
+
+struct Watch {
+    preference: Mutex<Option<String>>,
+    active_name: Mutex<String>,
+    used_fallback: Mutex<bool>,
+    note: Mutex<String>,
+    preference_epoch: AtomicU64,
+    default_event: AtomicBool,
+    config_dir: Option<PathBuf>,
+}
+
+impl Watch {
+    fn new(preference: Option<String>, config_dir: Option<PathBuf>) -> Self {
+        Self {
+            preference: Mutex::new(preference),
+            active_name: Mutex::new(String::new()),
+            used_fallback: Mutex::new(false),
+            note: Mutex::new(String::new()),
+            preference_epoch: AtomicU64::new(0),
+            default_event: AtomicBool::new(false),
+            config_dir,
+        }
+    }
+
+    fn set_preference(&self, next: Option<String>) {
+        let mut slot = self.preference.lock().unwrap_or_else(|err| err.into_inner());
+        if same_preference(&slot, &next) {
             return;
         }
-        self.ring.clear();
-        self.take = None;
+        *slot = next;
+        self.preference_epoch.fetch_add(1, Ordering::Relaxed);
     }
 }
 
-fn run(cmd_rx: Receiver<Cmd>, mut preference: Option<String>, level: Arc<AtomicU32>, live: Arc<AtomicBool>) {
-    let host = cpal::default_host();
-    let state = Arc::new(Mutex::new(Capture::new(level)));
-    let mut stream: Option<cpal::Stream> = None;
-    let mut active_name = String::new();
-    let mut used_fallback = false;
-    let mut note = String::new();
-    let mut next_id = 1u64;
-    let mut last_scan = Instant::now() - Duration::from_secs(2);
-    let mut reopen_after = Instant::now();
-    let mut deferred = VecDeque::new();
+fn same_preference(current: &Option<String>, next: &Option<String>) -> bool {
+    norm_pref(current) == norm_pref(next)
+}
 
-    loop {
-        let cmd = if let Some(cmd) = deferred.pop_front() {
-            Some(cmd)
+fn norm_pref(value: &Option<String>) -> Option<String> {
+    value.as_deref().map(str::trim).filter(|value| !value.is_empty()).map(audio::normalize_mic_name)
+}
+
+/// Why a capture stream should be opened. `None` leaves the playing stream alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReopenReason {
+    Launch,
+    StreamError,
+    Preference,
+    DeviceChanged,
+}
+
+impl ReopenReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Launch => "launch",
+            Self::StreamError => "stream-error",
+            Self::Preference => "preference",
+            Self::DeviceChanged => "device-changed",
+        }
+    }
+}
+
+/// A healthy stream stays up across takes. A default-device event reopens only
+/// when the device we would open is a different one. `names_differ` is false
+/// when the resolved name still matches the open device.
+fn plan_reopen(
+    have_stream: bool,
+    ever_opened: bool,
+    preference_dirty: bool,
+    default_event: bool,
+    names_differ: bool,
+) -> Option<ReopenReason> {
+    if !have_stream {
+        return Some(if ever_opened {
+            ReopenReason::StreamError
         } else {
-            match cmd_rx.try_recv() {
-                Ok(cmd) => Some(cmd),
-                Err(mpsc::TryRecvError::Empty) => match cmd_rx.recv_timeout(LOOP_SLICE) {
-                    Ok(cmd) => Some(cmd),
-                    Err(mpsc::RecvTimeoutError::Timeout) => None,
-                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                },
-                Err(mpsc::TryRecvError::Disconnected) => break,
-            }
-        };
-        if let Some(cmd) = cmd {
-            handle_cmd(
-                cmd,
-                &state,
-                &mut preference,
-                &mut active_name,
-                &mut used_fallback,
-                &mut note,
-                &mut next_id,
-            );
-            continue;
-        }
+            ReopenReason::Launch
+        });
+    }
+    if preference_dirty && names_differ {
+        return Some(ReopenReason::Preference);
+    }
+    if default_event && names_differ {
+        return Some(ReopenReason::DeviceChanged);
+    }
+    None
+}
 
-        let recording = state.lock().ok().is_some_and(|guard| guard.take.is_some());
-        let broken = state.lock().ok().and_then(|guard| guard.error.clone()).is_some();
-        let missing = stream.is_none() || broken || !live.load(Ordering::Relaxed);
-        let idle_scan = !recording && last_scan.elapsed() >= Duration::from_secs(1);
-        if (missing && Instant::now() >= reopen_after) || idle_scan {
-            if missing || device_should_change(&host, &preference, &active_name) {
-                last_scan = Instant::now();
-                // A dead stream is reopened even while a take is armed, and the
-                // samples already copied stay in that take. Idle scans yield as
-                // soon as a Begin arrives so a press is not stuck behind a sweep.
-                match reopen(
-                    &host,
-                    &preference,
-                    &state,
-                    &mut stream,
-                    &mut active_name,
-                    &mut used_fallback,
-                    &mut note,
-                    &live,
-                    recording,
-                    Some(&cmd_rx),
-                    &mut deferred,
-                ) {
-                    Reopen::Yielded => continue,
-                    Reopen::Failed(_) => {
-                        reopen_after = Instant::now() + Duration::from_millis(400);
-                    }
-                    Reopen::Ready => reopen_after = Instant::now(),
-                }
-            }
-        }
+fn warm_log_line(reason: &str) -> String {
+    format!("warm stream opened/reopened reason={reason}")
+}
+
+/// `0` when the ring already covered the key. Otherwise the wait for a new sample.
+fn reported_first_sample_ms(pre_roll_samples: usize, captured_after_ms: Option<u64>) -> Option<u64> {
+    if pre_roll_samples > 0 {
+        Some(0)
+    } else {
+        captured_after_ms
     }
 }
 
-fn handle_cmd(
-    cmd: Cmd,
-    state: &Arc<Mutex<Capture>>,
-    preference: &mut Option<String>,
-    active_name: &mut String,
-    used_fallback: &mut bool,
-    note: &mut String,
-    next_id: &mut u64,
-) {
+fn run(cmd_rx: Receiver<Cmd>, watch: Arc<Watch>, level: Arc<AtomicU32>, live: Arc<AtomicBool>) {
+    let state = Arc::new(Mutex::new(Capture::new(Arc::clone(&level))));
+    let io_state = Arc::clone(&state);
+    let io_live = Arc::clone(&live);
+    let io_watch = Arc::clone(&watch);
+    let _ = std::thread::Builder::new().name("bolo-warm-io".into()).spawn(move || {
+        io_loop(io_state, io_live, io_watch);
+    });
+    let mut next_id = 1u64;
+    loop {
+        let cmd = match cmd_rx.recv_timeout(LOOP_SLICE) {
+            Ok(cmd) => cmd,
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        };
+        handle_cmd(cmd, &state, &watch, &mut next_id);
+    }
+}
+
+fn handle_cmd(cmd: Cmd, state: &Arc<Mutex<Capture>>, watch: &Watch, next_id: &mut u64) {
     match cmd {
-        Cmd::Retarget(next) => *preference = next,
-        Cmd::Begin { preference: asked, reply } => {
-            // None means system default. Always replace so a saved headset
-            // name does not stick after the user switches back to auto.
-            // The ring is marked here. Opening a device is the loop's job,
-            // after this reply, so a dead mic cannot stall the hotkey.
-            *preference = asked;
-            match arm_take(state, next_id, active_name, *used_fallback, note) {
+        Cmd::Retarget(next) => watch.set_preference(next),
+        Cmd::Begin { preference, reply } => {
+            // The ring is marked here. Opening a device is the capture thread's
+            // job and does not block this reply.
+            watch.set_preference(preference);
+            let active_name = watch.active_name.lock().unwrap_or_else(|err| err.into_inner()).clone();
+            let used_fallback = *watch.used_fallback.lock().unwrap_or_else(|err| err.into_inner());
+            let note = watch.note.lock().unwrap_or_else(|err| err.into_inner()).clone();
+            match arm_take(state, next_id, &active_name, used_fallback, &note) {
                 Ok(armed) => {
                     let id = armed.id;
                     if reply.send(Ok(armed)).is_err() {
-                        // The press already gave up. Don't leave this take armed
-                        // or the next press ends the wrong buffer.
                         let _ = disarm_take(state, id);
                     }
                 }
@@ -344,120 +389,204 @@ fn handle_cmd(
     }
 }
 
-fn device_should_change(host: &cpal::Host, preference: &Option<String>, active_name: &str) -> bool {
-    let Ok(devices) = audio::host_mics(host) else {
-        return false;
+fn io_loop(state: Arc<Mutex<Capture>>, live: Arc<AtomicBool>, watch: Arc<Watch>) {
+    let host = cpal::default_host();
+    #[cfg(windows)]
+    let _notifications = register_default_notifications(Arc::clone(&watch));
+    let mut stream: Option<cpal::Stream> = None;
+    let stream_gen = Arc::new(AtomicU64::new(0));
+    let mut next_gen = 1u64;
+    let mut ever_opened = false;
+    let mut seen_preference = 0u64;
+    let mut reopen_after = Instant::now();
+    let mut last_fail = String::new();
+    let mut last_fail_at = Instant::now() - Duration::from_secs(30);
+
+    loop {
+        pump_audio_messages();
+        let preference = watch.preference.lock().unwrap_or_else(|err| err.into_inner()).clone();
+        let active_name = watch.active_name.lock().unwrap_or_else(|err| err.into_inner()).clone();
+        let broken = stream.is_some()
+            && (!live.load(Ordering::Relaxed)
+                || state.lock().ok().and_then(|guard| guard.error.clone()).is_some());
+        let have_stream = stream.is_some() && !broken;
+        let preference_dirty = watch.preference_epoch.load(Ordering::Relaxed) != seen_preference;
+        let default_event = watch.default_event.load(Ordering::Relaxed);
+        let check_names = have_stream && (preference_dirty || default_event);
+        let names = if check_names {
+            device_names_differ(&host, &preference, &active_name)
+        } else {
+            NameCheck::Same
+        };
+        let names_differ = matches!(names, NameCheck::Differ);
+        let reason = plan_reopen(have_stream, ever_opened, preference_dirty, default_event, names_differ);
+
+        if reason.is_none() {
+            if preference_dirty && !matches!(names, NameCheck::Unknown) {
+                seen_preference = watch.preference_epoch.load(Ordering::Relaxed);
+            }
+            if default_event && !matches!(names, NameCheck::Unknown) {
+                watch.default_event.store(false, Ordering::Relaxed);
+            }
+            std::thread::sleep(Duration::from_millis(40));
+            continue;
+        }
+        let reason = reason.expect("reason");
+        if matches!(reason, ReopenReason::StreamError) && Instant::now() < reopen_after {
+            std::thread::sleep(Duration::from_millis(40));
+            continue;
+        }
+        // Keep the playing stream until the replacement has started. A press
+        // during this open still copies the ring on the other thread.
+        let epoch_at_start = watch.preference_epoch.load(Ordering::Relaxed);
+        match open_replacing(
+            &host,
+            &preference,
+            &state,
+            &mut stream,
+            &live,
+            &stream_gen,
+            &watch,
+            &mut next_gen,
+        ) {
+            Ok(()) => {
+                ever_opened = true;
+                // A change that arrived while we were opening still needs a pass.
+                if watch.preference_epoch.load(Ordering::Relaxed) == epoch_at_start {
+                    seen_preference = epoch_at_start;
+                }
+                if matches!(reason, ReopenReason::DeviceChanged) {
+                    watch.default_event.store(false, Ordering::Relaxed);
+                }
+                reopen_after = Instant::now();
+                last_fail.clear();
+                log_warm(&watch, &warm_log_line(reason.as_str()));
+            }
+            Err(err) => {
+                reopen_after = Instant::now() + Duration::from_millis(400);
+                if err != last_fail || last_fail_at.elapsed() >= Duration::from_secs(5) {
+                    log_warm(
+                        &watch,
+                        &format!("warm stream open failed reason={} err={err}", reason.as_str()),
+                    );
+                    last_fail = err;
+                    last_fail_at = Instant::now();
+                }
+                std::thread::sleep(Duration::from_millis(40));
+            }
+        }
+    }
+}
+
+enum NameCheck {
+    Same,
+    Differ,
+    Unknown,
+}
+
+fn device_names_differ(host: &cpal::Host, preference: &Option<String>, active_name: &str) -> NameCheck {
+    if active_name.is_empty() {
+        return NameCheck::Differ;
+    }
+    let devices = match audio::host_mics(host) {
+        Ok(devices) => devices,
+        Err(_) => return NameCheck::Unknown,
     };
     if devices.is_empty() {
-        return active_name.is_empty();
+        return NameCheck::Differ;
     }
-    let Ok(choice) = audio::resolve_microphone(&devices, preference.as_deref()) else {
-        return false;
+    let choice = match audio::resolve_microphone(&devices, preference.as_deref()) {
+        Ok(choice) => choice,
+        Err(_) => return NameCheck::Unknown,
     };
-    audio::normalize_mic_name(&choice.active_name) != audio::normalize_mic_name(active_name)
+    if audio::normalize_mic_name(&choice.active_name) == audio::normalize_mic_name(active_name) {
+        NameCheck::Same
+    } else {
+        NameCheck::Differ
+    }
 }
 
-enum Reopen {
-    Ready,
-    Yielded,
-    #[allow(dead_code)]
-    Failed(String),
+fn log_warm(watch: &Watch, message: &str) {
+    if let Some(dir) = &watch.config_dir {
+        crate::logbuf::log_line(dir, "info", message);
+    } else {
+        eprintln!("info {message}");
+    }
 }
 
-fn reopen(
+struct Opened {
+    stream: cpal::Stream,
+    channels: u16,
+    sample_rate: u32,
+    generation: u64,
+    name: String,
+    used_fallback: bool,
+    note: String,
+}
+
+fn open_replacing(
     host: &cpal::Host,
     preference: &Option<String>,
     state: &Arc<Mutex<Capture>>,
     stream: &mut Option<cpal::Stream>,
-    active_name: &mut String,
-    used_fallback: &mut bool,
-    note: &mut String,
     live: &Arc<AtomicBool>,
-    preserve_take: bool,
-    interrupt: Option<&Receiver<Cmd>>,
-    deferred: &mut VecDeque<Cmd>,
-) -> Reopen {
-    if pull_interrupt(interrupt, deferred) {
-        return Reopen::Yielded;
-    }
-    *stream = None;
-    live.store(false, Ordering::Relaxed);
-    if let Ok(mut guard) = state.lock() {
-        guard.error = None;
-    }
-    let devices = match audio::host_mics(host) {
-        Ok(devices) => devices,
-        Err(err) => return Reopen::Failed(err.to_string()),
-    };
+    stream_gen: &Arc<AtomicU64>,
+    watch: &Watch,
+    next_gen: &mut u64,
+) -> Result<(), String> {
+    let devices = audio::host_mics(host).map_err(|err| err.to_string())?;
     let order = audio::open_order(&devices, preference.as_deref());
     if order.is_empty() {
-        active_name.clear();
-        return Reopen::Failed("No microphone is available.".into());
+        return Err("No microphone is available.".into());
     }
     let mut failures = Vec::new();
     for name in &order {
-        if pull_interrupt(interrupt, deferred) {
-            return Reopen::Yielded;
-        }
-        match open_one(host, name, state, live, preserve_take, interrupt, deferred) {
-            Ok(opened) => {
-                let pref = preference.as_deref().map(str::trim).filter(|value| !value.is_empty());
-                let opened_preference =
-                    pref.is_some_and(|pref| audio::normalize_mic_name(pref) == audio::normalize_mic_name(name));
-                let skipped_first = order.first().map(String::as_str) != Some(name.as_str());
-                *used_fallback = match pref {
-                    Some(_) => !opened_preference,
-                    None => skipped_first,
-                };
-                *note = audio::usage_line(pref, name, *used_fallback);
-                *active_name = name.clone();
-                *stream = Some(opened);
+        let generation = *next_gen;
+        *next_gen = next_gen.wrapping_add(1);
+        match open_candidate(host, name, state, live, stream_gen, generation) {
+            Ok(mut opened) => {
+                finish_opened(&mut opened, preference, name, &order);
+                if let Ok(mut guard) = state.lock() {
+                    guard.apply_format(opened.channels, opened.sample_rate);
+                    guard.error = None;
+                }
+                if let Ok(mut slot) = watch.used_fallback.lock() {
+                    *slot = opened.used_fallback;
+                }
+                if let Ok(mut slot) = watch.note.lock() {
+                    *slot = opened.note;
+                }
+                if let Ok(mut slot) = watch.active_name.lock() {
+                    *slot = opened.name;
+                }
+                stream_gen.store(opened.generation, Ordering::Relaxed);
+                *stream = Some(opened.stream);
                 live.store(true, Ordering::Relaxed);
-                return Reopen::Ready;
+                return Ok(());
             }
-            Err(OpenFail::Yielded) => return Reopen::Yielded,
-            Err(OpenFail::Failed(err)) => failures.push(format!("{name}: {err:#}")),
+            Err(err) => failures.push(format!("{name}: {err}")),
         }
     }
-    active_name.clear();
-    Reopen::Failed(if failures.is_empty() {
+    Err(if failures.is_empty() {
         "Couldn't open a microphone.".into()
     } else {
         format!("Couldn't open a microphone. {}", failures.join(" "))
     })
 }
 
-fn pull_interrupt(interrupt: Option<&Receiver<Cmd>>, deferred: &mut VecDeque<Cmd>) -> bool {
-    let Some(rx) = interrupt else {
-        return false;
-    };
-    let mut pulled = false;
-    while let Ok(cmd) = rx.try_recv() {
-        deferred.push_back(cmd);
-        pulled = true;
-    }
-    pulled
-}
-
-enum OpenFail {
-    Yielded,
-    Failed(anyhow::Error),
-}
-
-fn open_one(
+fn open_candidate(
     host: &cpal::Host,
     name: &str,
     state: &Arc<Mutex<Capture>>,
     live: &Arc<AtomicBool>,
-    preserve_take: bool,
-    interrupt: Option<&Receiver<Cmd>>,
-    deferred: &mut VecDeque<Cmd>,
-) -> Result<cpal::Stream, OpenFail> {
+    stream_gen: &Arc<AtomicU64>,
+    generation: u64,
+) -> Result<Opened, String> {
     use cpal::traits::DeviceTrait;
     let wanted = audio::normalize_mic_name(name);
     let device = host
         .input_devices()
-        .map_err(|err| OpenFail::Failed(anyhow::anyhow!("couldn't list microphones: {err}")))?
+        .map_err(|err| format!("couldn't list microphones: {err}"))?
         .find(|device| {
             device
                 .name()
@@ -465,51 +594,183 @@ fn open_one(
                 .map(|found| audio::normalize_mic_name(&found) == wanted)
                 .unwrap_or(false)
         })
-        .ok_or_else(|| anyhow::anyhow!("microphone \"{name}\" disappeared"))
-        .map_err(OpenFail::Failed)?;
+        .ok_or_else(|| format!("microphone \"{name}\" disappeared"))?;
     let supported = device
         .default_input_config()
-        .map_err(|err| OpenFail::Failed(anyhow::anyhow!("{name} has no default input format: {err}")))?;
+        .map_err(|err| format!("{name} has no default input format: {err}"))?;
     let channels = supported.channels();
     let sample_rate = supported.sample_rate().0;
     let sample_format = supported.sample_format();
     let config: cpal::StreamConfig = supported.into();
-    if let Ok(mut guard) = state.lock() {
-        guard.apply_format(channels, sample_rate, preserve_take);
-        guard.error = None;
-    }
     let audio_state = Arc::clone(state);
-    let err_state = Arc::clone(state);
     let err_live = Arc::clone(live);
+    let err_state = Arc::clone(state);
+    let err_gen = Arc::clone(stream_gen);
+    let probe: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let probe_err = Arc::clone(&probe);
     let stream = audio::build_input_callback(
         &device,
         &config,
         sample_format,
         move |samples| push_samples(&audio_state, samples),
         move |err| {
-            err_live.store(false, Ordering::Relaxed);
-            if let Ok(mut guard) = err_state.lock() {
-                guard.error = Some(format!("Microphone error: {err}"));
+            let message = format!("Microphone error: {err}");
+            if let Ok(mut slot) = probe_err.lock() {
+                *slot = Some(message.clone());
+            }
+            if err_gen.load(Ordering::Relaxed) == generation {
+                err_live.store(false, Ordering::Relaxed);
+                if let Ok(mut guard) = err_state.lock() {
+                    guard.error = Some(message);
+                }
             }
         },
     )
-    .map_err(OpenFail::Failed)?;
-    stream
-        .play()
-        .map_err(|err| OpenFail::Failed(anyhow::anyhow!("couldn't start {name}: {err}")))?;
-    // Give the callback a moment to report an immediate invalidation.
-    // An idle scan bails here if a press arrived, so that press opens the mic itself.
-    let bridge = Arc::clone(state);
-    for _ in 0..4 {
-        std::thread::sleep(Duration::from_millis(20));
-        if pull_interrupt(interrupt, deferred) {
-            return Err(OpenFail::Yielded);
-        }
-        if let Some(err) = bridge.lock().ok().and_then(|guard| guard.error.clone()) {
-            return Err(OpenFail::Failed(anyhow::anyhow!(err)));
+    .map_err(|err| err.to_string())?;
+    stream.play().map_err(|err| format!("couldn't start {name}: {err}"))?;
+    // Immediate invalidation shows up within a couple of callbacks. This wait
+    // stays on the capture thread, so a key-down still arms the old ring.
+    for _ in 0..2 {
+        std::thread::sleep(Duration::from_millis(15));
+        if let Some(err) = probe.lock().ok().and_then(|slot| slot.clone()) {
+            return Err(err);
         }
     }
-    Ok(stream)
+    let pref_name = name.to_string();
+    Ok(Opened {
+        stream,
+        channels,
+        sample_rate,
+        generation,
+        name: pref_name,
+        used_fallback: false,
+        note: String::new(),
+    })
+}
+
+fn finish_opened(
+    opened: &mut Opened,
+    preference: &Option<String>,
+    name: &str,
+    order: &[String],
+) {
+    let pref = preference.as_deref().map(str::trim).filter(|value| !value.is_empty());
+    let opened_preference =
+        pref.is_some_and(|pref| audio::normalize_mic_name(pref) == audio::normalize_mic_name(name));
+    let skipped_first = order.first().map(String::as_str) != Some(name);
+    opened.used_fallback = match pref {
+        Some(_) => !opened_preference,
+        None => skipped_first,
+    };
+    opened.note = audio::usage_line(pref, name, opened.used_fallback);
+}
+
+#[cfg(windows)]
+fn pump_audio_messages() {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE,
+    };
+    unsafe {
+        let mut message = MSG::default();
+        while PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).as_bool() {
+            let _ = TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn pump_audio_messages() {}
+
+#[cfg(windows)]
+struct DefaultNotifications {
+    enumerator: windows::Win32::Media::Audio::IMMDeviceEnumerator,
+    client: windows::Win32::Media::Audio::IMMNotificationClient,
+}
+
+#[cfg(windows)]
+impl Drop for DefaultNotifications {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = self.enumerator.UnregisterEndpointNotificationCallback(&self.client);
+        }
+    }
+}
+
+#[cfg(windows)]
+fn register_default_notifications(watch: Arc<Watch>) -> Option<DefaultNotifications> {
+    default_device::install(watch).ok()
+}
+
+#[cfg(windows)]
+mod default_device {
+    use super::{DefaultNotifications, Watch};
+    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
+    use windows::core::implement;
+    use windows::Win32::Media::Audio::{
+        IMMDeviceEnumerator, IMMNotificationClient, IMMNotificationClient_Impl, MMDeviceEnumerator, DEVICE_STATE,
+        EDataFlow, ERole,
+    };
+    use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_ALL};
+
+    #[implement(IMMNotificationClient)]
+    struct DefaultDeviceNotifications {
+        watch: Arc<Watch>,
+    }
+
+    #[allow(non_snake_case)]
+    impl IMMNotificationClient_Impl for DefaultDeviceNotifications_Impl {
+        fn OnDeviceStateChanged(
+            &self,
+            _id: &windows::core::PCWSTR,
+            _state: DEVICE_STATE,
+        ) -> windows::core::Result<()> {
+            Ok(())
+        }
+
+        fn OnDeviceAdded(&self, _id: &windows::core::PCWSTR) -> windows::core::Result<()> {
+            Ok(())
+        }
+
+        fn OnDeviceRemoved(&self, _id: &windows::core::PCWSTR) -> windows::core::Result<()> {
+            Ok(())
+        }
+
+        fn OnDefaultDeviceChanged(
+            &self,
+            flow: EDataFlow,
+            _role: ERole,
+            _id: &windows::core::PCWSTR,
+        ) -> windows::core::Result<()> {
+            // eRender is 0. Capture and "all" are the default microphone changing.
+            if flow.0 != 0 {
+                self.watch.default_event.store(true, Ordering::Relaxed);
+            }
+            Ok(())
+        }
+
+        fn OnPropertyValueChanged(
+            &self,
+            _id: &windows::core::PCWSTR,
+            _key: &windows::Win32::Foundation::PROPERTYKEY,
+        ) -> windows::core::Result<()> {
+            Ok(())
+        }
+    }
+
+    pub fn install(watch: Arc<Watch>) -> windows::core::Result<DefaultNotifications> {
+        let enumerator = unsafe {
+            CoCreateInstance::<_, IMMDeviceEnumerator>(
+                &MMDeviceEnumerator,
+                None::<&windows::core::IUnknown>,
+                CLSCTX_ALL,
+            )?
+        };
+        let client: IMMNotificationClient = DefaultDeviceNotifications { watch }.into();
+        unsafe { enumerator.RegisterEndpointNotificationCallback(&client)? };
+        Ok(DefaultNotifications { enumerator, client })
+    }
 }
 
 fn push_samples(state: &Mutex<Capture>, samples: impl IntoIterator<Item = f32>) {
@@ -687,14 +948,11 @@ fn arm_marks_preroll_without_opening_a_device() {
         let state = Arc::new(Mutex::new(Capture::new(level)));
         {
             let mut guard = state.lock().expect("buffer");
-            guard.apply_format(1, 16_000, false);
+            guard.apply_format(1, 16_000);
             guard.ring.extend(std::iter::repeat(0.05).take(16_000));
             guard.error = Some("Microphone error: dead".into());
         }
-        let mut preference = None;
-        let mut active_name = String::new();
-        let mut used_fallback = false;
-        let mut note = String::new();
+        let watch = Watch::new(None, None);
         let mut next_id = 1u64;
         let (tx, rx) = mpsc::channel();
         let started = Instant::now();
@@ -704,10 +962,7 @@ fn arm_marks_preroll_without_opening_a_device() {
                 reply: tx,
             },
             &state,
-            &mut preference,
-            &mut active_name,
-            &mut used_fallback,
-            &mut note,
+            &watch,
             &mut next_id,
         );
         let armed = rx
@@ -727,12 +982,74 @@ fn arm_marks_preroll_without_opening_a_device() {
             first_ms.unwrap_or(0)
         );
         assert!(first_ms.unwrap_or(999) < 50, "first sample was not marked");
+        assert_eq!(
+            reported_first_sample_ms(armed.pre_roll_samples, first_ms),
+            Some(0),
+            "pre-roll must log keydown_first_sample_ms=0"
+        );
         let finished = disarm_take(&state, armed.id).expect("disarm");
         assert!(finished.interleaved.len() >= 16_000 + 3_200);
         let new_ms = (finished.interleaved.len() - 16_000) as u64 * 1000 / 16_000;
         assert!(new_ms >= 200, "only {new_ms} ms arrived after the mark");
+        // A same-format open must not wipe the ring the way the idle scan did.
+        {
+            let mut guard = state.lock().expect("buffer");
+            let kept = guard.ring.len();
+            let channels = guard.channels;
+            let sample_rate = guard.sample_rate;
+            guard.apply_format(channels, sample_rate);
+            assert_eq!(guard.ring.len(), kept, "reopening the same format cleared the pre-roll");
+        }
     }
 
+#[test]
+fn stable_default_does_not_reopen_and_preroll_is_instant() {
+    assert_eq!(
+        plan_reopen(true, true, false, false, false),
+        None,
+        "a healthy stream must stay open between takes"
+    );
+    assert_eq!(
+        plan_reopen(true, true, false, true, false),
+        None,
+        "a default-device event for the same device must not reopen"
+    );
+    assert_eq!(
+        plan_reopen(true, true, true, false, false),
+        None,
+        "saving the microphone that is already open must not reopen"
+    );
+    assert_eq!(
+        plan_reopen(true, true, false, true, true),
+        Some(ReopenReason::DeviceChanged)
+    );
+    assert_eq!(plan_reopen(true, true, true, false, true), Some(ReopenReason::Preference));
+    assert_eq!(plan_reopen(false, false, false, false, false), Some(ReopenReason::Launch));
+    assert_eq!(
+        plan_reopen(false, true, false, false, false),
+        Some(ReopenReason::StreamError)
+    );
+    assert_eq!(warm_log_line("launch"), "warm stream opened/reopened reason=launch");
+    assert_eq!(
+        warm_log_line("device-changed"),
+        "warm stream opened/reopened reason=device-changed"
+    );
+    assert_eq!(reported_first_sample_ms(16_000, Some(4_000)), Some(0));
+    assert_eq!(reported_first_sample_ms(0, Some(40)), Some(40));
+    assert_eq!(reported_first_sample_ms(0, None), None);
+
+    let level = Arc::new(AtomicU32::new(0));
+    let state = Mutex::new(Capture::new(level));
+    {
+        let mut guard = state.lock().expect("buffer");
+        guard.apply_format(1, 48_000);
+        guard.ring.extend(std::iter::repeat(0.01).take(8_000));
+        guard.apply_format(1, 48_000);
+        assert_eq!(guard.ring.len(), 8_000);
+        guard.apply_format(2, 48_000);
+        assert!(guard.ring.is_empty(), "a format change drops samples that no longer match");
+    }
+}
 
 #[cfg(all(test, windows))]
 #[test]
@@ -747,7 +1064,7 @@ fn first_press_starts_capture() {
         eprintln!("SKIP first_press_starts_capture: CI=true");
         return;
     }
-    let warm = WarmMic::spawn(None);
+    let warm = WarmMic::spawn(None, None);
     let deadline = Instant::now() + Duration::from_secs(3);
     while !warm.is_live() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(30));

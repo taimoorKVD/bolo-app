@@ -74,6 +74,7 @@ function normalizeSettings(settings: Settings): Settings {
     pasteHotkey: settings.pasteHotkey ?? { ctrl: true, alt: false, shift: false, win: true, key: "v" },
     output: settings.output === "same" ? "same" : "english",
     verbatim: settings.verbatim === true,
+    cleanupModel: settings.cleanupModel?.trim() || "openai/gpt-oss-20b",
   };
 }
 
@@ -871,7 +872,7 @@ function cleanupPanel(draft: Draft): HTMLElement {
   const panel = panelEl(
     "cleanup",
     "Cleanup and style",
-    "Llama 3.1 8B Instant punctuates and applies spoken corrections such as “scratch that”, “new line”, and “period”. It does not add or drop what you said. Chat stays casual. Mail and documents stay formal. Code editors skip the rewrite. Verbatim pastes the transcript unchanged.",
+    "Groq punctuates and applies spoken corrections such as “scratch that”, “new line”, and “period”. It does not add or drop what you said. Chat stays casual. Mail and documents stay formal. Code editors skip the rewrite. Verbatim pastes the transcript unchanged. If the selected model is gone, the next one in the list is tried.",
   );
   panel.append(
     toggle(
@@ -884,7 +885,7 @@ function cleanupPanel(draft: Draft): HTMLElement {
       },
     ),
     toggle(
-      "Clean up with Llama",
+      "Clean up with Groq",
       "On for a new install. A settings file that already saved this off stays off until you turn it on.",
       draft.settings.cleanupEnabled,
       (checked) => {
@@ -893,6 +894,38 @@ function cleanupPanel(draft: Draft): HTMLElement {
       },
     ),
   );
+  const modelLabel = el("label", "stack");
+  modelLabel.append(el("span", "label", "Cleanup model"));
+  const model = document.createElement("select");
+  model.setAttribute("aria-label", "Cleanup model");
+  const modelChoices: Array<[string, string]> = [
+    ["openai/gpt-oss-20b", "openai/gpt-oss-20b — fast"],
+    ["openai/gpt-oss-120b", "openai/gpt-oss-120b"],
+    ["qwen/qwen3.6-27b", "qwen/qwen3.6-27b"],
+  ];
+  if (!modelChoices.some(([id]) => id === draft.settings.cleanupModel)) {
+    modelChoices.unshift([draft.settings.cleanupModel, draft.settings.cleanupModel]);
+  }
+  for (const [value, name] of modelChoices) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = name;
+    model.append(option);
+  }
+  model.value = draft.settings.cleanupModel;
+  model.addEventListener("change", () => {
+    draft.settings.cleanupModel = model.value;
+    markDirty(draft);
+  });
+  modelLabel.append(
+    model,
+    el(
+      "p",
+      "field-note",
+      "Used for cleanup and for Urdu or Roman Urdu that is translated into English. A removed model returns 404 and Bolo.com tries the next one instead of skipping cleanup.",
+    ),
+  );
+  panel.append(modelLabel);
   return panel;
 }
 
@@ -986,7 +1019,7 @@ function aboutPanel(draft: Draft): HTMLElement {
   facts.append(
     fact("Version", draft.info.version),
     fact("Transcription", "Groq Whisper, temperature 0"),
-    fact("Cleanup", "Groq Llama 3.1 8B Instant"),
+    fact("Cleanup", "Groq openai/gpt-oss-20b"),
     fact("Audio", "16 kHz mono FLAC, WAV if encoding fails"),
     fact("Carryover", "Settings and the Groq key from Cadence (com.cadence.dictation) are copied forward."),
   );

@@ -95,7 +95,7 @@ impl AppState {
     pub fn new(settings: Settings, history: Vec<HistoryEntry>, config_dir: std::path::PathBuf) -> Self {
         let listener = ListenerControl::new(settings.hotkey.clone());
         listener.set_paste_hotkey(settings.paste_hotkey.clone());
-        let warm = warm::WarmMic::spawn(settings.microphone.clone());
+        let warm = warm::WarmMic::spawn(settings.microphone.clone(), Some(config_dir.clone()));
         Self {
             settings: Mutex::new(settings),
             history: Mutex::new(history),
@@ -935,6 +935,7 @@ async fn process(
         settings.cleanup_enabled && !settings.verbatim,
         if settings.verbatim { cleanup::Tone::Verbatim } else { tone },
         settings.verbatim,
+        &settings.cleanup_model,
     )
     .await;
     staged.cleanup_ms = cleanup_started.elapsed().as_millis() as u64;

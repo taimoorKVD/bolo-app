@@ -2,6 +2,7 @@
 //!
 //! The API key is intentionally not a field here. It lives in the OS credential store.
 
+use crate::cleanup::CLEANUP_MODEL;
 use crate::hotkey::{validate_hotkey, Hotkey};
 use crate::offline;
 use crate::transcribe::{normalize_language, normalize_model, normalize_output, WHISPER_TURBO};
@@ -41,6 +42,14 @@ pub struct Settings {
     /// Paste the transcript with no cleanup and no filler removal.
     #[serde(default)]
     pub verbatim: bool,
+    /// Groq chat model for cleanup and mixed-language translation.
+    /// A 404 tries the next built-in model.
+    #[serde(default = "default_cleanup_model")]
+    pub cleanup_model: String,
+}
+
+fn default_cleanup_model() -> String {
+    CLEANUP_MODEL.to_string()
 }
 
 fn output_english() -> String {
@@ -74,6 +83,7 @@ impl Default for Settings {
             offline_model: "base.en".into(),
             output: "english".into(),
             verbatim: false,
+            cleanup_model: CLEANUP_MODEL.to_string(),
         }
     }
 }
@@ -109,6 +119,7 @@ pub fn prepare_settings(mut settings: Settings) -> Settings {
     }
     settings.offline_model = offline::normalize_model(&settings.offline_model).to_string();
     settings.output = normalize_output(&settings.output).to_string();
+    settings.cleanup_model = settings.cleanup_model.trim().to_string();
     settings.dictionary = settings
         .dictionary
         .into_iter()
@@ -148,7 +159,20 @@ pub fn validate_settings(settings: &Settings) -> Result<(), String> {
         "english" | "same" => {}
         _ => return Err("Output should be English (translate) or Same as spoken.".into()),
     }
+    if let Some(message) = cleanup_model_error(&settings.cleanup_model) {
+        return Err(message);
+    }
     Ok(())
+}
+
+fn cleanup_model_error(model: &str) -> Option<String> {
+    if model.is_empty()
+        || model.chars().count() > 80
+        || !model.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '-' | '_' | '.'))
+    {
+        return Some("Cleanup model should be a Groq model id such as openai/gpt-oss-20b.".into());
+    }
+    None
 }
 
 pub fn normalize_settings(mut settings: Settings) -> Settings {
@@ -179,6 +203,9 @@ pub fn normalize_settings(mut settings: Settings) -> Settings {
     }
     settings.offline_model = offline::normalize_model(&settings.offline_model).to_string();
     settings.output = normalize_output(&settings.output).to_string();
+    if cleanup_model_error(&settings.cleanup_model).is_some() {
+        settings.cleanup_model = CLEANUP_MODEL.to_string();
+    }
     settings
 }
 
@@ -478,6 +505,13 @@ mod carryover {
         assert!(parsed.cleanup_enabled);
         assert_eq!(parsed.output, "english");
         assert!(!parsed.verbatim);
+        assert_eq!(parsed.cleanup_model, CLEANUP_MODEL);
+        let legacy = serde_json::from_str::<Settings>(
+            r#"{"cleanupEnabled":true,"cleanupModel":"llama-3.1-8b-instant"}"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.cleanup_model, "llama-3.1-8b-instant");
+        assert_eq!(normalize_settings(legacy).cleanup_model, "llama-3.1-8b-instant");
     }
 
     #[test]

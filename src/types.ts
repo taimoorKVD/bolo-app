@@ -23,6 +23,8 @@ export type Settings = {
   output: "english" | "same";
   /** Paste exactly what was said. Cleanup does not rewrite. */
   verbatim: boolean;
+  /** Groq chat model for cleanup and mixed-language translation. */
+  cleanupModel: string;
 };
 
 export type ApiKeyStatus = {

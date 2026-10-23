@@ -12,6 +12,24 @@ use std::time::Duration;
 
 const CLIPBOARD_PUBLISH_DELAY: Duration = Duration::from_millis(8);
 const PASTE_SETTLE_DELAY: Duration = Duration::from_millis(25);
+/// How long a non-edit target may take to read the clipboard before we type.
+const CLIPBOARD_READ_WAIT: Duration = Duration::from_millis(500);
+
+/// Clipboard paste when the target asked for the delayed-render text.
+/// Typing is only for a clipboard that nobody read.
+fn non_edit_insertion(clipboard_read: bool) -> Insertion {
+    if clipboard_read {
+        Insertion {
+            method: InsertMethod::Clipboard,
+            verified: true,
+        }
+    } else {
+        Insertion {
+            method: InsertMethod::Typed,
+            verified: false,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -107,10 +125,6 @@ fn paste_via_clipboard(text: &str) -> anyhow::Result<()> {
     restore_text(&mut clipboard, previous_text);
     Ok(())
 }
-
-/// How long a non-edit target may take to read the clipboard before we type instead.
-#[cfg(windows)]
-const VERIFY_WAIT: Duration = Duration::from_millis(400);
 
 fn restore_text(clipboard: &mut Clipboard, previous: Option<String>) {
     let restored = if let Some(previous) = previous {
@@ -240,10 +254,7 @@ fn insert_text_windows(text: &str) -> anyhow::Result<Insertion> {
         }
     }
     match clipboard_paste_verified(text) {
-        Ok(()) => Ok(Insertion {
-            method: InsertMethod::Clipboard,
-            verified: true,
-        }),
+        Ok(()) => Ok(non_edit_insertion(true)),
         Err(err) => {
             eprintln!("clipboard paste was not confirmed ({err}); typing the transcript");
             type_text(text).context("couldn't type the transcript either")?;
@@ -255,10 +266,7 @@ fn insert_text_windows(text: &str) -> anyhow::Result<Insertion> {
                     });
                 }
             }
-            Ok(Insertion {
-                method: InsertMethod::Typed,
-                verified: false,
-            })
+            Ok(non_edit_insertion(false))
         }
     }
 }
@@ -486,86 +494,160 @@ fn clipboard_paste_verified(text: &str) -> anyhow::Result<()> {
 
 #[cfg(windows)]
 fn render_until_read(text: &str) -> anyhow::Result<bool> {
+    let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let (go_tx, go_rx) = std::sync::mpsc::channel();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    // The clipboard owner has to be inside a message wait when Chrome or Cursor
+    // calls GetClipboardData. Doing that on this thread missed the request,
+    // because focus and Ctrl+V ran before the pump.
+    std::thread::Builder::new()
+        .name("bolo-clip".into())
+        .spawn(move || {
+            let result = own_and_pump(wide, ready_tx, go_rx);
+            let _ = done_tx.send(result);
+        })
+        .map_err(|err| anyhow!("couldn't start the clipboard owner: {err}"))?;
+    match ready_rx.recv_timeout(Duration::from_millis(800)) {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => return Err(err),
+        Err(_) => return Err(anyhow!("clipboard owner didn't start")),
+    }
+    if let Some(target) = last_target() {
+        focus_target(target);
+    }
+    let sent = send_ctrl_v();
+    let _ = go_tx.send(());
+    sent?;
+    match done_rx.recv_timeout(CLIPBOARD_READ_WAIT + Duration::from_millis(800)) {
+        Ok(result) => result,
+        Err(_) => Ok(false),
+    }
+}
+
+#[cfg(windows)]
+fn own_and_pump(
+    wide: Vec<u16>,
+    ready_tx: std::sync::mpsc::Sender<anyhow::Result<()>>,
+    go_rx: std::sync::mpsc::Receiver<()>,
+) -> anyhow::Result<bool> {
+    use std::sync::atomic::{AtomicU64, Ordering};
     use windows::Win32::System::DataExchange::{
         CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        CreateWindowExW, DestroyWindow, DispatchMessageW, PeekMessageW, RegisterClassW, HWND_MESSAGE, MSG,
-        PM_REMOVE, WINDOW_EX_STYLE, WINDOW_STYLE, WNDCLASSW,
+        CreateWindowExW, DestroyWindow, DispatchMessageW, MsgWaitForMultipleObjects, PeekMessageW, RegisterClassW,
+        TranslateMessage, MSG, PM_REMOVE, QS_ALLINPUT, WINDOW_EX_STYLE, WINDOW_STYLE, WNDCLASSW,
     };
     use windows::core::PCWSTR;
 
-    let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+    static CLIP_SEQ: AtomicU64 = AtomicU64::new(1);
     {
         let mut job = RENDER.lock().unwrap_or_else(|err| err.into_inner());
         *job = Some(RenderJob {
             wide,
+            requested: false,
             rendered: false,
         });
     }
     unsafe {
-        let class_name: Vec<u16> = format!("BoloClip{}\0", std::process::id()).encode_utf16().collect();
+        let seq = CLIP_SEQ.fetch_add(1, Ordering::Relaxed);
+        let class_name: Vec<u16> = format!("BoloClip{seq}\0").encode_utf16().collect();
         let class = WNDCLASSW {
             lpfnWndProc: Some(clip_wnd_proc),
             lpszClassName: PCWSTR(class_name.as_ptr()),
             ..Default::default()
         };
         let _ = RegisterClassW(&class);
-        let hwnd = CreateWindowExW(
+        // A real hidden window. Message-only windows do not reliably receive
+        // WM_RENDERFORMAT from Chrome and Cursor.
+        let hwnd = match CreateWindowExW(
             WINDOW_EX_STYLE::default(),
             PCWSTR(class_name.as_ptr()),
             PCWSTR(class_name.as_ptr()),
-            WINDOW_STYLE::default(),
+            WINDOW_STYLE(0x8000_0000),
             0,
             0,
             0,
             0,
-            Some(HWND_MESSAGE),
             None,
             None,
             None,
-        )
-        .map_err(|err| anyhow!("couldn't own the clipboard: {err}"))?;
+            None,
+        ) {
+            Ok(hwnd) => hwnd,
+            Err(err) => {
+                let _ = ready_tx.send(Err(anyhow!("couldn't own the clipboard: {err}")));
+                return Err(anyhow!("couldn't own the clipboard: {err}"));
+            }
+        };
         if OpenClipboard(Some(hwnd)).is_err() {
             let _ = DestroyWindow(hwnd);
+            let _ = ready_tx.send(Err(anyhow!("couldn't open the clipboard")));
             return Err(anyhow!("couldn't open the clipboard"));
         }
         if EmptyClipboard().is_err() {
             let _ = CloseClipboard();
             let _ = DestroyWindow(hwnd);
+            let _ = ready_tx.send(Err(anyhow!("couldn't clear the clipboard")));
             return Err(anyhow!("couldn't clear the clipboard"));
         }
-        // NULL data means delayed rendering. Format 13 is CF_UNICODETEXT.
         if SetClipboardData(13, None).is_err() {
             let _ = CloseClipboard();
             let _ = DestroyWindow(hwnd);
+            let _ = ready_tx.send(Err(anyhow!("couldn't publish the transcript")));
             return Err(anyhow!("couldn't publish the transcript"));
         }
         let _ = CloseClipboard();
-        if let Some(target) = last_target() {
-            focus_target(target);
-        }
-        send_ctrl_v()?;
-        let deadline = std::time::Instant::now() + VERIFY_WAIT;
+        let _ = ready_tx.send(Ok(()));
+        let started = std::time::Instant::now();
+        let mut deadline: Option<std::time::Instant> = None;
         let mut message = MSG::default();
-        while std::time::Instant::now() < deadline {
-            while PeekMessageW(&mut message, Some(hwnd), 0, 0, PM_REMOVE).as_bool() {
-                let _ = DispatchMessageW(&message);
+        loop {
+            while PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).as_bool() {
+                let _ = TranslateMessage(&message);
+                DispatchMessageW(&message);
             }
-            if RENDER.lock().ok().and_then(|job| job.as_ref().map(|job| job.rendered)) == Some(true) {
+            if clip_was_read() {
                 let _ = DestroyWindow(hwnd);
                 return Ok(true);
             }
-            thread::sleep(Duration::from_millis(15));
+            if deadline.is_none() {
+                match go_rx.try_recv() {
+                    Ok(()) | Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        deadline = Some(std::time::Instant::now() + CLIPBOARD_READ_WAIT);
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {
+                        if started.elapsed() > Duration::from_secs(2) {
+                            let _ = DestroyWindow(hwnd);
+                            return Ok(false);
+                        }
+                    }
+                }
+            } else if std::time::Instant::now() >= deadline.expect("deadline") {
+                // Read the flag before the window goes away. Destroying the
+                // owner renders every format, which is not the target reading it.
+                let read = clip_was_read();
+                let _ = DestroyWindow(hwnd);
+                return Ok(read);
+            }
+            let _ = MsgWaitForMultipleObjects(None, false, 20, QS_ALLINPUT);
         }
-        let _ = DestroyWindow(hwnd);
     }
-    Ok(false)
+}
+
+#[cfg(windows)]
+fn clip_was_read() -> bool {
+    RENDER.lock().ok().and_then(|job| {
+        job.as_ref().map(|job| job.rendered || job.requested)
+    }) == Some(true)
 }
 
 #[cfg(windows)]
 struct RenderJob {
     wide: Vec<u16>,
+    /// The target called GetClipboardData and we handed it the text.
+    requested: bool,
     rendered: bool,
 }
 
@@ -584,10 +666,11 @@ unsafe extern "system" fn clip_wnd_proc(
     use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
     use windows::Win32::UI::WindowsAndMessaging::DefWindowProcW;
     const WM_RENDERFORMAT: u32 = 0x0305;
-    const WM_RENDERALLFORMATS: u32 = 0x0306;
-    if msg == WM_RENDERFORMAT || msg == WM_RENDERALLFORMATS {
+    // WM_RENDERALLFORMATS arrives when we destroy the owner. That is not a paste.
+    if msg == WM_RENDERFORMAT {
         if let Ok(mut job) = RENDER.lock() {
             if let Some(job) = job.as_mut() {
+                job.requested = true;
                 let bytes = job.wide.len() * 2;
                 if let Ok(handle) = unsafe { GlobalAlloc(GMEM_MOVEABLE, bytes) } {
                     let pointer = unsafe { GlobalLock(handle) };
@@ -995,6 +1078,13 @@ mod delay_tests {
     fn clipboard_paste_does_not_sleep_through_the_take() {
     assert!(CLIPBOARD_PUBLISH_DELAY <= Duration::from_millis(15));
     assert!(PASTE_SETTLE_DELAY <= Duration::from_millis(40));
+    assert_eq!(CLIPBOARD_READ_WAIT, Duration::from_millis(500));
+    let read = non_edit_insertion(true);
+    assert_eq!(read.method, InsertMethod::Clipboard);
+    assert!(read.verified);
+    let unread = non_edit_insertion(false);
+    assert_eq!(unread.method, InsertMethod::Typed);
+    assert!(!unread.verified);
     assert!(!text_landed("alpha take", "alpha take", "beta take"));
     assert!(text_landed("alpha take", "alpha take beta take", "beta take"));
     assert_eq!(status_word(InsertMethod::Clipboard, true), "Inserted");

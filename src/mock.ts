@@ -26,6 +26,7 @@ const settings: Settings = {
   offlineModel: "base.en",
   output: "english",
   verbatim: false,
+  cleanupModel: "openai/gpt-oss-20b",
 };
 
 let apiKey: string | null = null;
