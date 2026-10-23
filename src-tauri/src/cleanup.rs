@@ -52,7 +52,11 @@ pub async fn clean_transcript(
     transcript: &str,
     enabled: bool,
     tone: Tone,
+    verbatim: bool,
 ) -> CleanOutcome {
+    if verbatim {
+        return skipped(transcript.trim().to_string(), "verbatim");
+    }
     let fallback = polish_locally(transcript);
     if !enabled {
         return skipped(fallback, "off");
@@ -176,8 +180,139 @@ pub fn accept_cleanup(original: &str, candidate: &str) -> bool {
     if candidate.is_empty() {
         return false;
     }
-    let limit = original.chars().count().saturating_mul(2).saturating_add(80);
-    candidate.chars().count() <= limit.max(32)
+    let orig_words = content_tokens(original);
+    let cand_words = content_tokens(candidate);
+    if cand_words.is_empty() {
+        return !orig_words.is_empty() && candidate.chars().count() <= 8;
+    }
+    if !multiset_subset(&cand_words, &orig_words) {
+        return false;
+    }
+    let dropped = orig_words.len().saturating_sub(cand_words.len());
+    let allowance = (orig_words.len() / 3).max(4);
+    dropped <= allowance
+}
+
+fn content_tokens(input: &str) -> Vec<String> {
+    input
+        .split_whitespace()
+        .filter(|token| !is_filler_token(token))
+        .filter_map(|token| {
+            let trimmed = token.trim_matches(|c: char| !c.is_alphanumeric());
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_lowercase())
+            }
+        })
+        .collect()
+}
+
+fn multiset_subset(candidate: &[String], original: &[String]) -> bool {
+    let mut counts = std::collections::HashMap::<&str, usize>::new();
+    for word in original {
+        *counts.entry(word.as_str()).or_insert(0) += 1;
+    }
+    for word in candidate {
+        let Some(left) = counts.get_mut(word.as_str()) else {
+            return false;
+        };
+        if *left == 0 {
+            return false;
+        }
+        *left -= 1;
+    }
+    true
+}
+
+/// English for mixed Urdu / Roman Urdu. Meaning stays; nothing is added.
+pub async fn translate_preserving(
+    client: &reqwest::Client,
+    api_key: &str,
+    transcript: &str,
+) -> CleanOutcome {
+    let original = transcript.trim();
+    if original.is_empty() {
+        return skipped(String::new(), "empty");
+    }
+    let system = "Translate this transcript into English. Preserve the meaning exactly. Do not add, drop, explain, or summarize. Keep names, numbers, and words that are already English unchanged. If the speech mixes Urdu and English, or Roman Urdu, translate only the parts that are not English. Return only the English text, with no preamble and no quotes.";
+    let max_tokens = (original.chars().count() as u32 / 2 + 96).clamp(64, 400);
+    let body = serde_json::json!({
+        "model": CLEANUP_MODEL,
+        "temperature": 0,
+        "max_tokens": max_tokens,
+        "messages": [
+            { "role": "system", "content": system },
+            { "role": "user", "content": original }
+        ]
+    });
+    let result = async {
+        let response = client
+            .post("https://api.groq.com/openai/v1/chat/completions")
+            .timeout(CLEANUP_TIMEOUT)
+            .bearer_auth(api_key)
+            .json(&body)
+            .send()
+            .await
+            .context("couldn't reach Groq")?;
+        let status = response.status();
+        let bytes = response.text().await.context("empty translation response")?;
+        if !status.is_success() {
+            return Err(anyhow!(groq_error_message(status.as_u16(), &bytes)));
+        }
+        let parsed: ChatResponse = serde_json::from_str(&bytes).context("translation response was not JSON")?;
+        let message = parsed
+            .choices
+            .into_iter()
+            .next()
+            .map(|choice| choice.message)
+            .context("translation response had no text")?;
+        message_text(message.content.as_ref()).context("translation response had no text")
+    }
+    .await;
+    match result {
+        Ok(text) => {
+            let text = salvage_model_text(&text);
+            if accept_translation(original, &text) {
+                CleanOutcome {
+                    text,
+                    used_model: true,
+                    note: None,
+                    why: "translated".into(),
+                }
+            } else {
+                CleanOutcome {
+                    text: original.to_string(),
+                    used_model: false,
+                    note: None,
+                    why: "rejected translation".into(),
+                }
+            }
+        }
+        Err(err) => CleanOutcome {
+            text: original.to_string(),
+            used_model: false,
+            note: None,
+            why: compact_why(&format!("{err:#}")),
+        },
+    }
+}
+
+fn accept_translation(original: &str, candidate: &str) -> bool {
+    let candidate = candidate.trim();
+    if candidate.is_empty() {
+        return false;
+    }
+    let lower = candidate.to_ascii_lowercase();
+    if lower.starts_with("here is")
+        || lower.starts_with("here's")
+        || lower.starts_with("sure,")
+        || lower.starts_with("translation")
+    {
+        return false;
+    }
+    let orig = original.chars().count().max(1);
+    candidate.chars().count() <= orig.saturating_mul(4).saturating_add(120)
 }
 
 fn is_filler_token(token: &str) -> bool {
@@ -281,7 +416,7 @@ async fn request_cleanup(
         "Correct this dictation. Return only the corrected words, with no introduction and no quotes.".to_string()
     } else {
         format!(
-            "Edit a dictation transcript. Return only the edited words.\n{}\nRemove um and uh. If the speaker says scratch that, no wait, or I mean, keep the correction and drop the words it replaces. Do not add facts or wrap the result in quotes.",
+            "Punctuate a dictation transcript. Return only those words.\n{}\nDo not add words. Do not drop words, except standalone um or uh, and except the words a spoken correction replaces (scratch that, no wait, I mean). Do not paraphrase, explain, or wrap the result in quotes.",
             style_line(tone)
         )
     };
@@ -587,6 +722,28 @@ mod tests {
         let essay = "word ".repeat(80);
         assert!(!accept_cleanup(original, &essay));
         assert!(!accept_cleanup(original, "   "));
+        assert!(!accept_cleanup(original, "Please ship it tomorrow right away"));
+        assert!(accept_cleanup(
+            "Let's meet Tuesday scratch that Wednesday",
+            "Let's meet Wednesday"
+        ));
+    }
+
+    #[test]
+    fn verbatim_toggle_keeps_every_word() {
+        let outcome = tauri::async_runtime::block_on(clean_transcript(
+            crate::transcribe::http_client(),
+            "unused",
+            "deploy um scratch that ship it period",
+            true,
+            Tone::Plain,
+            true,
+        ));
+        assert!(!outcome.used_model);
+        assert_eq!(outcome.why, "verbatim");
+        assert_eq!(outcome.text, "deploy um scratch that ship it period");
+        assert!(!accept_translation("سلام", "Here is the translation: hello"));
+        assert!(accept_translation("یہ English ہے", "This is English"));
     }
 
     #[test]
@@ -623,6 +780,7 @@ mod tests {
             "deploy um scratch that ship it period",
             true,
             Tone::Verbatim,
+            false,
         ));
         assert!(!outcome.used_model);
         assert_eq!(outcome.why, "verbatim");
@@ -637,6 +795,7 @@ mod tests {
             "hello um there",
             false,
             Tone::Plain,
+            false,
         ));
         assert!(!outcome.used_model);
         assert_eq!(outcome.why, "off");

@@ -13,7 +13,7 @@ export function mountOverlay(root: HTMLElement): void {
   copy.append(label, detail);
   const bars = el("div", "bars");
   bars.setAttribute("aria-hidden", "true");
-  const barEls = Array.from({ length: 5 }, () => el("span"));
+  const barEls = Array.from({ length: 7 }, () => el("span"));
   bars.append(...barEls);
   const timer = el("span", "timer", "0:00");
   const engine = el("span", "engine");
@@ -26,19 +26,22 @@ export function mountOverlay(root: HTMLElement): void {
   const apply = (event: DictationEvent) => {
     const phase = event.phase;
     pill.dataset.phase = phase;
-    label.textContent = phaseTitle(phase);
-    detail.textContent = event.message ?? "";
-    detail.hidden = !event.message;
+    const title = phaseTitle(phase);
+    label.textContent = title;
+    const message = event.message?.trim() ?? "";
+    detail.textContent = message;
+    detail.hidden = message.length === 0 || message === title;
     timer.textContent = phase === "recording" ? formatElapsed(event.elapsedMs) : "";
     timer.hidden = phase !== "recording";
-    bars.hidden = phase !== "recording" && phase !== "arming";
+    bars.hidden = phase !== "recording";
     const engineName = event.engine?.trim() ?? "";
     engine.hidden = engineName.length === 0;
     engine.textContent = engineName;
     const level = Math.max(0, Math.min(1, event.level));
+    const shape = [0.4, 0.62, 0.85, 1, 0.78, 0.55, 0.36];
     barEls.forEach((bar, index) => {
-      const shape = [0.45, 0.75, 1, 0.7, 0.4][index] ?? 0.5;
-      const height = 4 + Math.round(level * shape * 16);
+      const gain = shape[index] ?? 0.5;
+      const height = 3 + Math.round(level * gain * 18);
       bar.style.height = `${height}px`;
     });
     root.hidden = phase === "idle";
@@ -59,7 +62,6 @@ export function mountOverlay(root: HTMLElement): void {
 function phaseTitle(phase: DictationPhase): string {
   switch (phase) {
     case "arming":
-      return "Starting";
     case "recording":
       return "Listening";
     case "transcribing":
@@ -93,7 +95,7 @@ function demoEvent(demo: string | null): DictationEvent {
     return { phase: "done", message: "Inserted", elapsedMs: 1800, level: 0, engine: "Groq" };
   }
   if (demo === "arming") {
-    return { phase: "arming", message: "Opening the microphone", elapsedMs: 0, level: 0 };
+    return { phase: "recording", message: null, elapsedMs: 0, level: 0.4 };
   }
   if (demo === "typed") {
     return { phase: "typed", message: "Typed", elapsedMs: 1800, level: 0, engine: "On this PC" };
@@ -108,7 +110,7 @@ function demoEvent(demo: string | null): DictationEvent {
 
 function demoSwitcher(apply: (event: DictationEvent) => void): HTMLElement {
   const row = el("div", "demo-row");
-  const phases: DictationPhase[] = ["arming", "recording", "transcribing", "inserting", "done", "typed", "error"];
+  const phases: DictationPhase[] = ["recording", "transcribing", "done", "typed", "error"];
   for (const phase of phases) {
     const button = document.createElement("button");
     button.type = "button";

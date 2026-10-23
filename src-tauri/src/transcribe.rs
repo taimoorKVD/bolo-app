@@ -173,6 +173,8 @@ fn snippet(text: &str, max_chars: usize) -> String {
 pub struct Transcript {
     pub text: String,
     pub tries: u8,
+    /// ISO-ish code from verbose_json (`en`, `ur`), or empty when the body omitted it.
+    pub language: String,
 }
 
 /// A second Whisper call is worth it when the first result is empty or the
@@ -199,67 +201,113 @@ pub async fn transcribe(
     prompt: Option<String>,
 ) -> anyhow::Result<Transcript> {
     let model = normalize_model(model).context("unknown Whisper model")?;
-    let first = request_transcript(client, api_key, audio.clone(), model, language, prompt.as_deref()).await?;
+    let first = request_audio(client, api_key, audio.clone(), TRANSCRIPTIONS, model, language, prompt.as_deref()).await?;
     if !should_retry(&first.text, first.avg_logprob, first.no_speech_prob) {
         return Ok(Transcript {
             text: first.text,
             tries: 1,
+            language: first.language,
         });
     }
-    match request_transcript(client, api_key, audio, model, language, None).await {
-        Ok(second) => Ok(Transcript {
-            text: prefer_attempt(first, second),
-            tries: 2,
-        }),
+    match request_audio(client, api_key, audio, TRANSCRIPTIONS, model, language, None).await {
+        Ok(second) => {
+            let chosen = prefer_attempt(first, second);
+            Ok(Transcript {
+                text: chosen.text,
+                tries: 2,
+                language: chosen.language,
+            })
+        }
         Err(_) if !first.text.trim().is_empty() => Ok(Transcript {
             text: first.text,
             tries: 2,
+            language: first.language,
         }),
         Err(err) => Err(err),
     }
 }
 
-fn prefer_attempt(first: Attempt, second: Attempt) -> String {
+/// Groq translates with `whisper-large-v3` only. Turbo does not translate.
+pub async fn translate_audio(
+    client: &reqwest::Client,
+    api_key: &str,
+    audio: Vec<u8>,
+    prompt: Option<&str>,
+) -> anyhow::Result<Transcript> {
+    let first = request_audio(client, api_key, audio.clone(), TRANSLATIONS, WHISPER_LARGE, "", prompt).await?;
+    if !first.text.trim().is_empty() {
+        return Ok(Transcript {
+            text: first.text,
+            tries: 1,
+            language: first.language,
+        });
+    }
+    let second = request_audio(client, api_key, audio, TRANSLATIONS, WHISPER_LARGE, "", None).await?;
+    let language = if second.language.is_empty() {
+        first.language
+    } else {
+        second.language
+    };
+    Ok(Transcript {
+        text: second.text,
+        tries: 2,
+        language,
+    })
+}
+
+const TRANSCRIPTIONS: &str = "https://api.groq.com/openai/v1/audio/transcriptions";
+const TRANSLATIONS: &str = "https://api.groq.com/openai/v1/audio/translations";
+
+fn prefer_attempt(first: Attempt, second: Attempt) -> Attempt {
     let primary = first.text.trim();
     let retry = second.text.trim();
-    if primary.is_empty() {
-        return retry.to_string();
-    }
-    if retry.is_empty() {
-        return primary.to_string();
-    }
-    let first_bad = should_retry(primary, first.avg_logprob, first.no_speech_prob);
-    let second_bad = should_retry(retry, second.avg_logprob, second.no_speech_prob);
-    if first_bad && !second_bad {
-        return retry.to_string();
-    }
-    if !first_bad && second_bad {
-        return primary.to_string();
-    }
-    if retry.chars().count() >= primary.chars().count() {
-        retry.to_string()
+    let pick_second = if primary.is_empty() {
+        true
+    } else if retry.is_empty() {
+        false
     } else {
-        primary.to_string()
+        let first_bad = should_retry(primary, first.avg_logprob, first.no_speech_prob);
+        let second_bad = should_retry(retry, second.avg_logprob, second.no_speech_prob);
+        if first_bad && !second_bad {
+            true
+        } else if !first_bad && second_bad {
+            false
+        } else {
+            retry.chars().count() >= primary.chars().count()
+        }
+    };
+    let fallback_language = if first.language.is_empty() {
+        second.language.clone()
+    } else {
+        first.language.clone()
+    };
+    let mut chosen = if pick_second { second } else { first };
+    if chosen.language.is_empty() {
+        chosen.language = fallback_language;
     }
+    chosen.text = chosen.text.trim().to_string();
+    chosen
 }
 
 struct Attempt {
     text: String,
     avg_logprob: Option<f32>,
     no_speech_prob: Option<f32>,
+    language: String,
 }
 
-async fn request_transcript(
+async fn request_audio(
     client: &reqwest::Client,
     api_key: &str,
     audio: Vec<u8>,
+    endpoint: &str,
     model: &str,
     language: &str,
     prompt: Option<&str>,
 ) -> anyhow::Result<Attempt> {
     let mut attempt = 0u32;
     loop {
-        match request_transcript_once(client, api_key, audio.clone(), model, language, prompt).await {
+        match request_audio_once(client, api_key, audio.clone(), endpoint, model, language, prompt).await {
             Ok(parsed) => return Ok(parsed),
             Err(failure) => match retry_plan(failure.kind, attempt) {
                 RetryPlan::Backoff { ms } => {
@@ -272,14 +320,17 @@ async fn request_transcript(
     }
 }
 
-async fn request_transcript_once(
+async fn request_audio_once(
     client: &reqwest::Client,
     api_key: &str,
     audio: Vec<u8>,
+    endpoint: &str,
     model: &str,
     language: &str,
     prompt: Option<&str>,
 ) -> Result<Attempt, GroqFailure> {
+    let translating = endpoint.ends_with("/translations");
+    let model = if translating { WHISPER_LARGE } else { model };
     let part = match audio_part(audio) {
         Ok(part) => part,
         Err(err) => {
@@ -294,14 +345,16 @@ async fn request_transcript_once(
         .text("model", model.to_string())
         .text("response_format", "verbose_json")
         .text("temperature", "0");
-    if let Some(code) = normalize_language(language) {
-        form = form.text("language", code);
+    if !translating {
+        if let Some(code) = normalize_language(language) {
+            form = form.text("language", code);
+        }
     }
     if let Some(prompt) = prompt {
         form = form.text("prompt", prompt.to_string());
     }
     let response = match client
-        .post("https://api.groq.com/openai/v1/audio/transcriptions")
+        .post(endpoint)
         .bearer_auth(api_key)
         .multipart(form)
         .send()
@@ -373,6 +426,7 @@ fn parse_attempt(body: &str) -> anyhow::Result<Attempt> {
                 text: text.trim().to_string(),
                 avg_logprob,
                 no_speech_prob,
+                language: verbose.language.map(|value| language_code(&value)).unwrap_or_default(),
             });
         }
     }
@@ -382,6 +436,7 @@ fn parse_attempt(body: &str) -> anyhow::Result<Attempt> {
         text: parsed.text.trim().to_string(),
         avg_logprob: None,
         no_speech_prob: None,
+        language: String::new(),
     })
 }
 
@@ -417,7 +472,117 @@ struct SimpleTranscript {
 #[derive(Debug, Deserialize)]
 struct VerboseBody {
     text: Option<String>,
+    language: Option<String>,
     segments: Option<Vec<VerboseSegment>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpeechRoute {
+    /// Keep the transcript in the language that was spoken.
+    Transcribe,
+    /// `/audio/translations` with whisper-large-v3.
+    Translate,
+    /// Transcribe, then Llama into English without adding or dropping meaning.
+    Mixed,
+}
+
+pub fn normalize_output(value: &str) -> &'static str {
+    if value.trim().eq_ignore_ascii_case("same") {
+        "same"
+    } else {
+        "english"
+    }
+}
+
+/// A fixed non-English language other than Urdu can go straight to translation.
+pub fn direct_translate(output: &str, setting: &str) -> bool {
+    if normalize_output(output) != "english" {
+        return false;
+    }
+    match normalize_language(setting).as_deref() {
+        Some(code) if code != "en" && code != "ur" => true,
+        _ => false,
+    }
+}
+
+pub fn speech_route(output: &str, setting: &str, detected: &str, text: &str) -> SpeechRoute {
+    if normalize_output(output) != "english" {
+        return SpeechRoute::Transcribe;
+    }
+    let setting_code = normalize_language(setting).unwrap_or_default();
+    if setting_code == "en" {
+        return SpeechRoute::Transcribe;
+    }
+    let detected = language_code(detected);
+    let urdu = setting_code == "ur" || detected == "ur" || mixed_urdu(text);
+    if !urdu {
+        if detected.is_empty() || detected == "en" {
+            return SpeechRoute::Transcribe;
+        }
+        return SpeechRoute::Translate;
+    }
+    if mixed_urdu(text) || (has_latin(text) && (setting_code == "ur" || detected == "ur")) {
+        return SpeechRoute::Mixed;
+    }
+    if setting_code == "ur" || detected == "ur" {
+        return SpeechRoute::Translate;
+    }
+    SpeechRoute::Transcribe
+}
+
+pub fn language_code(raw: &str) -> String {
+    let name = raw.trim().to_ascii_lowercase();
+    match name.as_str() {
+        "" => String::new(),
+        "english" | "en" => "en".into(),
+        "urdu" | "ur" => "ur".into(),
+        "hindi" | "hi" => "hi".into(),
+        "spanish" | "es" => "es".into(),
+        "french" | "fr" => "fr".into(),
+        "german" | "de" => "de".into(),
+        "portuguese" | "pt" => "pt".into(),
+        "italian" | "it" => "it".into(),
+        "dutch" | "nl" => "nl".into(),
+        "polish" | "pl" => "pl".into(),
+        "russian" | "ru" => "ru".into(),
+        "ukrainian" | "uk" => "uk".into(),
+        "arabic" | "ar" => "ar".into(),
+        "hebrew" | "he" => "he".into(),
+        "japanese" | "ja" => "ja".into(),
+        "korean" | "ko" => "ko".into(),
+        "chinese" | "zh" => "zh".into(),
+        "turkish" | "tr" => "tr".into(),
+        "persian" | "farsi" | "fa" => "fa".into(),
+        "punjabi" | "pa" => "pa".into(),
+        other => {
+            if (2..=3).contains(&other.len()) && other.chars().all(|c| c.is_ascii_lowercase()) {
+                other.to_string()
+            } else {
+                other.to_string()
+            }
+        }
+    }
+}
+
+fn mixed_urdu(text: &str) -> bool {
+    has_arabic(text) && has_latin(text)
+}
+
+fn has_latin(text: &str) -> bool {
+    text.chars().any(|c| c.is_ascii_alphabetic())
+}
+
+fn has_arabic(text: &str) -> bool {
+    text.chars().any(|c| {
+        matches!(
+            c,
+            '\u{0600}'..='\u{06FF}'
+                | '\u{0750}'..='\u{077F}'
+                | '\u{08A0}'..='\u{08FF}'
+                | '\u{FB50}'..='\u{FDFF}'
+                | '\u{FE70}'..='\u{FEFF}'
+        )
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -462,9 +627,10 @@ mod tests {
         assert!(should_retry("hi", Some(-0.2), Some(0.9)));
         assert!(!should_retry("ship it tomorrow", Some(-0.3), Some(0.05)));
         assert!(!should_retry("a longer confident sentence here", None, Some(0.8)));
-        let body = r#"{"text":" Ship it. ","segments":[{"avg_logprob":-0.2,"no_speech_prob":0.01},{"avg_logprob":-0.4,"no_speech_prob":0.2}]}"#;
+        let body = r#"{"text":" Ship it. ","language":"english","segments":[{"avg_logprob":-0.2,"no_speech_prob":0.01},{"avg_logprob":-0.4,"no_speech_prob":0.2}]}"#;
         let attempt = parse_attempt(body).unwrap();
         assert_eq!(attempt.text, "Ship it.");
+        assert_eq!(attempt.language, "en");
         assert!(attempt.avg_logprob.unwrap() < -0.2);
         assert!((attempt.no_speech_prob.unwrap() - 0.2).abs() < 0.001);
         let plain = parse_attempt(r#"{"text":"hello"}"#).unwrap();
@@ -491,5 +657,30 @@ mod tests {
         assert_eq!(normalize_language("english"), None);
         assert_eq!(normalize_model("whisper-large-v3"), Some(WHISPER_LARGE));
         assert_eq!(normalize_model("gpt-4o"), None);
+    }
+
+    #[test]
+    fn english_output_routes_urdu_and_other_languages() {
+        assert_eq!(normalize_output("same"), "same");
+        assert_eq!(normalize_output("English"), "english");
+        assert!(!direct_translate("same", "es"));
+        assert!(direct_translate("english", "es"));
+        assert!(!direct_translate("english", "ur"));
+        assert!(!direct_translate("english", "auto"));
+        assert_eq!(speech_route("same", "ur", "ur", "سلام"), SpeechRoute::Transcribe);
+        assert_eq!(speech_route("english", "en", "en", "hello"), SpeechRoute::Transcribe);
+        assert_eq!(speech_route("english", "auto", "english", "hello"), SpeechRoute::Transcribe);
+        assert_eq!(speech_route("english", "auto", "french", "bonjour"), SpeechRoute::Translate);
+        assert_eq!(speech_route("english", "auto", "urdu", "یہ اردو ہے"), SpeechRoute::Translate);
+        assert_eq!(
+            speech_route("english", "auto", "urdu", "meeting کل ہے"),
+            SpeechRoute::Mixed
+        );
+        assert_eq!(
+            speech_route("english", "ur", "", "kal meeting hai at 5"),
+            SpeechRoute::Mixed
+        );
+        assert_eq!(language_code("Urdu"), "ur");
+        assert_eq!(language_code("english"), "en");
     }
 }

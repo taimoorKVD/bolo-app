@@ -19,6 +19,10 @@ export type Settings = {
   historyEnabled: boolean;
   pasteHotkey: Hotkey;
   offlineModel: "base.en" | "small.en" | "off" | string;
+  /** `english` translates into English. `same` keeps the spoken language. */
+  output: "english" | "same";
+  /** Paste exactly what was said. Cleanup does not rewrite. */
+  verbatim: boolean;
 };
 
 export type ApiKeyStatus = {

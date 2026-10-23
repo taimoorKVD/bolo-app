@@ -4,7 +4,7 @@
 
 use crate::hotkey::{validate_hotkey, Hotkey};
 use crate::offline;
-use crate::transcribe::{normalize_language, normalize_model, WHISPER_TURBO};
+use crate::transcribe::{normalize_language, normalize_model, normalize_output, WHISPER_TURBO};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::Write;
@@ -34,6 +34,17 @@ pub struct Settings {
     /// `base.en`, `small.en`, or `off`. Missing files download base.en on demand.
     #[serde(default = "default_offline_model")]
     pub offline_model: String,
+    /// `english` translates into English. `same` keeps the spoken language.
+    /// Missing files translate.
+    #[serde(default = "output_english")]
+    pub output: String,
+    /// Paste the transcript with no cleanup and no filler removal.
+    #[serde(default)]
+    pub verbatim: bool,
+}
+
+fn output_english() -> String {
+    "english".into()
 }
 
 fn paste_again_hotkey() -> Hotkey {
@@ -61,6 +72,8 @@ impl Default for Settings {
             history_enabled: true,
             paste_hotkey: Hotkey::paste_again(),
             offline_model: "base.en".into(),
+            output: "english".into(),
+            verbatim: false,
         }
     }
 }
@@ -95,6 +108,7 @@ pub fn prepare_settings(mut settings: Settings) -> Settings {
         settings.paste_hotkey.key = if key.is_empty() { None } else { Some(key) };
     }
     settings.offline_model = offline::normalize_model(&settings.offline_model).to_string();
+    settings.output = normalize_output(&settings.output).to_string();
     settings.dictionary = settings
         .dictionary
         .into_iter()
@@ -130,6 +144,10 @@ pub fn validate_settings(settings: &Settings) -> Result<(), String> {
         "off" | "base.en" | "small.en" => {}
         _ => return Err("Choose base.en, small.en, or off for the on-device model.".into()),
     }
+    match settings.output.as_str() {
+        "english" | "same" => {}
+        _ => return Err("Output should be English (translate) or Same as spoken.".into()),
+    }
     Ok(())
 }
 
@@ -160,6 +178,7 @@ pub fn normalize_settings(mut settings: Settings) -> Settings {
         settings.paste_hotkey = Hotkey::paste_again();
     }
     settings.offline_model = offline::normalize_model(&settings.offline_model).to_string();
+    settings.output = normalize_output(&settings.output).to_string();
     settings
 }
 
@@ -457,6 +476,8 @@ mod carryover {
         let parsed: Settings = serde_json::from_str(raw).unwrap();
         assert!(parsed.history_enabled);
         assert!(parsed.cleanup_enabled);
+        assert_eq!(parsed.output, "english");
+        assert!(!parsed.verbatim);
     }
 
     #[test]

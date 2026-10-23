@@ -108,6 +108,7 @@ fn live_llama_cleanup_applies_a_spoken_correction() {
         "Let's meet Tuesday um scratch that Wednesday",
         true,
         Tone::Plain,
+        false,
     ));
     assert!(
         outcome.used_model,
@@ -207,6 +208,7 @@ fn live_latency_stages_stay_under_the_budget() {
         "Let's meet Tuesday scratch that Wednesday period",
         true,
         Tone::Plain,
+        false,
     ));
     let cleanup_ms = cleanup_started.elapsed().as_millis();
     eprintln!(

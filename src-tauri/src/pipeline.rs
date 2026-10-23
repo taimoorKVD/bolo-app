@@ -9,7 +9,9 @@ use crate::credentials::SecretKey;
 use crate::offline;
 use crate::spool;
 use crate::store::Settings;
-use crate::transcribe::{self, FailKind};
+use crate::cleanup;
+use crate::logbuf::log_line;
+use crate::transcribe::{self, FailKind, SpeechRoute};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -25,6 +27,8 @@ pub struct Product {
     pub error: Option<String>,
     /// Empty because the chunk was silence, not because transcription failed.
     pub silence: bool,
+    pub language: String,
+    pub speech_path: String,
 }
 
 pub struct Flight {
@@ -125,6 +129,8 @@ pub fn collect(mut flights: Vec<Flight>) -> Vec<Product> {
                 format: String::new(),
                 error: Some("A piece of this take didn't finish transcribing.".into()),
                 silence: false,
+                language: String::new(),
+                speech_path: String::new(),
             },
         })
         .collect()
@@ -185,6 +191,8 @@ fn transcribe_one(index: usize, audio: FinishedAudio, env: &JobEnv) -> Product {
         format: String::new(),
         error: None,
         silence: false,
+        language: String::new(),
+        speech_path: String::new(),
     };
     let encode_started = Instant::now();
     let encoded = match audio::prepare_speech(&audio) {
@@ -206,10 +214,12 @@ fn transcribe_one(index: usize, audio: FinishedAudio, env: &JobEnv) -> Product {
     spool::write_audio(&env.config_dir, &env.spool_id, index, &encoded.bytes);
     let remote_started = Instant::now();
     match tauri::async_runtime::block_on(recognize(encoded.bytes, env)) {
-        Ok((text, tries, engine)) => {
-            product.text = text;
-            product.tries = tries;
-            product.engine = engine;
+        Ok(recognized) => {
+            product.text = recognized.text;
+            product.tries = recognized.tries;
+            product.engine = recognized.engine;
+            product.language = recognized.language;
+            product.speech_path = recognized.path;
         }
         Err(err) => product.error = Some(err),
     }
@@ -217,28 +227,50 @@ fn transcribe_one(index: usize, audio: FinishedAudio, env: &JobEnv) -> Product {
     product
 }
 
-async fn recognize(bytes: Vec<u8>, env: &JobEnv) -> Result<(String, u8, String), String> {
+struct Recognized {
+    text: String,
+    tries: u8,
+    engine: String,
+    language: String,
+    path: String,
+}
+
+async fn recognize(bytes: Vec<u8>, env: &JobEnv) -> Result<Recognized, String> {
     let offline_model = env.settings.offline_model.clone();
     let prompt = transcribe::whisper_prompt_with(&env.settings.dictionary, &env.recent);
     let model = env.settings.model.clone();
     let language = env.settings.language.clone();
+    let output = env.settings.output.clone();
     match SecretKey::load() {
         Ok(key) => {
-            let groq = transcribe::transcribe(
+            let groq = speech_with_groq(
                 transcribe::http_client(),
                 key.expose(),
                 bytes.clone(),
                 &model,
                 &language,
-                prompt,
+                &output,
+                prompt.as_deref(),
             )
             .await;
             drop(key);
             match groq {
-                Ok(transcript) => Ok((transcript.text, transcript.tries, "Groq".into())),
+                Ok(recognized) => {
+                    log_speech(env, &recognized.language, &recognized.path);
+                    Ok(recognized)
+                }
                 Err(err) if should_fallback(&err) && offline::normalize_model(&offline_model) != "off" => {
                     match offline::transcribe_encoded(&env.config_dir, &offline_model, &bytes).await {
-                        Ok(text) => Ok((text, 1, "On this PC".into())),
+                        Ok(text) => {
+                            log_speech(env, "offline", "transcribe");
+                            Ok(Recognized {
+                                text,
+                                tries: 1,
+                                engine: "On this PC".into(),
+                                language: "offline".into(),
+                                path: "transcribe".into(),
+                            })
+                        }
                         Err(local) => Err(format!("{err} {local}")),
                     }
                 }
@@ -250,11 +282,110 @@ async fn recognize(bytes: Vec<u8>, env: &JobEnv) -> Result<(String, u8, String),
                 return Err(err.to_string());
             }
             match offline::transcribe_encoded(&env.config_dir, &offline_model, &bytes).await {
-                Ok(text) => Ok((text, 1, "On this PC".into())),
+                Ok(text) => {
+                    log_speech(env, "offline", "transcribe");
+                    Ok(Recognized {
+                        text,
+                        tries: 1,
+                        engine: "On this PC".into(),
+                        language: "offline".into(),
+                        path: "transcribe".into(),
+                    })
+                }
                 Err(local) => Err(format!("{err} {local}")),
             }
         }
     }
+}
+
+async fn speech_with_groq(
+    client: &reqwest::Client,
+    api_key: &str,
+    audio: Vec<u8>,
+    model: &str,
+    language: &str,
+    output: &str,
+    prompt: Option<&str>,
+) -> anyhow::Result<Recognized> {
+    if transcribe::direct_translate(output, language) {
+        let translated = transcribe::translate_audio(client, api_key, audio, prompt).await?;
+        let code = transcribe::normalize_language(language).unwrap_or_else(|| "unknown".into());
+        return Ok(Recognized {
+            text: translated.text,
+            tries: translated.tries,
+            engine: "Groq".into(),
+            language: code,
+            path: "translate".into(),
+        });
+    }
+    let spoken = transcribe::transcribe(client, api_key, audio.clone(), model, language, prompt.map(str::to_string)).await?;
+    let detected = spoken.language.clone();
+    let route = transcribe::speech_route(output, language, &detected, &spoken.text);
+    match route {
+        SpeechRoute::Transcribe => Ok(Recognized {
+            text: spoken.text,
+            tries: spoken.tries,
+            engine: "Groq".into(),
+            language: source_language(language, &detected),
+            path: "transcribe".into(),
+        }),
+        SpeechRoute::Translate => {
+            let translated = transcribe::translate_audio(client, api_key, audio, prompt).await?;
+            Ok(Recognized {
+                text: translated.text,
+                tries: spoken.tries.saturating_add(translated.tries),
+                engine: "Groq".into(),
+                language: source_language(language, &detected),
+                path: "translate".into(),
+            })
+        }
+        SpeechRoute::Mixed => {
+            let outcome = cleanup::translate_preserving(client, api_key, &spoken.text).await;
+            if outcome.used_model {
+                return Ok(Recognized {
+                    text: outcome.text,
+                    tries: spoken.tries,
+                    engine: "Groq".into(),
+                    language: source_language(language, &detected),
+                    path: "mixed-llama".into(),
+                });
+            }
+            match transcribe::translate_audio(client, api_key, audio, prompt).await {
+                Ok(translated) => Ok(Recognized {
+                    text: translated.text,
+                    tries: spoken.tries.saturating_add(translated.tries),
+                    engine: "Groq".into(),
+                    language: source_language(language, &detected),
+                    path: "translate".into(),
+                }),
+                Err(_) if !spoken.text.trim().is_empty() => Ok(Recognized {
+                    text: spoken.text,
+                    tries: spoken.tries,
+                    engine: "Groq".into(),
+                    language: source_language(language, &detected),
+                    path: "transcribe".into(),
+                }),
+                Err(err) => Err(err),
+            }
+        }
+    }
+}
+
+fn source_language(setting: &str, detected: &str) -> String {
+    let detected = transcribe::language_code(detected);
+    if !detected.is_empty() {
+        return detected;
+    }
+    transcribe::normalize_language(setting).unwrap_or_else(|| "unknown".into())
+}
+
+fn log_speech(env: &JobEnv, language: &str, path: &str) {
+    let language = if language.is_empty() { "unknown" } else { language };
+    log_line(
+        &env.config_dir,
+        "info",
+        &format!("speech language={language} path={path}"),
+    );
 }
 
 fn should_fallback(err: &anyhow::Error) -> bool {
@@ -279,6 +410,8 @@ mod tests {
             format: "flac".into(),
             error: error.map(str::to_string),
             silence: text.is_empty() && error.is_none(),
+            language: String::new(),
+            speech_path: String::new(),
         }
     }
 

@@ -24,6 +24,8 @@ const settings: Settings = {
   historyEnabled: true,
   pasteHotkey: { ctrl: true, alt: false, shift: false, win: true, key: "v" },
   offlineModel: "base.en",
+  output: "english",
+  verbatim: false,
 };
 
 let apiKey: string | null = null;
@@ -169,16 +171,8 @@ async function runDemoTake(): Promise<void> {
     return;
   }
   recording = true;
-  emitLocalDictation({
-    phase: "arming",
-    message: "Opening the microphone",
-    elapsedMs: 0,
-    level: 0,
-  });
-  await delay(160);
-  if (!recording) return;
   const started = Date.now();
-  emitLocalDictation({ phase: "recording", message: null, elapsedMs: 0, level: 0.2 });
+  emitLocalDictation({ phase: "recording", message: null, elapsedMs: 0, level: 0.35 });
   const timer = window.setInterval(() => {
     if (!recording) {
       window.clearInterval(timer);

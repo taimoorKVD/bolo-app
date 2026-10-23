@@ -1355,6 +1355,61 @@ mod tests {
         assert!(report.sample_count > 0);
     }
 
+    #[test]
+    fn listening_overlay_is_under_100ms_and_keeps_the_first_200ms() {
+        if hosted_ci() {
+            eprintln!("SKIP listening_overlay_is_under_100ms_and_keeps_the_first_200ms: CI=true");
+            return;
+        }
+        let warm = crate::warm::WarmMic::spawn(None);
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !warm.is_live() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        if !warm.is_live() {
+            eprintln!("SKIP listening_overlay_is_under_100ms_and_keeps_the_first_200ms: no usable capture device");
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(80));
+        let keydown = Instant::now();
+        let take = match warm.begin(None) {
+            Ok(take) => take,
+            Err(err) => {
+                eprintln!("SKIP listening_overlay_is_under_100ms_and_keeps_the_first_200ms: {err}");
+                return;
+            }
+        };
+        // Listening is published before this reply. The reply is the hotkey's
+        // only wait, and it must not include a device open.
+        let overlay_ms = keydown.elapsed().as_millis() as u64;
+        eprintln!("MEASURE keydown_overlay_ms={overlay_ms}");
+        assert!(
+            overlay_ms < 100,
+            "Listening took {overlay_ms} ms; key-down must only mark the warm buffer"
+        );
+        std::thread::sleep(Duration::from_millis(280));
+        let first_sample_ms = take.first_sample_ms_since(keydown);
+        let pre_roll = take.pre_roll_samples;
+        eprintln!(
+            "MEASURE keydown_first_sample_ms={}",
+            first_sample_ms.map(|ms| ms.to_string()).unwrap_or_else(|| "na".into())
+        );
+        let finished = take.finish().expect("the warm take should stop");
+        let channels = usize::from(finished.channels.max(1));
+        let new_samples = finished.interleaved.len().saturating_sub(pre_roll);
+        let new_frames = new_samples / channels;
+        let new_ms = new_frames as u64 * 1000 / u64::from(finished.sample_rate.max(1));
+        if let Some(ms) = first_sample_ms {
+            assert!(ms < 200, "first sample arrived {ms} ms after key-down");
+        } else {
+            panic!("no sample arrived after key-down");
+        }
+        assert!(
+            new_ms >= 200,
+            "only {new_ms} ms of audio was captured after key-down (pre-roll {pre_roll} samples)"
+        );
+    }
+
     fn hosted_ci() -> bool {
         matches!(
             std::env::var("CI").ok().as_deref().map(|value| value.eq_ignore_ascii_case("true") || value == "1"),

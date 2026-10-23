@@ -71,6 +71,8 @@ struct Engine {
     /// Key-up that ends the take. Set before the double-tap wait so release
     /// time includes that wait.
     release_mark: Option<Instant>,
+    /// Milliseconds from key-down until the Listening overlay was shown.
+    overlay_visible_ms: u64,
 }
 
 pub struct AppState {
@@ -110,6 +112,7 @@ impl AppState {
                 press_at: None,
                 released_during_arm: false,
                 spool_id: None,
+                overlay_visible_ms: 0,
             }),
             listener,
             config_dir,
@@ -130,6 +133,8 @@ struct Clock {
     stop_ms: u64,
     short_press: bool,
     hint_held_ms: u64,
+    overlay_ms: u64,
+    first_sample_ms: Option<u64>,
 }
 
 struct Staged {
@@ -148,6 +153,10 @@ struct Staged {
     tone: String,
     release_started: Instant,
     engine: String,
+    overlay_ms: u64,
+    first_sample_ms: Option<u64>,
+    speech_language: String,
+    speech_path: String,
 }
 
 struct Outcome {
@@ -252,14 +261,22 @@ pub fn silence_hint(held_ms: u64, short_press: bool) -> &'static str {
     }
 }
 
-fn recording_caption(hands_free: bool, note: &Option<String>) -> Option<String> {
-    if !hands_free {
-        return note.clone();
+fn recording_caption(hands_free: bool, _note: &Option<String>) -> Option<String> {
+    if hands_free {
+        Some("Hands-free — tap the hotkey to stop".into())
+    } else {
+        None
     }
-    Some(match note {
-        Some(note) if !note.is_empty() => format!("Hands-free — tap the hotkey to stop · {note}"),
-        _ => "Hands-free — tap the hotkey to stop".into(),
-    })
+}
+
+fn instant_listen_event(level: f32) -> DictationEvent {
+    DictationEvent {
+        phase: "recording".into(),
+        message: None,
+        elapsed_ms: 0,
+        level,
+        engine: None,
+    }
 }
 
 pub fn hotkey(app: &AppHandle, edge: HotkeyEdge) {
@@ -394,7 +411,7 @@ fn arm_double_tap(app: AppHandle, generation: u64) {
 
 pub fn begin(app: &AppHandle) {
     let state = app.state::<AppState>();
-    let generation = {
+    let (generation, keydown) = {
         let mut engine = lock(&state.engine);
         if !matches!(engine.phase, Phase::Idle) {
             return;
@@ -410,26 +427,31 @@ pub fn begin(app: &AppHandle) {
         engine.short_release = false;
         engine.release_held_ms = 0;
         engine.release_mark = None;
-        if engine.press_at.is_none() {
-            engine.press_at = Some(Instant::now());
-        }
+        let keydown = Instant::now();
+        engine.press_at = Some(keydown);
         engine.spool_id = Some(store::new_history_id());
-        engine.generation
+        engine.overlay_visible_ms = 0;
+        (engine.generation, keydown)
     };
     *lock(&state.last_error) = None;
     let settings = lock(&state.settings).clone();
     if let Some(tray) = app.tray_by_id("bolo") {
         let _ = tray.set_tooltip(Some(format!("Bolo.com — hold {}", display(&settings.hotkey))));
     }
-    publish(
-        app,
-        &DictationEvent {
-            phase: "arming".into(),
-            message: Some("Opening the microphone".into()),
-            elapsed_ms: 0,
-            level: 0.0,
-            engine: None,
-        },
+    // Listening is on screen before the warm thread is asked to do anything.
+    // That thread only copies the pre-roll; it does not open the microphone.
+    publish(app, &instant_listen_event(state.warm.level()));
+    let overlay_ms = keydown.elapsed().as_millis() as u64;
+    {
+        let mut engine = lock(&state.engine);
+        if engine.generation == generation {
+            engine.overlay_visible_ms = overlay_ms;
+        }
+    }
+    log_line(
+        &state.config_dir,
+        "info",
+        &format!("listen keydown_overlay_ms={overlay_ms}"),
     );
     let app = app.clone();
     std::thread::Builder::new()
@@ -456,11 +478,6 @@ pub fn begin(app: &AppHandle) {
 
 fn on_armed(app: &AppHandle, take: LiveTake, generation: u64) {
     let state = app.state::<AppState>();
-    if take.used_fallback {
-        if let Some(message) = &take.device_note {
-            log_line(&state.config_dir, "info", message);
-        }
-    }
     let (level, stop_flag) = take.meter();
     let started = take.started;
     let note = take.device_note.clone();
@@ -482,32 +499,15 @@ fn on_armed(app: &AppHandle, take: LiveTake, generation: u64) {
         engine.phase = Phase::Recording;
         after_arm(released, age)
     };
+    if let Some(message) = note.as_ref().filter(|message| !message.is_empty()) {
+        log_line(&state.config_dir, "info", message);
+    }
     match action {
         AfterArm::Listen => {
-            publish(
-                app,
-                &DictationEvent {
-                    phase: "recording".into(),
-                    message: note.clone(),
-                    elapsed_ms: 0,
-                    level: 0.0,
-                    engine: None,
-                },
-            );
-            spawn_meter(app.clone(), level, stop_flag, started, note, generation);
+            spawn_meter(app.clone(), level, stop_flag, started, None, generation);
         }
         AfterArm::WaitSecondTap => {
-            publish(
-                app,
-                &DictationEvent {
-                    phase: "recording".into(),
-                    message: note.clone(),
-                    elapsed_ms: 0,
-                    level: 0.0,
-                    engine: None,
-                },
-            );
-            spawn_meter(app.clone(), level, stop_flag, started, note, generation);
+            spawn_meter(app.clone(), level, stop_flag, started, None, generation);
             {
                 let mut engine = lock(&state.engine);
                 engine.awaiting_second = true;
@@ -520,7 +520,7 @@ fn on_armed(app: &AppHandle, take: LiveTake, generation: u64) {
 
 pub fn end(app: &AppHandle) {
     let state = app.state::<AppState>();
-    let (take, generation, short_press, hint_held_ms, release_started, held_ms, spool_id) = {
+    let (take, generation, short_press, hint_held_ms, release_started, held_ms, spool_id, overlay_ms, keydown) = {
         let mut engine = lock(&state.engine);
         engine.awaiting_second = false;
         if !matches!(engine.phase, Phase::Recording) {
@@ -532,6 +532,8 @@ pub fn end(app: &AppHandle) {
             engine.released_during_arm = true;
             return;
         }
+        let overlay_ms = engine.overlay_visible_ms;
+        let keydown = engine.press_at;
         let release_started = engine.release_mark.take().unwrap_or_else(Instant::now);
         let short_press = engine.short_release;
         let held_ms = engine
@@ -562,12 +564,22 @@ pub fn end(app: &AppHandle) {
             release_started,
             held_ms,
             spool_id,
+            overlay_ms,
+            keydown,
         )
     };
     let Some(take) = take else {
         mark_idle(app);
         return;
     };
+    let first_sample_ms = keydown.and_then(|start| take.first_sample_ms_since(start));
+    if let Some(ms) = first_sample_ms {
+        log_line(
+            &state.config_dir,
+            "info",
+            &format!("listen keydown_first_sample_ms={ms}"),
+        );
+    }
     let open_wait_ms = take.open_wait_ms;
     let bus = take.chunk_bus();
     enqueue(app, take.drain_chunks());
@@ -607,6 +619,8 @@ pub fn end(app: &AppHandle) {
         stop_ms,
         short_press,
         hint_held_ms,
+        overlay_ms,
+        first_sample_ms,
     };
     publish(
         app,
@@ -860,7 +874,14 @@ async fn process(
         tone: "none".into(),
         release_started: clock.release_started,
         engine: engine.clone(),
+        overlay_ms: clock.overlay_ms,
+        first_sample_ms: clock.first_sample_ms,
+        speech_language: String::new(),
+        speech_path: String::new(),
     };
+    let (speech_language, speech_path) = speech_meta(&products);
+    staged.speech_language = speech_language;
+    staged.speech_path = speech_path;
     let stitched = match pipeline::stitch_products(&products) {
         Ok(text) => text,
         Err(message) => {
@@ -911,8 +932,9 @@ async fn process(
         transcribe::http_client(),
         key.expose(),
         &stitched,
-        settings.cleanup_enabled,
-        tone,
+        settings.cleanup_enabled && !settings.verbatim,
+        if settings.verbatim { cleanup::Tone::Verbatim } else { tone },
+        settings.verbatim,
     )
     .await;
     staged.cleanup_ms = cleanup_started.elapsed().as_millis() as u64;
@@ -944,16 +966,6 @@ async fn deliver(app: &AppHandle, mut outcome: Outcome, generation: u64) {
     spool::write_text(&state.config_dir, &outcome.spool_id, &outcome.text);
     *lock(&state.last_text) = Some(outcome.text.clone());
     let text = outcome.text.clone();
-    publish(
-        app,
-        &DictationEvent {
-            phase: "inserting".into(),
-            message: outcome.engine.clone(),
-            elapsed_ms: outcome.duration_ms,
-            level: 0.0,
-            engine: outcome.engine.clone(),
-        },
-    );
     let paste_started = Instant::now();
     let inserted = tauri::async_runtime::spawn_blocking(move || insert::insert_text(&text)).await;
     outcome.staged.paste_ms = paste_started.elapsed().as_millis() as u64;
@@ -1081,7 +1093,51 @@ fn stage_line(staged: &Staged, release_ms: u64) -> String {
         line.push_str(" engine=");
         line.push_str(&staged.engine);
     }
+    let first_sample = match staged.first_sample_ms {
+        Some(ms) => ms.to_string(),
+        None => "na".into(),
+    };
+    let language = if staged.speech_language.is_empty() {
+        "na"
+    } else {
+        staged.speech_language.as_str()
+    };
+    let path = if staged.speech_path.is_empty() {
+        "na"
+    } else {
+        staged.speech_path.as_str()
+    };
+    line.push_str(&format!(
+        " keydown_overlay_ms={} keydown_first_sample_ms={} language={} path={}",
+        staged.overlay_ms, first_sample, language, path
+    ));
     line
+}
+
+fn speech_meta(products: &[Product]) -> (String, String) {
+    let language = products
+        .iter()
+        .find_map(|product| {
+            let language = product.language.trim();
+            if language.is_empty() {
+                None
+            } else {
+                Some(language.to_string())
+            }
+        })
+        .unwrap_or_default();
+    let path = products
+        .iter()
+        .find_map(|product| {
+            let path = product.speech_path.trim();
+            if path.is_empty() {
+                None
+            } else {
+                Some(path.to_string())
+            }
+        })
+        .unwrap_or_default();
+    (language, path)
 }
 
 fn quote_log(value: &str) -> String {
@@ -1121,7 +1177,17 @@ fn fail(app: &AppHandle, message: &str) {
 fn hint(app: &AppHandle, message: &str) {
     let state = app.state::<AppState>();
     log_line(&state.config_dir, "info", &format!("hint {message}"));
-    show_problem(app, message, 3_500);
+    // Silence and a short tap are normal. Hide the pill instead of flashing an error.
+    publish(
+        app,
+        &DictationEvent {
+            phase: "idle".into(),
+            message: None,
+            elapsed_ms: 0,
+            level: 0.0,
+            engine: None,
+        },
+    );
 }
 
 fn show_problem(app: &AppHandle, message: &str, hide_ms: u64) {
@@ -1185,9 +1251,9 @@ fn publish(app: &AppHandle, event: &DictationEvent) {
         return;
     }
     let (width, height) = if event.phase == "error" {
-        (460.0, 210.0)
+        (340.0, 148.0)
     } else {
-        (440.0, 128.0)
+        (280.0, 56.0)
     };
     let _ = overlay.set_size(LogicalSize::new(width, height));
     position_overlay(&overlay);
@@ -1285,6 +1351,10 @@ mod tests {
                 tone: "casual".into(),
                 release_started: Instant::now(),
                 engine: "Groq".into(),
+                overlay_ms: 4,
+                first_sample_ms: Some(11),
+                speech_language: "ur".into(),
+                speech_path: "mixed-llama".into(),
             },
             304,
         );
@@ -1294,7 +1364,23 @@ mod tests {
         assert!(line.contains("cleanup_why=\"couldn't reach Groq: timed out\""));
         assert!(line.contains("tone=casual"));
         assert!(line.contains("engine=Groq"));
+        assert!(line.contains("keydown_overlay_ms=4"));
+        assert!(line.contains("keydown_first_sample_ms=11"));
+        assert!(line.contains("language=ur"));
+        assert!(line.contains("path=mixed-llama"));
         assert!(!line.contains("cleanup_why=\"\""));
+    }
+
+    #[test]
+    fn keydown_shows_listening_immediately() {
+        let event = instant_listen_event(0.4);
+        assert_eq!(event.phase, "recording");
+        assert!(event.message.is_none());
+        assert_ne!(event.phase, "arming");
+        let started = Instant::now();
+        let _ = instant_listen_event(0.0);
+        let overlay_ms = started.elapsed().as_millis() as u64;
+        assert!(overlay_ms < 50, "building the Listening event took {overlay_ms} ms");
     }
 
     #[test]

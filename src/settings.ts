@@ -40,6 +40,7 @@ const LANGUAGES: Array<[string, string]> = [
   ["id", "Indonesian"],
   ["vi", "Vietnamese"],
   ["th", "Thai"],
+  ["ur", "Urdu"],
 ];
 
 type SectionId =
@@ -71,6 +72,8 @@ function normalizeSettings(settings: Settings): Settings {
     historyEnabled: settings.historyEnabled !== false,
     offlineModel: settings.offlineModel || "base.en",
     pasteHotkey: settings.pasteHotkey ?? { ctrl: true, alt: false, shift: false, win: true, key: "v" },
+    output: settings.output === "same" ? "same" : "english",
+    verbatim: settings.verbatim === true,
   };
 }
 
@@ -179,9 +182,8 @@ function render(root: HTMLElement, draft: Draft): void {
     placeAlert(form, draft);
     const test = document.getElementById("test-record") as HTMLButtonElement | null;
     if (test) {
-      test.textContent =
-        event.phase === "recording" ? "Stop test" : event.phase === "arming" ? "Starting…" : "Record a test";
-      test.disabled = event.phase === "arming" || event.phase === "transcribing" || event.phase === "inserting";
+      test.textContent = event.phase === "recording" ? "Stop test" : "Record a test";
+      test.disabled = event.phase === "transcribing" || event.phase === "inserting";
     }
     if (event.phase === "done" || event.phase === "idle") void refreshHistory(draft);
     refreshPills(draft);
@@ -319,7 +321,7 @@ function liveBanner(draft: Draft): HTMLElement {
     return banner;
   }
   const titles: Record<string, string> = {
-    arming: "Starting",
+    arming: "Listening",
     recording: "Listening",
     transcribing: "Transcribing",
     inserting: "Inserting",
@@ -802,6 +804,33 @@ function languagePanel(draft: Draft): HTMLElement {
     markDirty(draft);
   });
   langLabel.append(lang);
+  const outputLabel = el("label", "stack");
+  outputLabel.append(el("span", "label", "Output"));
+  const output = document.createElement("select");
+  output.setAttribute("aria-label", "Output");
+  const outputChoices: Array<["english" | "same", string]> = [
+    ["english", "English (translate)"],
+    ["same", "Same as spoken"],
+  ];
+  for (const [value, name] of outputChoices) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = name;
+    output.append(option);
+  }
+  output.value = draft.settings.output === "same" ? "same" : "english";
+  output.addEventListener("change", () => {
+    draft.settings.output = output.value === "same" ? "same" : "english";
+    markDirty(draft);
+  });
+  outputLabel.append(
+    output,
+    el(
+      "p",
+      "field-note",
+      "English (translate) is the default. Urdu, Roman Urdu, and any other language come back in English. Same as spoken leaves the transcript in the language you used.",
+    ),
+  );
   const offlineLabel = el("label", "stack");
   offlineLabel.append(el("span", "label", "On-device model"));
   const offline = document.createElement("select");
@@ -834,7 +863,7 @@ function languagePanel(draft: Draft): HTMLElement {
       "If Groq is rate limiting, down, or unreachable, Bolo.com transcribes this take on the PC with whisper.cpp and tries Groq again on the next one. The model downloads the first time it's needed.",
     ),
   );
-  panel.append(grid, langLabel, offlineLabel);
+  panel.append(grid, langLabel, outputLabel, offlineLabel);
   return panel;
 }
 
@@ -842,9 +871,18 @@ function cleanupPanel(draft: Draft): HTMLElement {
   const panel = panelEl(
     "cleanup",
     "Cleanup and style",
-    "Llama 3.1 8B Instant punctuates and applies spoken corrections such as “scratch that”, “new line”, and “period”. Chat stays casual. Mail and documents stay formal. Code editors skip the rewrite. If the model fails, Bolo.com retries once, then pastes the local edit and logs why.",
+    "Llama 3.1 8B Instant punctuates and applies spoken corrections such as “scratch that”, “new line”, and “period”. It does not add or drop what you said. Chat stays casual. Mail and documents stay formal. Code editors skip the rewrite. Verbatim pastes the transcript unchanged.",
   );
   panel.append(
+    toggle(
+      "Verbatim",
+      "Paste exactly what was said. Cleanup will not add, drop, or rephrase a word, including um and uh.",
+      draft.settings.verbatim,
+      (checked) => {
+        draft.settings.verbatim = checked;
+        markDirty(draft);
+      },
+    ),
     toggle(
       "Clean up with Llama",
       "On for a new install. A settings file that already saved this off stays off until you turn it on.",
