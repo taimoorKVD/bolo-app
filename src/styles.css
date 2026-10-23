@@ -80,6 +80,12 @@ button:disabled { cursor: default; opacity: 0.55; }
   line-height: 0.95;
 }
 
+.brand-lockup {
+  display: block;
+  width: min(100%, 236px);
+  height: auto;
+}
+
 .lede, .card-body, .field-note, .platform-note, .version {
   margin: 0;
   color: var(--muted);

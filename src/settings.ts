@@ -1,4 +1,5 @@
 import { api, onDictation, onListenerStatus, onMicStatus } from "./api";
+import lockupUrl from "./brand-lockup.svg";
 import { formatDuration, formatHotkey, formatWhen, modelLabel } from "./format";
 import { listenerNotice, visibleMessage } from "./notices";
 import type {
@@ -208,7 +209,7 @@ function buildNav(draft: Draft): HTMLElement {
   const brand = el("div", "brand");
   brand.append(
     el("p", "eyebrow", "Dictation"),
-    el("h1", "wordmark", "Bolo.com"),
+    logoHeading(),
     el("p", "lede", "Hold a key anywhere in Windows. Speak. Let go. The words land at the cursor."),
   );
   const menu = el("nav", "sidenav");
@@ -1132,9 +1133,19 @@ function button(text: string, kind: "primary" | "ghost" | "text"): HTMLButtonEle
   return node;
 }
 
+function logoHeading(): HTMLElement {
+  const heading = el("h1", "wordmark");
+  const img = document.createElement("img");
+  img.className = "brand-lockup";
+  img.src = lockupUrl;
+  img.alt = "Bolo.com";
+  heading.append(img);
+  return heading;
+}
+
 function loadingShell(): HTMLElement {
   const shell = el("div", "shell loading-shell");
-  shell.append(el("p", "eyebrow", "Dictation"), el("h1", "wordmark", "Bolo.com"));
+  shell.append(el("p", "eyebrow", "Dictation"), logoHeading());
   shell.append(el("p", "lede", "Loading your settings…"));
   shell.setAttribute("role", "status");
   return shell;
@@ -1142,7 +1153,7 @@ function loadingShell(): HTMLElement {
 
 function errorShell(message: string, retry: () => void): HTMLElement {
   const shell = el("div", "shell error-shell");
-  shell.append(el("p", "eyebrow", "Dictation"), el("h1", "wordmark", "Bolo.com"));
+  shell.append(el("p", "eyebrow", "Dictation"), logoHeading());
   shell.append(el("p", "lede", "Settings didn't load."));
   const banner = el("div", "banner bad", visibleMessage(message) ?? "Settings didn't load.");
   const retryButton = button("Try again", "primary");

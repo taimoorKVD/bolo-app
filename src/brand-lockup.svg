@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="680" height="240" viewBox="0 0 680 240" role="img" aria-label="Bolo.com">
+  <g transform="translate(0,4) scale(0.150)">
+    <g fill="#C6A15A">
+      <rect x="64" y="40" width="896" height="700" rx="176"/>
+      <polygon points="250,680 150,1000 560,680"/>
+    </g>
+    <g fill="#14120E">
+      <rect x="236" y="280" width="136" height="240" rx="68"/>
+      <rect x="444" y="156" width="136" height="488" rx="68"/>
+      <rect x="652" y="220" width="136" height="360" rx="68"/>
+    </g>
+  </g>
+  <text x="186" y="64" fill="#F4EFE6" font-family="Palatino, 'Palatino Linotype', Georgia, 'Liberation Serif', 'Iowan Old Style', serif" font-size="56" font-weight="700">Bolo.com</text>
+  <text x="188" y="118" fill="#C6A15A" font-family="'Noto Nastaliq Urdu', 'Urdu Typesetting', 'Noto Naskh Arabic', 'Traditional Arabic', serif" font-size="46">بولو</text>
+</svg>
