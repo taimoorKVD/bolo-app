@@ -1,4 +1,5 @@
 mod audio;
+mod builtin;
 mod chunk;
 mod cleanup;
 mod context;
@@ -146,7 +147,8 @@ pub fn run() {
             if let Err(err) = apply_autostart(app.handle(), settings.launch_at_startup) {
                 logbuf::log_line(&dir, "error", &format!("startup setting: {err}"));
             }
-            let needs_key = !credentials::status().configured;
+            let key_status = credentials::status();
+            let needs_key = builtin::onboarding_needs_key(key_status.configured, key_status.builtin);
             // Smoke must not focus a window onto a monitor. The settings page
             // is parked off-screen in create_windows so get_settings still runs.
             if !smoke && (needs_key || !tray_ok) {

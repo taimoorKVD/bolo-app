@@ -43,9 +43,13 @@ pub(crate) fn service_for_target(target: &str) -> Option<&'static str> {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ApiKeyStatus {
+    /// The user saved their own key in the credential store.
     pub configured: bool,
+    /// Last four characters of the user's own key. Never set for the built-in key.
     pub hint: Option<String>,
     pub error: Option<String>,
+    /// This build compiled in a built-in key. The secret itself is not included.
+    pub builtin: bool,
 }
 
 pub fn validate_key(key: &str) -> Result<(), String> {
@@ -99,6 +103,7 @@ pub fn load_api_key() -> anyhow::Result<Option<String>> {
 }
 
 pub fn status() -> ApiKeyStatus {
+    let builtin = crate::builtin::available();
     match load_api_key() {
         Ok(Some(mut key)) => {
             let hint = hint_of(&key);
@@ -107,17 +112,20 @@ pub fn status() -> ApiKeyStatus {
                 configured: true,
                 hint: Some(hint),
                 error: None,
+                builtin,
             }
         }
         Ok(None) => ApiKeyStatus {
             configured: false,
             hint: None,
             error: None,
+            builtin,
         },
         Err(err) => ApiKeyStatus {
             configured: false,
             hint: None,
             error: Some(err.to_string()),
+            builtin,
         },
     }
 }
@@ -128,24 +136,50 @@ fn hint_of(key: &str) -> String {
 }
 
 /// Read the key for one request and wipe it when the guard drops.
-pub struct SecretKey(String);
+/// The user's own key wins. Otherwise the key compiled into this build.
+pub struct SecretKey {
+    value: String,
+    builtin: bool,
+}
 
 impl SecretKey {
     pub fn load() -> anyhow::Result<Self> {
-        match load_api_key()? {
-            Some(key) => Ok(Self(key)),
-            None => anyhow::bail!("Add a Groq API key in Bolo.com settings."),
+        let own = load_api_key()?;
+        match crate::builtin::select_key_source(own.is_some(), crate::builtin::available()) {
+            crate::builtin::KeyChoice::Own => {
+                let Some(value) = own else {
+                    anyhow::bail!("Add a Groq API key in Bolo.com settings.");
+                };
+                Ok(Self {
+                    value,
+                    builtin: false,
+                })
+            }
+            crate::builtin::KeyChoice::Builtin => {
+                let value = crate::builtin::decode().context("built-in Groq key could not be read")?;
+                Ok(Self {
+                    value,
+                    builtin: true,
+                })
+            }
+            crate::builtin::KeyChoice::Required => {
+                anyhow::bail!("Add a Groq API key in Bolo.com settings.")
+            }
         }
     }
 
     pub fn expose(&self) -> &str {
-        &self.0
+        &self.value
+    }
+
+    pub fn is_builtin(&self) -> bool {
+        self.builtin
     }
 }
 
 impl Drop for SecretKey {
     fn drop(&mut self) {
-        cleanup::wipe(&mut self.0);
+        cleanup::wipe(&mut self.value);
     }
 }
 
@@ -336,6 +370,23 @@ mod tests {
     #[test]
     fn hint_shows_only_the_last_four() {
         assert_eq!(hint_of("gsk_example_secret_wxyz"), "····wxyz");
+    }
+
+    #[test]
+    fn builtin_status_payload_has_no_key_material() {
+        let reported = ApiKeyStatus {
+            configured: false,
+            hint: None,
+            error: None,
+            builtin: true,
+        };
+        let json = serde_json::to_string(&reported).unwrap();
+        assert!(reported.hint.is_none());
+        assert!(!json.contains("gsk_"));
+        assert!(!json.to_ascii_lowercase().contains("apikey"));
+        assert!(!json.to_ascii_lowercase().contains("builtinkey"));
+        assert!(json.contains("\"builtin\":true"));
+        assert!(json.contains("\"hint\":null"));
     }
 
     #[test]

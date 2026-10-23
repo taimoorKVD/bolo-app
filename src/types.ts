@@ -31,6 +31,8 @@ export type ApiKeyStatus = {
   configured: boolean;
   hint: string | null;
   error: string | null;
+  /** This build has a compiled-in key. The secret is never included. */
+  builtin: boolean;
 };
 
 export type MicInfo = {

@@ -928,6 +928,7 @@ async fn process(
     };
     let model = settings.model.clone();
     let cleanup_started = Instant::now();
+    let using_builtin = key.is_builtin();
     let cleaned = cleanup::clean_transcript(
         transcribe::http_client(),
         key.expose(),
@@ -936,6 +937,7 @@ async fn process(
         if settings.verbatim { cleanup::Tone::Verbatim } else { tone },
         settings.verbatim,
         &settings.cleanup_model,
+        using_builtin,
     )
     .await;
     staged.cleanup_ms = cleanup_started.elapsed().as_millis() as u64;

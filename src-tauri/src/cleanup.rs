@@ -97,6 +97,7 @@ pub async fn clean_transcript(
     tone: Tone,
     verbatim: bool,
     model: &str,
+    using_builtin: bool,
 ) -> CleanOutcome {
     if verbatim {
         return skipped(transcript.trim().to_string(), "verbatim");
@@ -114,7 +115,7 @@ pub async fn clean_transcript(
     let models = model_order(model);
     let mut missed = Vec::new();
     for model_id in &models {
-        match request_cleanup(client, api_key, transcript, tone, false, model_id).await {
+        match request_cleanup(client, api_key, transcript, tone, false, model_id, using_builtin).await {
             Err(CleanupFail::Missing) => {
                 missed.push(model_id.clone());
                 continue;
@@ -126,7 +127,7 @@ pub async fn clean_transcript(
                 }
                 // A 404 already moved on. Any other failure gets one simpler retry
                 // on this model, then the local edit. Timeouts do not walk the list.
-                match request_cleanup(client, api_key, transcript, tone, true, model_id).await {
+                match request_cleanup(client, api_key, transcript, tone, true, model_id, using_builtin).await {
                     Err(CleanupFail::Missing) => {
                         missed.push(model_id.clone());
                         continue;
@@ -331,6 +332,7 @@ pub async fn translate_preserving(
     api_key: &str,
     transcript: &str,
     model: &str,
+    using_builtin: bool,
 ) -> CleanOutcome {
     let original = transcript.trim();
     if original.is_empty() {
@@ -341,7 +343,7 @@ pub async fn translate_preserving(
     let models = model_order(model);
     let mut missed = Vec::new();
     for model_id in &models {
-        match post_chat(client, api_key, model_id, system, original, max_tokens).await {
+        match post_chat(client, api_key, model_id, system, original, max_tokens, using_builtin).await {
             Err(CleanupFail::Missing) => {
                 missed.push(model_id.clone());
                 continue;
@@ -505,6 +507,7 @@ async fn request_cleanup(
     tone: Tone,
     plain: bool,
     model: &str,
+    using_builtin: bool,
 ) -> Result<String, CleanupFail> {
     let system = if plain {
         "Correct this dictation. Return only the corrected words, with no introduction and no quotes.".to_string()
@@ -516,7 +519,7 @@ async fn request_cleanup(
     };
     let user = transcript.trim();
     let max_tokens = (transcript.chars().count() as u32 / 2 + if plain { 96 } else { 48 }).clamp(48, 320);
-    let text = post_chat(client, api_key, model, &system, user, max_tokens).await?;
+    let text = post_chat(client, api_key, model, &system, user, max_tokens, using_builtin).await?;
     if text.trim().is_empty() {
         return Err(CleanupFail::Other("cleanup response had no text".into()));
     }
@@ -530,6 +533,7 @@ async fn post_chat(
     system: &str,
     user: &str,
     max_tokens: u32,
+    using_builtin: bool,
 ) -> Result<String, CleanupFail> {
     let body = serde_json::json!({
         "model": model,
@@ -560,7 +564,7 @@ async fn post_chat(
         if is_missing_model(status.as_u16(), &bytes) {
             return Err(CleanupFail::Missing);
         }
-        return Err(CleanupFail::Other(groq_error_message(status.as_u16(), &bytes)));
+        return Err(CleanupFail::Other(groq_error_message(status.as_u16(), &bytes, using_builtin)));
     }
     let parsed: ChatResponse = match serde_json::from_str(&bytes) {
         Ok(parsed) => parsed,
@@ -605,19 +609,23 @@ fn unwrap_model_text(value: &str) -> String {
     trimmed.to_string()
 }
 
-pub(crate) fn groq_error_message(status: u16, body: &str) -> String {
+pub(crate) fn groq_error_message(status: u16, body: &str, using_builtin: bool) -> String {
     let detail = serde_json::from_str::<GroqErrorBody>(body)
         .ok()
         .and_then(|parsed| parsed.error.and_then(|error| error.message))
         .unwrap_or_else(|| compact(body, 180));
-    match status {
-        401 | 403 => "Groq rejected the API key. Check it in Settings.".into(),
-        413 => "The recording was too large to upload.".into(),
+    let message = match status {
+        401 | 403 => "Groq rejected the API key. Check it in Settings.".to_string(),
+        413 => "The recording was too large to upload.".to_string(),
+        429 if using_builtin => {
+            "Bolo.com's built-in key is rate limited right now. Add your own Groq API key in Settings to keep dictating.".to_string()
+        }
         429 => format!(
             "Groq is rate limiting requests right now ({detail}). Bolo.com will use the on-device model for this take if it's ready, then try Groq again next time."
         ),
         _ => format!("Groq returned {status}. {detail}"),
-    }
+    };
+    crate::builtin::redact_secrets(&message)
 }
 
 fn compact(body: &str, max: usize) -> String {
@@ -878,6 +886,7 @@ mod tests {
             Tone::Plain,
             true,
             CLEANUP_MODEL,
+            false,
         ));
         assert!(!outcome.used_model);
         assert_eq!(outcome.why, "verbatim");
@@ -922,6 +931,7 @@ mod tests {
             Tone::Verbatim,
             false,
             CLEANUP_MODEL,
+            false,
         ));
         assert!(!outcome.used_model);
         assert_eq!(outcome.why, "verbatim");
@@ -938,6 +948,7 @@ mod tests {
             Tone::Plain,
             false,
             CLEANUP_MODEL,
+            false,
         ));
         assert!(!outcome.used_model);
         assert_eq!(outcome.why, "off");
@@ -993,8 +1004,20 @@ mod tests {
 
     #[test]
     fn maps_auth_errors_without_echoing_a_key() {
-        let message = groq_error_message(401, "{\"error\":{\"message\":\"invalid\"}}");
+        let message = groq_error_message(401, "{\"error\":{\"message\":\"invalid\"}}", false);
         assert!(message.contains("API key"));
         assert!(!message.to_lowercase().contains("gsk_"));
+    }
+
+    #[test]
+    fn builtin_rate_limit_suggests_an_own_key() {
+        let body = "{\"error\":{\"message\":\"rate limit gsk_test_fixture_key_value_xxxxxxxx\"}}";
+        let message = groq_error_message(429, body, true);
+        assert!(message.contains("built-in key is rate limited"));
+        assert!(message.contains("Add your own Groq API key"));
+        assert!(!message.contains("gsk_"), "{message}");
+        let own = groq_error_message(429, "{\"error\":{\"message\":\"rate limit\"}}", false);
+        assert!(own.contains("rate limiting requests right now"));
+        assert!(!own.contains("Add your own Groq API key"));
     }
 }

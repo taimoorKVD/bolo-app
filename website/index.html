@@ -37,10 +37,6 @@
     "nsis": {
       "href": "downloads/Bolo.com_0.1.0_x64-setup.exe",
       "bytes": null
-    },
-    "msi": {
-      "href": "downloads/Bolo.com_0.1.0_x64_en-US.msi",
-      "bytes": null
     }
   }
 }
@@ -76,7 +72,6 @@
           <p class="lede">Speak anywhere in Windows. The text lands at your cursor.</p>
           <div class="cta-row">
             <a class="button" data-download="nsis" href="downloads/Bolo.com_0.1.0_x64-setup.exe">Download for Windows</a>
-            <a class="text-link" data-download="msi" href="downloads/Bolo.com_0.1.0_x64_en-US.msi">MSI package</a>
           </div>
           <p class="release-meta">
             <span data-field="version">Version 0.1.0</span>
@@ -201,7 +196,7 @@
             </li>
             <li>
               <h3>The key stays in Windows</h3>
-              <p>The Groq key is a local credential in Windows Credential Manager. It is not written into settings.json.</p>
+              <p>A Groq key you add is a local credential in Windows Credential Manager. It is not written into settings.json, and it is not shown in the log. The built-in key is not displayed.</p>
             </li>
           </ul>
         </div>
@@ -223,15 +218,15 @@
           <details>
             <summary>Do I need a Groq API key?</summary>
             <p>
-              Yes. Create one at <a href="https://console.groq.com/keys">console.groq.com/keys</a> and paste it into Bolo.com once.
-              It is stored in Windows Credential Manager on this PC. It is not written into the settings file and it is not logged.
+              No. Bolo.com can dictate with its built-in Groq key. Add your own at <a href="https://console.groq.com/keys">console.groq.com/keys</a> if you want requests on your account.
+              Your key is stored in Windows Credential Manager on this PC. It is not written into the settings file and it is not logged.
             </p>
           </details>
           <details>
             <summary>Is there a free tier?</summary>
             <p>
-              Bolo.com does not charge a subscription and does not run a server of its own. Groq offers a free tier for its API.
-              What you can transcribe follows the limits on your Groq account.
+              Bolo.com does not charge a subscription and does not run a server of its own. The built-in key follows Groq's limits for that key.
+              If those limits are hit, add your own Groq API key in Settings.
             </p>
           </details>
           <details>
@@ -251,7 +246,6 @@
           <p>Bolo — <bdi lang="ur">بولو</bdi>, speak. The words land at the cursor.</p>
           <div class="cta-row">
             <a class="button" data-download="nsis" href="downloads/Bolo.com_0.1.0_x64-setup.exe">Download for Windows</a>
-            <a class="text-link" data-download="msi" href="downloads/Bolo.com_0.1.0_x64_en-US.msi">MSI package</a>
           </div>
           <p class="release-meta">
             <span data-field="version">Version 0.1.0</span>

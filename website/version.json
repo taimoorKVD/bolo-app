@@ -6,10 +6,6 @@
     "nsis": {
       "href": "downloads/Bolo.com_0.1.0_x64-setup.exe",
       "bytes": null
-    },
-    "msi": {
-      "href": "downloads/Bolo.com_0.1.0_x64_en-US.msi",
-      "bytes": null
     }
   }
 }

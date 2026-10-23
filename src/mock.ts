@@ -56,9 +56,15 @@ const mics: MicInfo[] = [
   { name: "Jack Mic (2- Realtek(R) Audio)", isDefault: false },
 ];
 
+function builtinPreview(): boolean {
+  const flag = previewParam("builtin");
+  return flag !== "0" && flag !== "false";
+}
+
 function keyStatus(): ApiKeyStatus {
-  if (!apiKey) return { configured: false, hint: null, error: null };
-  return { configured: true, hint: `····${apiKey.slice(-4)}`, error: null };
+  const builtin = builtinPreview();
+  if (!apiKey) return { configured: false, hint: null, error: null, builtin };
+  return { configured: true, hint: `····${apiKey.slice(-4)}`, error: null, builtin };
 }
 
 export async function mockInvoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {

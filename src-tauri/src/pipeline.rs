@@ -244,6 +244,7 @@ async fn recognize(bytes: Vec<u8>, env: &JobEnv) -> Result<Recognized, String> {
     let cleanup_model = env.settings.cleanup_model.clone();
     match SecretKey::load() {
         Ok(key) => {
+            let using_builtin = key.is_builtin();
             let groq = speech_with_groq(
                 transcribe::http_client(),
                 key.expose(),
@@ -253,6 +254,7 @@ async fn recognize(bytes: Vec<u8>, env: &JobEnv) -> Result<Recognized, String> {
                 &output,
                 prompt.as_deref(),
                 &cleanup_model,
+                using_builtin,
             )
             .await;
             drop(key);
@@ -309,9 +311,10 @@ async fn speech_with_groq(
     output: &str,
     prompt: Option<&str>,
     cleanup_model: &str,
+    using_builtin: bool,
 ) -> anyhow::Result<Recognized> {
     if transcribe::direct_translate(output, language) {
-        let translated = transcribe::translate_audio(client, api_key, audio, prompt).await?;
+        let translated = transcribe::translate_audio(client, api_key, audio, prompt, using_builtin).await?;
         let code = transcribe::normalize_language(language).unwrap_or_else(|| "unknown".into());
         return Ok(Recognized {
             text: translated.text,
@@ -321,7 +324,7 @@ async fn speech_with_groq(
             path: "translate".into(),
         });
     }
-    let spoken = transcribe::transcribe(client, api_key, audio.clone(), model, language, prompt.map(str::to_string)).await?;
+    let spoken = transcribe::transcribe(client, api_key, audio.clone(), model, language, prompt.map(str::to_string), using_builtin).await?;
     let detected = spoken.language.clone();
     let route = transcribe::speech_route(output, language, &detected, &spoken.text);
     match route {
@@ -333,7 +336,7 @@ async fn speech_with_groq(
             path: "transcribe".into(),
         }),
         SpeechRoute::Translate => {
-            let translated = transcribe::translate_audio(client, api_key, audio, prompt).await?;
+            let translated = transcribe::translate_audio(client, api_key, audio, prompt, using_builtin).await?;
             Ok(Recognized {
                 text: translated.text,
                 tries: spoken.tries.saturating_add(translated.tries),
@@ -343,7 +346,7 @@ async fn speech_with_groq(
             })
         }
         SpeechRoute::Mixed => {
-            let outcome = cleanup::translate_preserving(client, api_key, &spoken.text, cleanup_model).await;
+            let outcome = cleanup::translate_preserving(client, api_key, &spoken.text, cleanup_model, using_builtin).await;
             if outcome.used_model {
                 return Ok(Recognized {
                     text: outcome.text,
@@ -353,7 +356,7 @@ async fn speech_with_groq(
                     path: "mixed-llama".into(),
                 });
             }
-            match transcribe::translate_audio(client, api_key, audio, prompt).await {
+            match transcribe::translate_audio(client, api_key, audio, prompt, using_builtin).await {
                 Ok(translated) => Ok(Recognized {
                     text: translated.text,
                     tries: spoken.tries.saturating_add(translated.tries),

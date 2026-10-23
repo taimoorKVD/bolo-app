@@ -192,6 +192,7 @@ textarea { resize: vertical; min-height: 140px; }
   flex-wrap: wrap;
 }
 .key-row input { flex: 1; min-width: 180px; }
+.own-key-label { margin: 4px 0 0; font-weight: 600; }
 
 button.primary, button.ghost, button.text {
   border-radius: 999px;

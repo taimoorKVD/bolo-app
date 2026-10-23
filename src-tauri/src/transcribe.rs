@@ -199,9 +199,10 @@ pub async fn transcribe(
     model: &str,
     language: &str,
     prompt: Option<String>,
+    using_builtin: bool,
 ) -> anyhow::Result<Transcript> {
     let model = normalize_model(model).context("unknown Whisper model")?;
-    let first = request_audio(client, api_key, audio.clone(), TRANSCRIPTIONS, model, language, prompt.as_deref()).await?;
+    let first = request_audio(client, api_key, audio.clone(), TRANSCRIPTIONS, model, language, prompt.as_deref(), using_builtin).await?;
     if !should_retry(&first.text, first.avg_logprob, first.no_speech_prob) {
         return Ok(Transcript {
             text: first.text,
@@ -209,7 +210,7 @@ pub async fn transcribe(
             language: first.language,
         });
     }
-    match request_audio(client, api_key, audio, TRANSCRIPTIONS, model, language, None).await {
+    match request_audio(client, api_key, audio, TRANSCRIPTIONS, model, language, None, using_builtin).await {
         Ok(second) => {
             let chosen = prefer_attempt(first, second);
             Ok(Transcript {
@@ -233,8 +234,9 @@ pub async fn translate_audio(
     api_key: &str,
     audio: Vec<u8>,
     prompt: Option<&str>,
+    using_builtin: bool,
 ) -> anyhow::Result<Transcript> {
-    let first = request_audio(client, api_key, audio.clone(), TRANSLATIONS, WHISPER_LARGE, "", prompt).await?;
+    let first = request_audio(client, api_key, audio.clone(), TRANSLATIONS, WHISPER_LARGE, "", prompt, using_builtin).await?;
     if !first.text.trim().is_empty() {
         return Ok(Transcript {
             text: first.text,
@@ -242,7 +244,7 @@ pub async fn translate_audio(
             language: first.language,
         });
     }
-    let second = request_audio(client, api_key, audio, TRANSLATIONS, WHISPER_LARGE, "", None).await?;
+    let second = request_audio(client, api_key, audio, TRANSLATIONS, WHISPER_LARGE, "", None, using_builtin).await?;
     let language = if second.language.is_empty() {
         first.language
     } else {
@@ -304,10 +306,11 @@ async fn request_audio(
     model: &str,
     language: &str,
     prompt: Option<&str>,
+    using_builtin: bool,
 ) -> anyhow::Result<Attempt> {
     let mut attempt = 0u32;
     loop {
-        match request_audio_once(client, api_key, audio.clone(), endpoint, model, language, prompt).await {
+        match request_audio_once(client, api_key, audio.clone(), endpoint, model, language, prompt, using_builtin).await {
             Ok(parsed) => return Ok(parsed),
             Err(failure) => match retry_plan(failure.kind, attempt) {
                 RetryPlan::Backoff { ms } => {
@@ -328,6 +331,7 @@ async fn request_audio_once(
     model: &str,
     language: &str,
     prompt: Option<&str>,
+    using_builtin: bool,
 ) -> Result<Attempt, GroqFailure> {
     let translating = endpoint.ends_with("/translations");
     let model = if translating { WHISPER_LARGE } else { model };
@@ -391,7 +395,7 @@ async fn request_audio_once(
             _ => FailKind::Other,
         };
         return Err(GroqFailure {
-            message: groq_error_message(code, &body),
+            message: groq_error_message(code, &body, using_builtin),
             kind,
         });
     }

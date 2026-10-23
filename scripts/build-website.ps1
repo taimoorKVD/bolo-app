@@ -1,6 +1,7 @@
-# Copy the release NSIS and MSI packages into website/downloads and
-# refresh website/version.json (and the matching copy embedded in index.html).
+# Copy the release NSIS setup into website/downloads and refresh
+# website/version.json (and the matching copy embedded in index.html).
 # Requires a completed `npm run tauri build` so the bundle folder exists.
+# The site publishes setup.exe only.
 #
 #   powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-website.ps1
 
@@ -25,34 +26,23 @@ if ([string]::IsNullOrWhiteSpace($version)) {
 
 $bundle = Join-Path $root "src-tauri\target\release\bundle"
 $nsisDir = Join-Path $bundle "nsis"
-$msiDir = Join-Path $bundle "msi"
 
 $nsisSource = Get-ChildItem -Path $nsisDir -Filter "*setup.exe" -ErrorAction SilentlyContinue |
-    Sort-Object LastWriteTime -Descending |
-    Select-Object -First 1
-$msiSource = Get-ChildItem -Path $msiDir -Filter "*.msi" -ErrorAction SilentlyContinue |
     Sort-Object LastWriteTime -Descending |
     Select-Object -First 1
 
 if (-not $nsisSource) {
     throw "No NSIS setup.exe under $nsisDir. Build the installer first: npm run tauri build"
 }
-if (-not $msiSource) {
-    throw "No MSI under $msiDir. Build the installer first: npm run tauri build"
-}
 
 New-Item -ItemType Directory -Force -Path $downloads | Out-Null
 
 $nsisName = "Bolo.com_${version}_x64-setup.exe"
-$msiName = "Bolo.com_${version}_x64_en-US.msi"
 $nsisDest = Join-Path $downloads $nsisName
-$msiDest = Join-Path $downloads $msiName
 
 Copy-Item -LiteralPath $nsisSource.FullName -Destination $nsisDest -Force
-Copy-Item -LiteralPath $msiSource.FullName -Destination $msiDest -Force
 
 $nsisBytes = (Get-Item -LiteralPath $nsisDest).Length
-$msiBytes = (Get-Item -LiteralPath $msiDest).Length
 
 $json = @"
 {
@@ -63,10 +53,6 @@ $json = @"
     "nsis": {
       "href": "downloads/$nsisName",
       "bytes": $nsisBytes
-    },
-    "msi": {
-      "href": "downloads/$msiName",
-      "bytes": $msiBytes
     }
   }
 }
@@ -86,5 +72,4 @@ if ($updated -eq $html) {
 [System.IO.File]::WriteAllText($indexPath, $updated, $utf8)
 
 Write-Host "website/downloads/$nsisName ($nsisBytes bytes)"
-Write-Host "website/downloads/$msiName ($msiBytes bytes)"
 Write-Host "Updated website/version.json and the embedded copy in index.html"

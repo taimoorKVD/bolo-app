@@ -12,7 +12,7 @@ If you already used Cadence, the Groq key in Credential Manager and the files in
 
 - Windows 10 or 11, 64-bit
 - The [WebView2 runtime](https://developer.microsoft.com/microsoft-edge/webview2/) (already present on Windows 11; the installer can fetch the bootstrapper on Windows 10)
-- A [Groq API key](https://console.groq.com/keys)
+- A [Groq API key](https://console.groq.com/keys), unless this build was compiled with `BOLO_BUILTIN_GROQ_KEY`
 - For development: [Rust](https://rustup.rs/) stable, Node.js 22, and the [Microsoft C++ build tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/)
 
 The NSIS installer is per-user and does not need an administrator account. A global keyboard hook and simulated paste only work in apps running at the same privilege level, so an elevated window (for example a terminal opened as Administrator) will not receive dictation.
@@ -24,7 +24,7 @@ npm install
 npm run tauri dev
 ```
 
-Bolo.com starts in the tray. The settings window opens on first launch, when no API key is stored, or when you left-click the tray icon. Right-click the tray icon for Settings and Quit. Closing the settings window hides it; the app keeps running.
+Bolo.com starts in the tray. The settings window opens on first launch when this build has no built-in key and none is stored, or when you left-click the tray icon. A build with a built-in key does not ask for one. Right-click the tray icon for Settings and Quit. Closing the settings window hides it; the app keeps running.
 
 Hold **Ctrl + Win** (the default), speak, and release. Ctrl + Space and a few other chords are presets in Settings.
 
@@ -32,7 +32,7 @@ Hold **Ctrl + Win** (the default), speak, and release. Ctrl + Space and a few ot
 
 | Setting | Behavior |
 | --- | --- |
-| Groq API key | Saved in Windows Credential Manager as a local generic credential, target `com.bolo.dictation/groq-api-key`. A key still stored as `com.cadence.dictation/groq-api-key` or the older keyring target `groq-api-key.com.cadence.dictation` is read and copied forward. A save counts only after the same value is read back. It is not written to `settings.json` and is not logged. Remove deletes all three entries. |
+| Groq API key | A build compiled with `BOLO_BUILTIN_GROQ_KEY` set uses that key when you have not saved your own. Settings says “Using Bolo.com built-in key” and does not show the key. “Use my own Groq API key” saves yours in Windows Credential Manager (target `com.bolo.dictation/groq-api-key`) and uses it instead. “Return to built-in key” clears yours. A key still stored as `com.cadence.dictation/groq-api-key` or the older keyring target `groq-api-key.com.cadence.dictation` is read and copied forward. A save counts only after the same value is read back. The key is not written to `settings.json`, history, or the log, and it is not sent to the window. A build without the variable still requires your own key. A 429 on the built-in key asks you to add your own. |
 | Hotkey | Hold to record, release to transcribe. The microphone stays open from launch, with about a second of pre-roll, so the first press shows Listening immediately and marks that buffer. It does not open a device on the key-down path. If the stream has died, Bolo.com reopens it in the background and still keeps the pre-roll. A release shorter than about a quarter second waits briefly for a second tap, which leaves the mic open until you tap again. A longer hold stops the moment you release. Modifier-only chords need two modifiers so a lone Ctrl cannot start a recording. Paste the last take again with Ctrl+Win+V (changeable in Settings). |
 | Microphone | **System default (auto)** is the default. It follows the Windows default when you plug or unplug a headset. A named mic is remembered: if it is missing or will not open, Bolo.com uses another live mic without failing the take, and switches back when the preferred one returns. The sidebar shows which mic is in use, and the Microphone section shows a live level. |
 | Language and model | `whisper-large-v3-turbo` (default) or `whisper-large-v3`. Spoken language is `auto`, or an ISO 639-1 code passed to Whisper. Output defaults to **English (translate)**; **Same as spoken** leaves the transcript in the language you used. When the output is English and the speech is not, Bolo.com calls Groq `/audio/translations` with `whisper-large-v3` (turbo does not translate). Urdu and mixed Urdu/English, including Roman Urdu, are transcribed and then translated with Llama so the meaning stays exact. The log records `speech language=… path=…` (`transcribe`, `translate`, or `mixed-llama`). Temperature is 0. An empty or low-confidence result is sent once more without the prompt. Network errors and HTTP 5xx are retried with backoff. A Groq 429 is retried once, then described as a rate limit. If Groq is rate limiting, returning 5xx, or unreachable, Bolo.com uses a local whisper.cpp model (`base.en` by default, or `small.en`) and tries Groq again on the next take. The model and the Windows whisper.cpp build download on first use. The tally shows which engine produced the text. |
@@ -48,7 +48,7 @@ A long take keeps going and is cut into pieces while you are still speaking. Sil
 
 The app identifier is `com.bolo.dictation`. Settings and history are in that config directory (`settings.json`, `history.json`). On first launch, if that folder has no `settings.json`, both files are copied from the sibling `com.cadence.dictation` folder. The old folder is not deleted.
 
-A diagnostic log is `bolo.log` next to the new settings. The log records durations and errors, not the API key and not the transcript.
+A diagnostic log is `bolo.log` next to the new settings. The log records durations and errors, not the API key and not the transcript. A Groq key that appears in a log message is replaced with `[redacted]` before it is written.
 
 After each take the log has one stage line. Times are milliseconds. `held` is how long the microphone was open. `open_wait` is how long the hotkey waited to mark the warm buffer (it should be a few milliseconds). `listen keydown_overlay_ms` is written as soon as the Listening pill is shown. `listen keydown_first_sample_ms` is `0` when the warm ring already held audio at the key (pre-roll), otherwise the wait for the next sample. The capture thread logs `warm stream opened/reopened reason=launch|stream-error|preference|device-changed` only when it actually opens a device. The stage line repeats both as `keydown_overlay_ms` and `keydown_first_sample_ms`. `stop` is draining the buffer. `encode` is trim, gain, resample, and FLAC (or WAV). `fmt` is `flac` or `wav`. `groq` is the Whisper response. `tries` is 1, or 2 when a low-confidence result was retried. `cleanup` is the Groq chat call, or the local edit when the model is skipped. `cleanup_why` is `applied model=…` when that call's text was pasted, `applied after retry (...)` when the second call was the one pasted, `model missing: …` when every model returned 404, or the reason it was not (`off`, `verbatim`, `empty`, `rejected …`, or the Groq error, with `retry:` when both calls failed). `paste` is clipboard write, Ctrl+V, and restore. `release` is from the key-up that ends the take through the paste. `tone` is `casual`, `formal`, `plain`, `verbatim`, or `none` when nothing was said. `language` and `path` are the detected language and the route (`transcribe`, `translate`, or `mixed-llama`). `inserted … cleaned=true` means the Groq cleanup text was pasted. `cleaned=false` means the local edit was pasted; the reason is `cleanup_why` on the stage line.
 
@@ -58,8 +58,11 @@ On Windows:
 
 ```powershell
 npm install
+$env:BOLO_BUILTIN_GROQ_KEY = "gsk_..."   # optional; omit to require the user's own key
 npm run tauri build
 ```
+
+`BOLO_BUILTIN_GROQ_KEY` is read by `src-tauri/build.rs` at build time and XOR'd into the binary. It is not a string literal in `cadence.exe`, and it is never committed. `option_env!` is not used in the application crate, because that macro would embed the plaintext key. Without the variable, the app behaves as before and asks for a key. `scripts/build-website.ps1` copies only the NSIS `setup.exe` into `website/downloads` and writes that download into `website/version.json`.
 
 The installer product name is Bolo.com. The app icon is the Urdu word بولو (Bolo, speak) in gold Nastaliq on a dark tile, with sound waves beside it, from `src-tauri/icons/icon-source.png` (1024×1024). `npm run tauri icon src-tauri/icons/icon-source.png` regenerates the icon set. `python3 scripts/render-icon.py` runs that and redraws the 16, 24, and 32 pixel sizes with a larger word and the waves omitted, so the letters stay readable. That icon is the exe, the tray, the window, the NSIS setup and uninstaller, and the WiX product icon shown in Add/Remove Programs. The settings sidebar and the installer artwork use the horizontal lockup: the tile, Bolo.com, and بولو.
 

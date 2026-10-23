@@ -515,6 +515,36 @@ mod carryover {
     }
 
     #[test]
+    fn saved_settings_and_history_never_store_an_api_key() {
+        let dir = std::env::temp_dir().join(format!("bolo-settings-nokey-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        save_settings(&dir, &Settings::default()).unwrap();
+        save_history(
+            &dir,
+            &[HistoryEntry {
+                id: "one".into(),
+                text: "ship the notes to Priya".into(),
+                created_unix_ms: 1,
+                model: WHISPER_TURBO.into(),
+                cleaned: false,
+                duration_ms: 10,
+            }],
+        )
+        .unwrap();
+        let settings = fs::read_to_string(dir.join("settings.json")).unwrap();
+        let history = fs::read_to_string(dir.join("history.json")).unwrap();
+        for raw in [&settings, &history, &serde_json::to_string(&Settings::default()).unwrap()] {
+            let lower = raw.to_ascii_lowercase();
+            assert!(!lower.contains("gsk_"), "{raw}");
+            assert!(!lower.contains("apikey"), "{raw}");
+            assert!(!lower.contains("groqkey"), "{raw}");
+            assert!(!lower.contains("builtinkey"), "{raw}");
+            assert!(!lower.contains("bolo_builtin"), "{raw}");
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn credential_targets_still_name_cadence() {
         assert!(crate::credentials::CADENCE_TARGET.contains("com.cadence.dictation"));
         assert!(crate::credentials::TARGET.starts_with("com.bolo.dictation"));

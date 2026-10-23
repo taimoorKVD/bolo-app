@@ -232,7 +232,7 @@ function buildNav(draft: Draft): HTMLElement {
   }
   const pills = el("div", "pills");
   pills.append(
-    pill("key", "Key", draft.keyStatus.configured ? draft.keyStatus.hint ?? "Saved" : "Not set", draft.keyStatus.configured ? "good" : "warn"),
+    pill("key", "Key", keyPill(draft.keyStatus).value, keyPill(draft.keyStatus).tone),
     pill("hotkey", "Hotkey", formatHotkey(draft.settings.hotkey), "neutral"),
     pill("mic", "Mic", micSummary(draft).value, "neutral"),
     pill("engine", "Engine", draft.lastEngine, "good"),
@@ -262,7 +262,8 @@ function refreshPills(draft: Draft): void {
   const key = document.querySelector<HTMLElement>('[data-pill="key"]');
   const hotkey = document.querySelector<HTMLElement>('[data-pill="hotkey"]');
   const mic = document.querySelector<HTMLElement>('[data-pill="mic"]');
-  setPill(key, draft.keyStatus.configured ? draft.keyStatus.hint ?? "Saved" : "Not set", draft.keyStatus.configured ? "good" : "warn");
+  const keyText = keyPill(draft.keyStatus);
+  setPill(key, keyText.value, keyText.tone);
   setPill(hotkey, formatHotkey(draft.settings.hotkey), "neutral");
   setPill(mic, micSummary(draft).value, "neutral");
   const engine = document.querySelector<HTMLElement>('[data-pill="engine"]');
@@ -371,8 +372,11 @@ function generalPanel(draft: Draft): HTMLElement {
   const panel = panelEl(
     "general",
     "Account",
-    "The Groq key stays in Windows Credential Manager. It is never written into the settings file.",
+    "Your own Groq key stays in Windows Credential Manager. It is never written into the settings file.",
   );
+  const ownLabel = el("p", "own-key-label", "Use my own Groq API key");
+  ownLabel.dataset.ownKeyLabel = "true";
+  ownLabel.hidden = !draft.keyStatus.builtin;
   const row = el("div", "key-row");
   const input = document.createElement("input");
   input.type = "password";
@@ -384,9 +388,12 @@ function generalPanel(draft: Draft): HTMLElement {
   input.setAttribute("aria-label", "Groq API key");
   input.dataset.apiKey = "true";
   const saveKey = button("Save key", "primary");
-  const remove = button("Remove", "ghost");
+  const remove = button(draft.keyStatus.builtin ? "Return to built-in key" : "Remove", "ghost");
+  remove.dataset.keyClear = "true";
+  remove.hidden = draft.keyStatus.builtin && !draft.keyStatus.configured;
   remove.disabled = !draft.keyStatus.configured;
   const note = el("p", "field-note");
+  note.dataset.keyNote = "true";
   note.textContent = keyNote(draft.keyStatus);
   if (draft.keyStatus.error) note.classList.add("bad");
   saveKey.addEventListener("click", () => {
@@ -395,10 +402,7 @@ function generalPanel(draft: Draft): HTMLElement {
       try {
         draft.keyStatus = await api.setApiKey(input.value);
         input.value = "";
-        note.textContent = `Saved in the OS credential store ${draft.keyStatus.hint ?? ""}.`;
-        note.className = "field-note good";
-        remove.disabled = false;
-        refreshPills(draft);
+        syncKeyControls(draft);
       } catch (error) {
         note.textContent = messageOf(error);
         note.className = "field-note bad";
@@ -411,11 +415,9 @@ function generalPanel(draft: Draft): HTMLElement {
     void (async () => {
       try {
         await api.clearApiKey();
-        draft.keyStatus = { configured: false, hint: null, error: null };
-        note.textContent = "API key removed from this PC, including the previous Cadence entry.";
-        note.className = "field-note";
-        remove.disabled = true;
-        refreshPills(draft);
+        draft.keyStatus = await api.apiKeyStatus();
+        input.value = "";
+        syncKeyControls(draft);
       } catch (error) {
         note.textContent = messageOf(error);
         note.className = "field-note bad";
@@ -431,8 +433,9 @@ function generalPanel(draft: Draft): HTMLElement {
   );
   row.append(input, saveKey, remove);
   panel.append(
-    row,
     note,
+    ownLabel,
+    row,
     link,
     toggle(
       "Launch at startup",
@@ -1112,12 +1115,7 @@ async function save(draft: Draft, form: HTMLFormElement): Promise<void> {
     if (keyInput && keyInput.value.trim()) {
       draft.keyStatus = await api.setApiKey(keyInput.value);
       keyInput.value = "";
-      const keyNoteEl = form.querySelector<HTMLElement>(".key-row + .field-note");
-      if (keyNoteEl) {
-        keyNoteEl.textContent = `Saved in the OS credential store ${draft.keyStatus.hint ?? ""}.`;
-        keyNoteEl.className = "field-note good";
-      }
-      refreshPills(draft);
+      syncKeyControls(draft);
     }
     await api.saveSettings(draft.settings);
     draft.dirty = false;
@@ -1161,9 +1159,37 @@ function markDirty(draft: Draft): void {
   }
 }
 
+function keyPill(status: ApiKeyStatus): { value: string; tone: string } {
+  if (status.configured) return { value: status.hint ?? "Saved", tone: "good" };
+  if (status.builtin) return { value: "Built-in", tone: "good" };
+  return { value: "Not set", tone: "warn" };
+}
+
+function syncKeyControls(draft: Draft): void {
+  const note = document.querySelector<HTMLElement>("[data-key-note]");
+  if (note) {
+    note.textContent = keyNote(draft.keyStatus);
+    note.className = draft.keyStatus.error ? "field-note bad" : "field-note";
+  }
+  const clear = document.querySelector<HTMLButtonElement>("[data-key-clear]");
+  if (clear) {
+    clear.textContent = draft.keyStatus.builtin ? "Return to built-in key" : "Remove";
+    clear.hidden = draft.keyStatus.builtin && !draft.keyStatus.configured;
+    clear.disabled = !draft.keyStatus.configured;
+  }
+  const label = document.querySelector<HTMLElement>("[data-own-key-label]");
+  if (label) label.hidden = !draft.keyStatus.builtin;
+  refreshPills(draft);
+}
+
 function keyNote(status: ApiKeyStatus): string {
   if (status.error) return status.error;
-  if (status.configured) return `Key ${status.hint ?? ""} is in the OS credential store. A key saved by Cadence is copied forward.`;
+  if (status.configured) {
+    const stored = `Key ${status.hint ?? ""} is in the OS credential store.`;
+    if (status.builtin) return `${stored} Bolo.com is using it instead of the built-in key.`;
+    return `${stored} A key saved by Cadence is copied forward.`;
+  }
+  if (status.builtin) return "Using Bolo.com built-in key";
   return "Paste a key from console.groq.com. Nothing is sent until you dictate.";
 }
 

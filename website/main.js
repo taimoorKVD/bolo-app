@@ -44,15 +44,9 @@ function applyRelease(release) {
     node.textContent = requirements;
   });
   const nsis = release.downloads && release.downloads.nsis && release.downloads.nsis.href;
-  const msi = release.downloads && release.downloads.msi && release.downloads.msi.href;
   if (nsis) {
     document.querySelectorAll("[data-download='nsis']").forEach((node) => {
       node.setAttribute("href", nsis);
-    });
-  }
-  if (msi) {
-    document.querySelectorAll("[data-download='msi']").forEach((node) => {
-      node.setAttribute("href", msi);
     });
   }
 }

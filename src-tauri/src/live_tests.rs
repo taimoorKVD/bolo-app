@@ -92,6 +92,7 @@ fn live_whisper_transcribes_the_fixture() {
         transcribe::WHISPER_TURBO,
         "en",
         None,
+        false,
     ))
     .expect("transcribe");
     assert_phrase(&text.text);
@@ -110,6 +111,7 @@ fn live_llama_cleanup_applies_a_spoken_correction() {
         Tone::Plain,
         false,
         cleanup::CLEANUP_MODEL,
+        false,
     ));
     assert!(
         outcome.used_model,
@@ -136,6 +138,7 @@ fn live_pipeline_trims_encodes_transcribes_and_strips_fillers() {
         transcribe::WHISPER_TURBO,
         "en",
         None,
+        false,
     ))
     .expect("transcribe");
     let cleaned = cleanup::strip_fillers(&transcript.text);
@@ -199,6 +202,7 @@ fn live_latency_stages_stay_under_the_budget() {
         transcribe::WHISPER_TURBO,
         "en",
         transcribe::whisper_prompt(&["Bolo.com".into()]),
+        false,
     ))
     .expect("transcribe");
     let groq_ms = groq_started.elapsed().as_millis();
@@ -211,6 +215,7 @@ fn live_latency_stages_stay_under_the_budget() {
         Tone::Plain,
         false,
         cleanup::CLEANUP_MODEL,
+        false,
     ));
     let cleanup_ms = cleanup_started.elapsed().as_millis();
     eprintln!(
