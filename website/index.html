@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Bolo.com — speak anywhere in Windows</title>
+    <meta
+      name="description"
+      content="Bolo.com is push-to-talk dictation for Windows. Hold Ctrl+Win, speak in any language including Urdu, and the text lands at your cursor."
+    />
+    <meta name="theme-color" content="#100F0C" />
+    <meta property="og:title" content="Bolo.com — بولو, speak" />
+    <meta
+      property="og:description"
+      content="Speak anywhere in Windows. The text lands at your cursor."
+    />
+    <meta property="og:type" content="website" />
+    <meta property="og:image" content="assets/icon.png" />
+    <meta property="og:locale" content="en_US" />
+    <meta name="twitter:card" content="summary" />
+    <meta name="twitter:title" content="Bolo.com — بولو, speak" />
+    <meta
+      name="twitter:description"
+      content="Speak anywhere in Windows. The text lands at your cursor."
+    />
+    <meta name="twitter:image" content="assets/icon.png" />
+    <link rel="icon" href="assets/favicon.ico" sizes="any" />
+    <link rel="icon" href="assets/favicon-32.png" type="image/png" sizes="32x32" />
+    <link rel="apple-touch-icon" href="assets/icon-256.png" />
+    <link rel="stylesheet" href="styles.css" />
+    <script type="application/json" id="bolo-release">
+{
+  "name": "Bolo.com",
+  "version": "0.1.0",
+  "requirements": "Windows 10 or 11, 64-bit",
+  "downloads": {
+    "nsis": {
+      "href": "downloads/Bolo.com_0.1.0_x64-setup.exe",
+      "bytes": null
+    },
+    "msi": {
+      "href": "downloads/Bolo.com_0.1.0_x64_en-US.msi",
+      "bytes": null
+    }
+  }
+}
+    </script>
+  </head>
+  <body>
+    <a class="skip" href="#main">Skip to content</a>
+    <header class="site-header">
+      <div class="wrap header-bar">
+        <a class="brand" href="#top">
+          <img src="assets/lockup.svg" alt="Bolo.com" width="168" height="48" />
+        </a>
+        <button class="nav-toggle" type="button" aria-expanded="false" aria-controls="site-nav">
+          <span class="sr-only">Menu</span>
+          <span class="nav-toggle-bars" aria-hidden="true"></span>
+        </button>
+        <nav id="site-nav" class="site-nav" aria-label="Page">
+          <a href="#product">Product</a>
+          <a href="#how">How it works</a>
+          <a href="#privacy">Privacy</a>
+          <a href="#faq">FAQ</a>
+          <a class="button button-small" data-download="nsis" href="downloads/Bolo.com_0.1.0_x64-setup.exe">Download</a>
+        </nav>
+      </div>
+    </header>
+
+    <main id="main">
+      <section class="hero wrap" id="top" aria-labelledby="hero-title">
+        <div class="hero-copy">
+          <img class="hero-mark" src="assets/icon-256.png" alt="" width="72" height="72" />
+          <p class="eyebrow">Windows dictation</p>
+          <h1 id="hero-title">Bolo <span class="dash">—</span> <bdi lang="ur">بولو</bdi>, speak</h1>
+          <p class="lede">Speak anywhere in Windows. The text lands at your cursor.</p>
+          <div class="cta-row">
+            <a class="button" data-download="nsis" href="downloads/Bolo.com_0.1.0_x64-setup.exe">Download for Windows</a>
+            <a class="text-link" data-download="msi" href="downloads/Bolo.com_0.1.0_x64_en-US.msi">MSI package</a>
+          </div>
+          <p class="release-meta">
+            <span data-field="version">Version 0.1.0</span>
+            <span data-field="size">Installer size is published with the build</span>
+            <span data-field="requirements">Windows 10 or 11, 64-bit</span>
+          </p>
+        </div>
+
+        <div class="stage">
+          <div class="window">
+            <div class="window-bar">
+              <img src="assets/favicon-32.png" alt="" width="16" height="16" />
+              <span>Notes</span>
+            </div>
+            <p class="editor-line">
+              <span id="demo-text"></span><span class="caret" aria-hidden="true"></span>
+            </p>
+          </div>
+          <div class="pill" id="demo-pill" data-phase="listening">
+            <span class="lamp" aria-hidden="true"></span>
+            <strong id="demo-label">Listening</strong>
+            <span class="bars" aria-hidden="true">
+              <span></span><span></span><span></span><span></span><span></span><span></span><span></span>
+            </span>
+            <span class="timer" id="demo-timer">0:01</span>
+          </div>
+          <p class="stage-caption" id="demo-status">Listening, then transcribing, then inserted at the cursor.</p>
+        </div>
+      </section>
+
+      <section class="band" id="product" aria-labelledby="product-title">
+        <div class="wrap">
+          <div class="section-head">
+            <p class="eyebrow">Product</p>
+            <h2 id="product-title">Dictation that stays out of the way</h2>
+            <p class="section-lede">
+              Bolo.com lives in the system tray. Hold a key in whatever app has the caret, speak, and let go.
+            </p>
+          </div>
+          <ul class="features">
+            <li>
+              <h3>Instant push-to-talk</h3>
+              <p>Ctrl+Win is the default. The microphone stays open, so the pill says Listening as the key goes down.</p>
+            </li>
+            <li>
+              <h3>Any language to English</h3>
+              <p>Urdu, Roman Urdu, mixed speech, and other languages come back in English. Or keep the language you spoke.</p>
+            </li>
+            <li>
+              <h3>Cleanup, or verbatim</h3>
+              <p>Cleanup punctuates and applies spoken corrections without adding words. Verbatim pastes every word, including um and uh.</p>
+            </li>
+            <li>
+              <h3>Every app</h3>
+              <p>The transcript is pasted at the caret. If the field cannot take a paste, Bolo.com types it.</p>
+            </li>
+            <li>
+              <h3>Offline fallback</h3>
+              <p>If Groq is rate limiting or unreachable, whisper.cpp on this PC transcribes the take and the next one tries Groq again.</p>
+            </li>
+            <li>
+              <h3>Personal dictionary</h3>
+              <p>Names and spellings you care about are prompted exactly, and capitalized names from your dictation are remembered.</p>
+            </li>
+            <li>
+              <h3>Paste the last take</h3>
+              <p>Ctrl+Win+V inserts the previous transcript again. Change that chord in Settings.</p>
+            </li>
+            <li>
+              <h3>Long dictation</h3>
+              <p>A long take is cut on pauses and transcribed while you are still speaking. There is no length cap.</p>
+            </li>
+          </ul>
+        </div>
+      </section>
+
+      <section class="wrap steps-section" id="how" aria-labelledby="how-title">
+        <div class="section-head">
+          <p class="eyebrow">How it works</p>
+          <h2 id="how-title">Three beats, then the caret moves on</h2>
+        </div>
+        <ol class="steps">
+          <li>
+            <span class="step-index">01</span>
+            <h3>Hold Ctrl+Win</h3>
+            <p>Listening is on screen immediately. The stream was already warm, with about a second of pre-roll, so the first words are not clipped.</p>
+          </li>
+          <li>
+            <span class="step-index">02</span>
+            <h3>Speak, then release</h3>
+            <p>English, Urdu, Roman Urdu, or a mix. A short tap can wait for a second press. A normal hold stops the moment you let go.</p>
+          </li>
+          <li>
+            <span class="step-index">03</span>
+            <h3>Read it where you were typing</h3>
+            <p>The words land at the cursor. Output is English unless you chose Same as spoken. Paste that take again with Ctrl+Win+V.</p>
+          </li>
+        </ol>
+      </section>
+
+      <section class="band" id="privacy" aria-labelledby="privacy-title">
+        <div class="wrap privacy">
+          <div>
+            <p class="eyebrow">Privacy</p>
+            <h2 id="privacy-title">Your audio does not sit on a Bolo.com server</h2>
+            <p class="section-lede">
+              Bolo.com has no account and no telemetry. The only network path for a take is Groq, using the key on this PC.
+            </p>
+          </div>
+          <ul class="facts">
+            <li>
+              <h3>Groq, and nowhere else</h3>
+              <p>Audio and the transcript go to Groq. No other provider is used. If Groq cannot take the request, the same audio stays on this PC.</p>
+            </li>
+            <li>
+              <h3>History is a local file</h3>
+              <p>The last 50 transcripts can stay on this PC. Turn that off, or clear them. A take’s audio is kept only until the paste is confirmed.</p>
+            </li>
+            <li>
+              <h3>No telemetry</h3>
+              <p>There is no analytics call home. The diagnostic log records durations and errors, not the API key and not the transcript.</p>
+            </li>
+            <li>
+              <h3>The key stays in Windows</h3>
+              <p>The Groq key is a local credential in Windows Credential Manager. It is not written into settings.json.</p>
+            </li>
+          </ul>
+        </div>
+      </section>
+
+      <section class="wrap faq-section" id="faq" aria-labelledby="faq-title">
+        <div class="section-head">
+          <p class="eyebrow">FAQ</p>
+          <h2 id="faq-title">Before you install</h2>
+        </div>
+        <div class="faq">
+          <details>
+            <summary>SmartScreen says Windows protected your PC</summary>
+            <p>
+              The installer is unsigned. SmartScreen will say it prevented an unrecognized app from starting.
+              Choose <strong>More info</strong>, then <strong>Run anyway</strong>. That warning is expected until the binary is signed.
+            </p>
+          </details>
+          <details>
+            <summary>Do I need a Groq API key?</summary>
+            <p>
+              Yes. Create one at <a href="https://console.groq.com/keys">console.groq.com/keys</a> and paste it into Bolo.com once.
+              It is stored in Windows Credential Manager on this PC. It is not written into the settings file and it is not logged.
+            </p>
+          </details>
+          <details>
+            <summary>Is there a free tier?</summary>
+            <p>
+              Bolo.com does not charge a subscription and does not run a server of its own. Groq offers a free tier for its API.
+              What you can transcribe follows the limits on your Groq account.
+            </p>
+          </details>
+          <details>
+            <summary>What does the PC need?</summary>
+            <p>
+              Windows 10 or 11, 64-bit. Windows 11 already includes the WebView2 runtime. On Windows 10 the installer can fetch it.
+              The setup is per-user and does not need an administrator account. A microphone is required. An elevated window, such as a terminal opened as Administrator, will not receive dictation.
+            </p>
+          </details>
+        </div>
+      </section>
+
+      <section class="closing wrap" aria-labelledby="closing-title">
+        <div class="closing-card">
+          <img src="assets/icon-128.png" alt="" width="56" height="56" />
+          <h2 id="closing-title">Hold a key. Speak. Let go.</h2>
+          <p>Bolo — <bdi lang="ur">بولو</bdi>, speak. The words land at the cursor.</p>
+          <div class="cta-row">
+            <a class="button" data-download="nsis" href="downloads/Bolo.com_0.1.0_x64-setup.exe">Download for Windows</a>
+            <a class="text-link" data-download="msi" href="downloads/Bolo.com_0.1.0_x64_en-US.msi">MSI package</a>
+          </div>
+          <p class="release-meta">
+            <span data-field="version">Version 0.1.0</span>
+            <span data-field="size">Installer size is published with the build</span>
+            <span data-field="requirements">Windows 10 or 11, 64-bit</span>
+          </p>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <div class="wrap footer-bar">
+        <img src="assets/lockup.svg" alt="" width="140" height="40" />
+        <p>Bolo.com · <bdi lang="ur">بولو</bdi> · push-to-talk dictation for Windows.</p>
+        <nav aria-label="Footer">
+          <a href="#privacy">Privacy</a>
+          <a href="#faq">FAQ</a>
+          <a data-download="nsis" href="downloads/Bolo.com_0.1.0_x64-setup.exe">Download</a>
+        </nav>
+      </div>
+    </footer>
+    <script src="main.js"></script>
+  </body>
+</html>
