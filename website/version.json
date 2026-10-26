@@ -1,11 +1,11 @@
 {
-  "name": "Bolo.com",
+  "name": "Bolo",
   "version": "0.1.0",
   "requirements": "Windows 10 or 11, 64-bit",
   "downloads": {
     "nsis": {
-      "href": "downloads/Bolo.com_0.1.0_x64-setup.exe",
-      "bytes": null
+      "href": "downloads/Bolo_0.1.0_x64-setup.exe",
+      "bytes": 2536067
     }
   }
 }

@@ -63,7 +63,7 @@ const NAV: Array<[SectionId, string, string]> = [
   ["dictionary", "Dictionary", "Names"],
   ["history", "History", "On this PC"],
   ["privacy", "Privacy", "Local only"],
-  ["about", "About", "Bolo.com"],
+  ["about", "About", "Bolo"],
 ];
 
 function normalizeSettings(settings: Settings): Settings {
@@ -332,8 +332,8 @@ function liveBanner(draft: Draft): HTMLElement {
     error: "Dictation failed",
   };
   banner.textContent = draft.live.message
-    ? `${titles[draft.live.phase] ?? "Bolo.com"} — ${draft.live.message}`
-    : titles[draft.live.phase] ?? "Bolo.com";
+    ? `${titles[draft.live.phase] ?? "Bolo"} — ${draft.live.message}`
+    : titles[draft.live.phase] ?? "Bolo";
   if (draft.live.phase === "error") banner.classList.add("bad");
   return banner;
 }
@@ -439,7 +439,7 @@ function generalPanel(draft: Draft): HTMLElement {
     link,
     toggle(
       "Launch at startup",
-      "Bolo.com starts in the tray for this Windows user. The settings window stays closed until you open it.",
+      "Bolo starts in the tray for this Windows user. The settings window stays closed until you open it.",
       draft.settings.launchAtStartup,
       (checked) => {
         draft.settings.launchAtStartup = checked;
@@ -522,7 +522,7 @@ function hotkeyPanel(draft: Draft): HTMLElement {
     el(
       "p",
       "field-note",
-      "Press this when a take didn't land, or after Bolo.com starts again. The audio stays on this PC until a paste is confirmed.",
+      "Press this when a take didn't land, or after Bolo starts again. The audio stays on this PC until a paste is confirmed.",
     ),
   );
   panel.append(
@@ -624,7 +624,7 @@ function micPanel(draft: Draft): HTMLElement {
   const panel = panelEl(
     "microphone",
     "Microphone",
-    "System default follows whichever microphone Windows is using. Pick one to prefer it. If you unplug it, Bolo.com uses the default and switches back when it returns.",
+    "System default follows whichever microphone Windows is using. Pick one to prefer it. If you unplug it, Bolo uses the default and switches back when it returns.",
   );
   const meter = el("div", "meter");
   meter.setAttribute("role", "meter");
@@ -723,7 +723,7 @@ function micSummary(draft: Draft): { value: string; note: string } {
     if (!def) {
       return {
         value: "No microphone",
-        note: "No microphone is connected. Plug one in and Bolo.com will use it automatically.",
+        note: "No microphone is connected. Plug one in and Bolo will use it automatically.",
       };
     }
     return {
@@ -735,7 +735,7 @@ function micSummary(draft: Draft): { value: string; note: string } {
   if (match) {
     return {
       value: match.name,
-      note: `In use: ${match.name}. If you unplug it, Bolo.com uses the system default and switches back when it returns.`,
+      note: `In use: ${match.name}. If you unplug it, Bolo uses the system default and switches back when it returns.`,
     };
   }
   if (!def) {
@@ -864,7 +864,7 @@ function languagePanel(draft: Draft): HTMLElement {
     el(
       "p",
       "field-note",
-      "If Groq is rate limiting, down, or unreachable, Bolo.com transcribes this take on the PC with whisper.cpp and tries Groq again on the next one. The model downloads the first time it's needed.",
+      "If Groq is rate limiting, down, or unreachable, Bolo transcribes this take on the PC with whisper.cpp and tries Groq again on the next one. The model downloads the first time it's needed.",
     ),
   );
   panel.append(grid, langLabel, outputLabel, offlineLabel);
@@ -925,7 +925,7 @@ function cleanupPanel(draft: Draft): HTMLElement {
     el(
       "p",
       "field-note",
-      "Used for cleanup and for Urdu or Roman Urdu that is translated into English. A removed model returns 404 and Bolo.com tries the next one instead of skipping cleanup.",
+      "Used for cleanup and for Urdu or Roman Urdu that is translated into English. A removed model returns 404 and Bolo tries the next one instead of skipping cleanup.",
     ),
   );
   panel.append(modelLabel);
@@ -936,7 +936,7 @@ function dictionaryPanel(draft: Draft): HTMLElement {
   const panel = panelEl(
     "dictionary",
     "Dictionary",
-    "One term per line. Whisper is prompted to spell them as written. Bolo.com also remembers capitalized names from what you dictate.",
+    "One term per line. Whisper is prompted to spell them as written. Bolo also remembers capitalized names from what you dictate.",
   );
   const area = document.createElement("textarea");
   area.rows = 8;
@@ -973,7 +973,7 @@ function privacyPanel(draft: Draft): HTMLElement {
   const panel = panelEl(
     "privacy",
     "Privacy",
-    "Audio and the transcript go to Groq, using the key stored on this PC, unless Groq can't take the request. Then the same audio stays on this PC and whisper.cpp transcribes it. Bolo.com does not store audio or text on a server of its own. A take's audio stays in the local spool until the paste is confirmed. There is no telemetry.",
+    "Audio and the transcript go to Groq, using the key stored on this PC, unless Groq can't take the request. Then the same audio stays on this PC and whisper.cpp transcribes it. Bolo does not store audio or text on a server of its own. A take's audio stays in the local spool until the paste is confirmed. There is no telemetry.",
   );
   const list = el("div", "history-list");
   list.dataset.historyPrivacy = "true";
@@ -1015,7 +1015,7 @@ async function clearHistory(draft: Draft, list: HTMLElement, host: HTMLElement):
 function aboutPanel(draft: Draft): HTMLElement {
   const panel = panelEl(
     "about",
-    "About Bolo.com",
+    "About Bolo",
     "Push-to-talk dictation for Windows. Hold the hotkey, speak, and the transcript is pasted at the cursor.",
   );
   const facts = el("dl", "facts");
@@ -1186,10 +1186,10 @@ function keyNote(status: ApiKeyStatus): string {
   if (status.error) return status.error;
   if (status.configured) {
     const stored = `Key ${status.hint ?? ""} is in the OS credential store.`;
-    if (status.builtin) return `${stored} Bolo.com is using it instead of the built-in key.`;
+    if (status.builtin) return `${stored} Bolo is using it instead of the built-in key.`;
     return `${stored} A key saved by Cadence is copied forward.`;
   }
-  if (status.builtin) return "Using Bolo.com built-in key";
+  if (status.builtin) return "Using Bolo built-in key";
   return "Paste a key from console.groq.com. Nothing is sent until you dictate.";
 }
 
@@ -1235,7 +1235,7 @@ function logoHeading(): HTMLElement {
   const img = document.createElement("img");
   img.className = "brand-lockup";
   img.src = lockupUrl;
-  img.alt = "Bolo.com";
+  img.alt = "Bolo";
   heading.append(img);
   return heading;
 }

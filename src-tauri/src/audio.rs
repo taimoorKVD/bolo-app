@@ -1,6 +1,6 @@
 //! Microphone capture, silence trimming, and 16 kHz mono encoding.
 //!
-//! Groq accepts WAV and FLAC. Bolo.com uploads FLAC when the encoder succeeds
+//! Groq accepts WAV and FLAC. Bolo uploads FLAC when the encoder succeeds
 //! and falls back to 16-bit PCM WAV. One minute of mono 16 kHz WAV is about
 //! 1.9 MB; FLAC is much smaller, so the upload finishes sooner.
 

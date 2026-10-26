@@ -1,4 +1,4 @@
-# Run Bolo.com's Windows checks and print a pass/fail report.
+# Run Bolo's Windows checks and print a pass/fail report.
 # Live Groq tests run only when GROQ_API_KEY is set in the environment.
 # Each group has its own time limit. A hang is killed so the later groups still run.
 # Usage, from the repo root or from anywhere:
@@ -8,7 +8,7 @@ $ErrorActionPreference = "Continue"
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 
-Write-Host "Bolo.com self-test"
+Write-Host "Bolo self-test"
 Write-Host "Repo: $root"
 if ([string]::IsNullOrWhiteSpace($env:GROQ_API_KEY)) {
     Write-Host "GROQ_API_KEY is not set. Live Whisper, Llama, and latency tests will SKIP. Encode timing still runs."
@@ -274,7 +274,7 @@ function Invoke-StartupSmoke {
         if (-not $proc.WaitForExit($runLimit * 1000)) {
             $detail = "The bundled app did not report get_settings within ${runLimit}s."
         } elseif (-not (Test-Path $result)) {
-            $detail = "No smoke result (exit $($proc.ExitCode)). Bolo.com may already be running, or the settings page never invoked get_settings."
+            $detail = "No smoke result (exit $($proc.ExitCode)). Bolo may already be running, or the settings page never invoked get_settings."
         } else {
             $raw = [System.IO.File]::ReadAllText($result).Trim()
             if (-not $raw.StartsWith("OK ")) {
@@ -605,7 +605,7 @@ function Test-DisplayedIcon {
             }
         }
         if (-not $matched) {
-            Write-Host "$Label does not display the $($want.Width)px Bolo.com icon."
+            Write-Host "$Label does not display the $($want.Width)px Bolo icon."
             $ok = $false
         }
     }
@@ -618,13 +618,13 @@ function Test-DisplayedIcon {
             }
         }
         if (-not $known) {
-            Write-Host "$Label is showing a $($got.Width)px image that is not the Bolo.com icon."
+            Write-Host "$Label is showing a $($got.Width)px image that is not the Bolo icon."
             $ok = $false
         }
     }
     if ($ok) {
         $widths = ($group | ForEach-Object { $_.Width }) -join ", "
-        Write-Host "$Label displays the Bolo.com icon ($widths)."
+        Write-Host "$Label displays the Bolo icon ($widths)."
     }
     return $ok
 }

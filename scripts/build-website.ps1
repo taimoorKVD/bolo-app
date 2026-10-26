@@ -37,7 +37,7 @@ if (-not $nsisSource) {
 
 New-Item -ItemType Directory -Force -Path $downloads | Out-Null
 
-$nsisName = "Bolo.com_${version}_x64-setup.exe"
+$nsisName = "Bolo_${version}_x64-setup.exe"
 $nsisDest = Join-Path $downloads $nsisName
 
 Copy-Item -LiteralPath $nsisSource.FullName -Destination $nsisDest -Force
@@ -46,7 +46,7 @@ $nsisBytes = (Get-Item -LiteralPath $nsisDest).Length
 
 $json = @"
 {
-  "name": "Bolo.com",
+  "name": "Bolo",
   "version": "$version",
   "requirements": "Windows 10 or 11, 64-bit",
   "downloads": {

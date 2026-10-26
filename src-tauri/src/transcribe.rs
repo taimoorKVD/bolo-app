@@ -79,7 +79,7 @@ pub fn http_client() -> &'static reqwest::Client {
             .http2_keep_alive_interval(Duration::from_secs(20))
             .http2_keep_alive_timeout(Duration::from_secs(10))
             .http2_keep_alive_while_idle(true)
-            .user_agent(concat!("Bolo.com/", env!("CARGO_PKG_VERSION")))
+            .user_agent(concat!("Bolo/", env!("CARGO_PKG_VERSION")))
             .build()
             .expect("http client")
     })
@@ -612,11 +612,11 @@ mod tests {
         assert!(prompt.starts_with("Dictation transcript."));
         assert!(prompt.contains("Supercalifragilistic"));
         let with_recent = whisper_prompt_with(
-            &["Bolo.com".into()],
+            &["Bolo".into()],
             &["Ship the notes to Priya tomorrow morning before the review.".into()],
         )
         .unwrap();
-        assert!(with_recent.contains("Bolo.com"));
+        assert!(with_recent.contains("Bolo"));
         assert!(with_recent.contains("Recent dictation"));
         assert!(with_recent.contains("Priya"));
         assert!(with_recent.chars().count() <= 800);

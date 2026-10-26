@@ -2,7 +2,7 @@
 //!
 //! The primary path copies the transcript to the clipboard, sends Ctrl+V, then
 //! puts the previous text clipboard back. If the clipboard holds an image, or
-//! the paste simulation fails, Bolo.com types the text instead.
+//! the paste simulation fails, Bolo types the text instead.
 
 use anyhow::{anyhow, Context};
 use arboard::Clipboard;
@@ -953,7 +953,7 @@ impl EditHost {
             let parent = match CreateWindowExW(
                 WINDOW_EX_STYLE::default(),
                 PCWSTR(class_name.as_ptr()),
-                w!("Bolo.com paste"),
+                w!("Bolo paste"),
                 WS_OVERLAPPEDWINDOW,
                 0,
                 0,

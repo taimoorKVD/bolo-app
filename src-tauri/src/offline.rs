@@ -92,7 +92,7 @@ pub async fn transcribe_encoded(config: &Path, model: &str, bytes: &[u8]) -> Res
     if !model_file.exists() {
         prefetch(config.to_path_buf(), model.to_string());
         return Err(format!(
-            "The {} model isn't on this PC yet. Bolo.com is downloading it for the next take.",
+            "The {} model isn't on this PC yet. Bolo is downloading it for the next take.",
             model_label(model)
         ));
     }
@@ -101,7 +101,7 @@ pub async fn transcribe_encoded(config: &Path, model: &str, bytes: &[u8]) -> Res
         None => {
             prefetch(config.to_path_buf(), model.to_string());
             return Err(
-                "whisper.cpp isn't on this PC yet. Bolo.com is downloading it for the next take.".into(),
+                "whisper.cpp isn't on this PC yet. Bolo is downloading it for the next take.".into(),
             );
         }
     };
@@ -262,7 +262,7 @@ async fn fetch(url: &str) -> Result<Vec<u8>, String> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(15 * 60))
         .connect_timeout(Duration::from_secs(15))
-        .user_agent(concat!("Bolo.com/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("Bolo/", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(|err| err.to_string())?;
     let response = client.get(url).send().await.map_err(|err| format!("download failed: {err}"))?;

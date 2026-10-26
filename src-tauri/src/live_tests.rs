@@ -201,7 +201,7 @@ fn live_latency_stages_stay_under_the_budget() {
         wav.bytes,
         transcribe::WHISPER_TURBO,
         "en",
-        transcribe::whisper_prompt(&["Bolo.com".into()]),
+        transcribe::whisper_prompt(&["Bolo".into()]),
         false,
     ))
     .expect("transcribe");

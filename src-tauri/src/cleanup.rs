@@ -618,10 +618,10 @@ pub(crate) fn groq_error_message(status: u16, body: &str, using_builtin: bool) -
         401 | 403 => "Groq rejected the API key. Check it in Settings.".to_string(),
         413 => "The recording was too large to upload.".to_string(),
         429 if using_builtin => {
-            "Bolo.com's built-in key is rate limited right now. Add your own Groq API key in Settings to keep dictating.".to_string()
+            "Bolo's built-in key is rate limited right now. Add your own Groq API key in Settings to keep dictating.".to_string()
         }
         429 => format!(
-            "Groq is rate limiting requests right now ({detail}). Bolo.com will use the on-device model for this take if it's ready, then try Groq again next time."
+            "Groq is rate limiting requests right now ({detail}). Bolo will use the on-device model for this take if it's ready, then try Groq again next time."
         ),
         _ => format!("Groq returned {status}. {detail}"),
     };

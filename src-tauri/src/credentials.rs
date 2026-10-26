@@ -89,7 +89,7 @@ pub fn load_api_key() -> anyhow::Result<Option<String>> {
     if let Some(key) = read_target(TARGET)? {
         return Ok(Some(key));
     }
-    // Cadence stored the key under either of these. Copy it onto the Bolo.com
+    // Cadence stored the key under either of these. Copy it onto the Bolo
     // target and leave the old entry in place until the user clicks Remove.
     for legacy in [CADENCE_TARGET, LEGACY_TARGET] {
         if let Some(key) = read_target(legacy)? {
@@ -148,7 +148,7 @@ impl SecretKey {
         match crate::builtin::select_key_source(own.is_some(), crate::builtin::available()) {
             crate::builtin::KeyChoice::Own => {
                 let Some(value) = own else {
-                    anyhow::bail!("Add a Groq API key in Bolo.com settings.");
+                    anyhow::bail!("Add a Groq API key in Bolo settings.");
                 };
                 Ok(Self {
                     value,
@@ -163,7 +163,7 @@ impl SecretKey {
                 })
             }
             crate::builtin::KeyChoice::Required => {
-                anyhow::bail!("Add a Groq API key in Bolo.com settings.")
+                anyhow::bail!("Add a Groq API key in Bolo settings.")
             }
         }
     }
@@ -183,7 +183,7 @@ impl Drop for SecretKey {
     }
 }
 
-/// Decode a credential blob. keyring 3 writes UTF-16LE. Bolo.com writes UTF-8.
+/// Decode a credential blob. keyring 3 writes UTF-16LE. Bolo writes UTF-8.
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn decode_secret(bytes: &[u8]) -> Option<String> {
     if bytes.is_empty() {
@@ -225,7 +225,7 @@ fn write_blob(target: &str, secret: &[u8]) -> anyhow::Result<()> {
 
     let mut target_w = wide(target);
     let mut user_w = wide(ACCOUNT);
-    let mut comment_w = wide("Bolo.com Groq API key");
+    let mut comment_w = wide("Bolo Groq API key");
     let mut alias_w = wide("");
     let mut blob = secret.to_vec();
     let credential = CREDENTIALW {
@@ -446,7 +446,7 @@ mod tests {
         assert_eq!(loaded.as_deref(), Some(secret));
     }
 
-    /// A key saved by Cadence must load, and a copy must land on the Bolo.com
+    /// A key saved by Cadence must load, and a copy must land on the Bolo
     /// target, without deleting the original entry.
     #[cfg(windows)]
     #[test]

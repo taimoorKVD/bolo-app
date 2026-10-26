@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Rebuild the Bolo.com icon from the Nastaliq master, then simplify 16–32px.
+"""Rebuild the Bolo icon from the Nastaliq master, then simplify 16–32px.
 
 `tauri icon` scales one 1024 source into every size. The sound waves beside
 بولو disappear at 16–32px and crush the word, so those three sizes are drawn
@@ -310,13 +310,13 @@ def installer_art(mark: Image.Image) -> None:
 
     header = Image.new("RGBA", (150, 57), DARK)
     paste_mark(header, mark, (8, 6, 44))
-    draw_text(header, "Bolo.com", (58, 16), ImageFont.truetype(SERIF_BOLD, 20), CREAM)
+    draw_text(header, "Bolo", (58, 16), ImageFont.truetype(SERIF_BOLD, 20), CREAM)
     ImageDraw.Draw(header).line((0, 56, 149, 56), fill=GOLD)
     save_bmp(header, ICONS / "nsis-header.bmp")
 
     side = Image.new("RGBA", (164, 314), DARK)
     paste_mark(side, mark, (34, 36, 96))
-    draw_text(side, "Bolo.com", (32, 148), ImageFont.truetype(SERIF_BOLD, 20), CREAM)
+    draw_text(side, "Bolo", (32, 148), ImageFont.truetype(SERIF_BOLD, 20), CREAM)
     urdu_side = fit_urdu(urdu, 120, 64)
     side.alpha_composite(urdu_side, ((164 - urdu_side.width) // 2, 178))
     draw = ImageDraw.Draw(side)
@@ -327,7 +327,7 @@ def installer_art(mark: Image.Image) -> None:
 
     banner = Image.new("RGBA", (493, 58), DARK)
     paste_mark(banner, mark, (8, 7, 42))
-    draw_text(banner, "Bolo.com", (58, 6), ImageFont.truetype(SERIF_BOLD, 18), CREAM)
+    draw_text(banner, "Bolo", (58, 6), ImageFont.truetype(SERIF_BOLD, 18), CREAM)
     urdu_banner = fit_urdu(urdu, 110, 22)
     banner.alpha_composite(urdu_banner, (60, 27))
     draw_text(banner, "Hold a key. Speak.", (300, 18), ImageFont.truetype(SERIF, 15), MUTED)
@@ -337,10 +337,10 @@ def installer_art(mark: Image.Image) -> None:
     dialog = Image.new("RGBA", (493, 312), DARK)
     ImageDraw.Draw(dialog).rectangle((0, 0, 188, 311), fill=(0x16, 0x14, 0x0F, 255))
     paste_mark(dialog, mark, (46, 70, 96))
-    draw_text(dialog, "Bolo.com", (36, 176), ImageFont.truetype(SERIF_BOLD, 20), CREAM)
+    draw_text(dialog, "Bolo", (36, 176), ImageFont.truetype(SERIF_BOLD, 20), CREAM)
     urdu_dialog = fit_urdu(urdu, 140, 52)
     dialog.alpha_composite(urdu_dialog, ((188 - urdu_dialog.width) // 2, 206))
-    draw_text(dialog, "Bolo.com", (220, 118), ImageFont.truetype(SERIF_BOLD, 28), CREAM)
+    draw_text(dialog, "Bolo", (220, 118), ImageFont.truetype(SERIF_BOLD, 28), CREAM)
     ImageDraw.Draw(dialog).line((220, 162, 400, 162), fill=GOLD)
     draw_text(dialog, "Hold a key. Speak.", (220, 176), ImageFont.truetype(SERIF, 16), MUTED)
     save_bmp(dialog, ICONS / "wix-dialog.bmp")
@@ -363,16 +363,16 @@ def lockup_svg(mark: Image.Image) -> None:
         return "data:image/png;base64," + base64.b64encode(png_bytes(image)).decode("ascii")
 
     text_x = 196
-    svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}" role="img" aria-label="Bolo.com">
+    svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}" role="img" aria-label="Bolo">
   <image href="{uri(scaled)}" x="0" y="16" width="{mark_side}" height="{mark_side}"/>
-  <text x="{text_x}" y="78" fill="#F4EFE6" font-family="Palatino, 'Palatino Linotype', Georgia, 'Liberation Serif', 'Iowan Old Style', serif" font-size="52" font-weight="700">Bolo.com</text>
+  <text x="{text_x}" y="78" fill="#F4EFE6" font-family="Palatino, 'Palatino Linotype', Georgia, 'Liberation Serif', 'Iowan Old Style', serif" font-size="52" font-weight="700">Bolo</text>
   <image href="{uri(urdu)}" x="{text_x}" y="{92}" width="{urdu_w}" height="{urdu_h}"/>
 </svg>
 """
     if WORD.encode() not in svg.encode():
         # The word is painted into the embedded images. Keep the letters in the
         # source as well so a search of the file still finds them.
-        svg = svg.replace("aria-label=\"Bolo.com\"", f"aria-label=\"Bolo.com {WORD}\"")
+        svg = svg.replace("aria-label=\"Bolo\"", f"aria-label=\"Bolo {WORD}\"")
     path = ROOT / "src" / "brand-lockup.svg"
     path.write_text(svg, encoding="utf-8")
     if WORD.encode() not in path.read_bytes() and b"data:image/png;base64," not in path.read_bytes():
@@ -382,12 +382,12 @@ def lockup_svg(mark: Image.Image) -> None:
 def update_readme() -> None:
     path = ROOT / "README.md"
     text = path.read_text(encoding="utf-8")
-    start = text.find("The installer product name is Bolo.com.")
+    start = text.find("The installer product name is Bolo.")
     end = text.find("\n", start)
     if start < 0:
         raise SystemExit("README icon paragraph missing")
     paragraph = (
-        "The installer product name is Bolo.com. The app icon is the Urdu word "
+        "The installer product name is Bolo. The app icon is the Urdu word "
         f"{WORD} (Bolo, speak) in gold Nastaliq on a dark tile, with sound waves beside it, "
         "from `src-tauri/icons/icon-source.png` (1024×1024). "
         "`npm run tauri icon src-tauri/icons/icon-source.png` regenerates the icon set. "
@@ -397,7 +397,7 @@ def update_readme() -> None:
         "so the NSIS setup, Explorer, and Chrome show this icon instead of a generic one. "
         "That icon is the exe, the tray, the window, the NSIS setup and uninstaller, and "
         "the WiX product icon shown in Add/Remove Programs. The settings sidebar and the "
-        f"installer artwork use the horizontal lockup: the tile, Bolo.com, and {WORD}."
+        f"installer artwork use the horizontal lockup: the tile, Bolo, and {WORD}."
     )
     path.write_text(text[:start] + paragraph + text[end:], encoding="utf-8")
 

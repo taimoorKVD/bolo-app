@@ -157,7 +157,7 @@ pub fn run() {
             logbuf::log_line(
                 &dir,
                 "info",
-                &format!("Bolo.com ready, hold {}", display(&settings.hotkey)),
+                &format!("Bolo ready, hold {}", display(&settings.hotkey)),
             );
             micwatch::spawn(app.handle().clone());
             dictation::recover_spool(app.handle());
@@ -165,7 +165,7 @@ pub fn run() {
             Ok(())
         })
         .run(tauri::generate_context!())
-        .expect("error while running Bolo.com");
+        .expect("error while running Bolo");
 }
 
 fn config_dir(app: &tauri::App) -> std::path::PathBuf {
@@ -222,11 +222,11 @@ fn park_offscreen<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) {
 
 fn setup_tray(app: &tauri::AppHandle, hotkey: &hotkey::Hotkey) -> tauri::Result<()> {
     let settings_item = MenuItem::with_id(app, "settings", "Settings", true, None::<&str>)?;
-    let quit_item = MenuItem::with_id(app, "quit", "Quit Bolo.com", true, None::<&str>)?;
+    let quit_item = MenuItem::with_id(app, "quit", "Quit Bolo", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&settings_item, &quit_item])?;
     let mut builder = TrayIconBuilder::with_id("bolo")
         .menu(&menu)
-        .tooltip(format!("Bolo.com — hold {}", display(hotkey)))
+        .tooltip(format!("Bolo — hold {}", display(hotkey)))
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {
             "settings" => show_settings(app),
@@ -263,7 +263,7 @@ fn show_settings(app: &tauri::AppHandle) {
 
 fn update_tooltip(app: &tauri::AppHandle, hotkey: &hotkey::Hotkey) {
     if let Some(tray) = app.tray_by_id("bolo") {
-        let _ = tray.set_tooltip(Some(format!("Bolo.com — hold {}", display(hotkey))));
+        let _ = tray.set_tooltip(Some(format!("Bolo — hold {}", display(hotkey))));
     }
 }
 

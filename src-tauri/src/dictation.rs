@@ -436,7 +436,7 @@ pub fn begin(app: &AppHandle) {
     *lock(&state.last_error) = None;
     let settings = lock(&state.settings).clone();
     if let Some(tray) = app.tray_by_id("bolo") {
-        let _ = tray.set_tooltip(Some(format!("Bolo.com — hold {}", display(&settings.hotkey))));
+        let _ = tray.set_tooltip(Some(format!("Bolo — hold {}", display(&settings.hotkey))));
     }
     // Listening is on screen before the warm thread is asked to do anything.
     // That thread only copies the pre-roll; it does not open the microphone.
@@ -1172,7 +1172,7 @@ fn fail(app: &AppHandle, message: &str) {
     log_line(&state.config_dir, "error", message);
     *lock(&state.last_error) = Some(message.to_string());
     if let Some(tray) = app.tray_by_id("bolo") {
-        let _ = tray.set_tooltip(Some(format!("Bolo.com — {message}")));
+        let _ = tray.set_tooltip(Some(format!("Bolo — {message}")));
     }
     show_problem(app, message, 8_000);
 }

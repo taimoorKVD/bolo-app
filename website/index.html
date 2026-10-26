@@ -3,13 +3,13 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Bolo.com — speak anywhere in Windows</title>
+    <title>Bolo — speak anywhere in Windows</title>
     <meta
       name="description"
-      content="Bolo.com is push-to-talk dictation for Windows. Hold Ctrl+Win, speak in any language including Urdu, and the text lands at your cursor."
+      content="Bolo is push-to-talk dictation for Windows. Hold Ctrl+Win, speak in any language including Urdu, and the text lands at your cursor."
     />
     <meta name="theme-color" content="#100F0C" />
-    <meta property="og:title" content="Bolo.com — بولو, speak" />
+    <meta property="og:title" content="Bolo — بولو, speak" />
     <meta
       property="og:description"
       content="Speak anywhere in Windows. The text lands at your cursor."
@@ -18,7 +18,7 @@
     <meta property="og:image" content="assets/icon.png" />
     <meta property="og:locale" content="en_US" />
     <meta name="twitter:card" content="summary" />
-    <meta name="twitter:title" content="Bolo.com — بولو, speak" />
+    <meta name="twitter:title" content="Bolo — بولو, speak" />
     <meta
       name="twitter:description"
       content="Speak anywhere in Windows. The text lands at your cursor."
@@ -30,24 +30,24 @@
     <link rel="stylesheet" href="styles.css" />
     <script type="application/json" id="bolo-release">
 {
-  "name": "Bolo.com",
+  "name": "Bolo",
   "version": "0.1.0",
   "requirements": "Windows 10 or 11, 64-bit",
   "downloads": {
     "nsis": {
-      "href": "downloads/Bolo.com_0.1.0_x64-setup.exe",
-      "bytes": null
+      "href": "downloads/Bolo_0.1.0_x64-setup.exe",
+      "bytes": 2536067
     }
   }
 }
-    </script>
+</script>
   </head>
   <body>
     <a class="skip" href="#main">Skip to content</a>
     <header class="site-header">
       <div class="wrap header-bar">
         <a class="brand" href="#top">
-          <img src="assets/lockup.svg" alt="Bolo.com" width="168" height="48" />
+          <img src="assets/lockup.svg" alt="Bolo" width="168" height="48" />
         </a>
         <button class="nav-toggle" type="button" aria-expanded="false" aria-controls="site-nav">
           <span class="sr-only">Menu</span>
@@ -58,7 +58,7 @@
           <a href="#how">How it works</a>
           <a href="#privacy">Privacy</a>
           <a href="#faq">FAQ</a>
-          <a class="button button-small" data-download="nsis" href="downloads/Bolo.com_0.1.0_x64-setup.exe">Download</a>
+          <a class="button button-small" data-download="nsis" href="downloads/Bolo_0.1.0_x64-setup.exe">Download</a>
         </nav>
       </div>
     </header>
@@ -71,7 +71,7 @@
           <h1 id="hero-title">Bolo <span class="dash">—</span> <bdi lang="ur">بولو</bdi>, speak</h1>
           <p class="lede">Speak anywhere in Windows. The text lands at your cursor.</p>
           <div class="cta-row">
-            <a class="button" data-download="nsis" href="downloads/Bolo.com_0.1.0_x64-setup.exe">Download for Windows</a>
+            <a class="button" data-download="nsis" href="downloads/Bolo_0.1.0_x64-setup.exe">Download for Windows</a>
           </div>
           <p class="release-meta">
             <span data-field="version">Version 0.1.0</span>
@@ -108,7 +108,7 @@
             <p class="eyebrow">Product</p>
             <h2 id="product-title">Dictation that stays out of the way</h2>
             <p class="section-lede">
-              Bolo.com lives in the system tray. Hold a key in whatever app has the caret, speak, and let go.
+              Bolo lives in the system tray. Hold a key in whatever app has the caret, speak, and let go.
             </p>
           </div>
           <ul class="features">
@@ -126,7 +126,7 @@
             </li>
             <li>
               <h3>Every app</h3>
-              <p>The transcript is pasted at the caret. If the field cannot take a paste, Bolo.com types it.</p>
+              <p>The transcript is pasted at the caret. If the field cannot take a paste, Bolo types it.</p>
             </li>
             <li>
               <h3>Offline fallback</h3>
@@ -176,9 +176,9 @@
         <div class="wrap privacy">
           <div>
             <p class="eyebrow">Privacy</p>
-            <h2 id="privacy-title">Your audio does not sit on a Bolo.com server</h2>
+            <h2 id="privacy-title">Your audio does not sit on a Bolo server</h2>
             <p class="section-lede">
-              Bolo.com has no account and no telemetry. The only network path for a take is Groq, using the key on this PC.
+              Bolo has no account and no telemetry. The only network path for a take is Groq, using the key on this PC.
             </p>
           </div>
           <ul class="facts">
@@ -218,14 +218,14 @@
           <details>
             <summary>Do I need a Groq API key?</summary>
             <p>
-              No. Bolo.com can dictate with its built-in Groq key. Add your own at <a href="https://console.groq.com/keys">console.groq.com/keys</a> if you want requests on your account.
+              No. Bolo can dictate with its built-in Groq key. Add your own at <a href="https://console.groq.com/keys">console.groq.com/keys</a> if you want requests on your account.
               Your key is stored in Windows Credential Manager on this PC. It is not written into the settings file and it is not logged.
             </p>
           </details>
           <details>
             <summary>Is there a free tier?</summary>
             <p>
-              Bolo.com does not charge a subscription and does not run a server of its own. The built-in key follows Groq's limits for that key.
+              Bolo does not charge a subscription and does not run a server of its own. The built-in key follows Groq's limits for that key.
               If those limits are hit, add your own Groq API key in Settings.
             </p>
           </details>
@@ -245,7 +245,7 @@
           <h2 id="closing-title">Hold a key. Speak. Let go.</h2>
           <p>Bolo — <bdi lang="ur">بولو</bdi>, speak. The words land at the cursor.</p>
           <div class="cta-row">
-            <a class="button" data-download="nsis" href="downloads/Bolo.com_0.1.0_x64-setup.exe">Download for Windows</a>
+            <a class="button" data-download="nsis" href="downloads/Bolo_0.1.0_x64-setup.exe">Download for Windows</a>
           </div>
           <p class="release-meta">
             <span data-field="version">Version 0.1.0</span>
@@ -259,11 +259,11 @@
     <footer class="site-footer">
       <div class="wrap footer-bar">
         <img src="assets/lockup.svg" alt="" width="140" height="40" />
-        <p>Bolo.com · <bdi lang="ur">بولو</bdi> · push-to-talk dictation for Windows.</p>
+        <p>Bolo · <bdi lang="ur">بولو</bdi> · push-to-talk dictation for Windows.</p>
         <nav aria-label="Footer">
           <a href="#privacy">Privacy</a>
           <a href="#faq">FAQ</a>
-          <a data-download="nsis" href="downloads/Bolo.com_0.1.0_x64-setup.exe">Download</a>
+          <a data-download="nsis" href="downloads/Bolo_0.1.0_x64-setup.exe">Download</a>
         </nav>
       </div>
     </footer>

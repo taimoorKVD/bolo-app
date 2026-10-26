@@ -471,7 +471,7 @@ mod carryover {
         fs::create_dir_all(&legacy).unwrap();
         fs::create_dir_all(&next).unwrap();
         let mut settings = Settings::default();
-        settings.dictionary = vec!["Bolo.com".into()];
+        settings.dictionary = vec!["Bolo".into()];
         settings.language = "en".into();
         save_settings(&legacy, &settings).unwrap();
         save_history(
@@ -488,7 +488,7 @@ mod carryover {
         .unwrap();
         assert!(migrate_legacy_config(&next));
         let loaded = load_settings(&next);
-        assert_eq!(loaded.dictionary, vec!["Bolo.com".to_string()]);
+        assert_eq!(loaded.dictionary, vec!["Bolo".to_string()]);
         assert_eq!(loaded.language, "en");
         assert!(loaded.history_enabled);
         assert_eq!(load_history(&next)[0].text, "from cadence");

@@ -19,7 +19,7 @@ const settings: Settings = {
   model: "whisper-large-v3-turbo",
   cleanupEnabled: true,
   language: "auto",
-  dictionary: ["Bolo.com", "Groq"],
+  dictionary: ["Bolo", "Groq"],
   launchAtStartup: false,
   historyEnabled: true,
   pasteHotkey: { ctrl: true, alt: false, shift: false, win: true, key: "v" },
