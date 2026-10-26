@@ -1,3 +1,22 @@
+<p align="center">
+  <a href="https://bolo.thebetawebsite.com">
+    <img src="src/bolo-hero-animated.svg" alt="Bolo — speak anywhere in Windows" width="720" />
+  </a>
+</p>
+
+<p align="center">
+  <a href="https://bolo.thebetawebsite.com">
+    <img src="src/brand-lockup.svg" alt="Bolo lockup" width="420" />
+  </a>
+</p>
+
+<p align="center">
+  <a href="https://bolo.thebetawebsite.com/downloads/Bolo_0.1.0_x64-setup.exe"><img src="https://img.shields.io/badge/Download-Windows%20x64-0078D6?style=for-the-badge&logo=windows&logoColor=white" alt="Download for Windows" /></a>
+  <img src="https://img.shields.io/badge/version-0.1.0-C9A227?style=for-the-badge&labelColor=100F0C&color=C9A227" alt="Version 0.1.0" />
+  <img src="https://img.shields.io/badge/Windows-10%20%7C%2011-0A66C2?style=for-the-badge&logo=windows&logoColor=white" alt="Windows 10 or 11" />
+  <a href="https://bolo.thebetawebsite.com"><img src="https://img.shields.io/badge/Live%20site-bolo.thebetawebsite.com-F4EFE6?style=for-the-badge&labelColor=100F0C" alt="Live site" /></a>
+</p>
+
 # Bolo — speak anywhere in Windows
 
 **Hold a key. Speak. Let go.** The text lands at your cursor.
@@ -6,8 +25,18 @@ Bolo is push-to-talk dictation for Windows. Hold a global hotkey in any app, spe
 
 ### Get the app
 
-- **Live site:** [https://bolo.thebetawebsite.com](https://bolo.thebetawebsite.com)
-- **Download:** [Bolo 0.1.0 for Windows](https://bolo.thebetawebsite.com/downloads/Bolo_0.1.0_x64-setup.exe)
+| | |
+| --- | --- |
+| **Live site** | [bolo.thebetawebsite.com](https://bolo.thebetawebsite.com) |
+| **Download** | [Bolo 0.1.0 for Windows](https://bolo.thebetawebsite.com/downloads/Bolo_0.1.0_x64-setup.exe) |
+
+<p align="center">
+  <a href="https://bolo.thebetawebsite.com/downloads/Bolo_0.1.0_x64-setup.exe">
+    <img src="src-tauri/icons/icon.png" alt="Bolo app icon" width="128" />
+  </a>
+</p>
+
+<p align="center"><b><a href="https://bolo.thebetawebsite.com/downloads/Bolo_0.1.0_x64-setup.exe">↓ Download Bolo for Windows</a></b></p>
 
 ### At a glance
 
@@ -24,7 +53,6 @@ Settings live in their own window: General, Hotkey, Microphone, Language, Cleanu
 Audio is uploaded to Groq as 16 kHz mono FLAC, or WAV if FLAC encoding fails. No other AI provider is used. Nothing is stored on a Bolo server, and there is no telemetry.
 
 If you already used Cadence, the Groq key in Credential Manager and the files in the `com.cadence.dictation` config folder are copied forward. The old key entry and the old folder are left in place until you remove the key or delete the folder yourself.
-
 ## What you need
 
 - Windows 10 or 11, 64-bit
