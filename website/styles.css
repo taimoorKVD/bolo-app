@@ -21,7 +21,7 @@
   --space-5: 32px;
   --space-6: 48px;
   --space-7: 64px;
-  --space-8: 88px;
+  --space-8: 96px;
   --radius-card: 20px;
   --radius-stage: 28px;
 }
@@ -361,12 +361,12 @@ h3 { margin: 0 0 var(--space-2); font-size: 22px; line-height: 1.25; }
 }
 
 .privacy {
-  display: grid;
-  grid-template-columns: minmax(0, 0.85fr) minmax(0, 1.15fr);
-  gap: var(--space-6);
-  align-items: start;
+  display: block;
 }
-.privacy .section-head { margin-bottom: 0; }
+.privacy .section-head {
+  max-width: 40rem;
+  margin: 0 0 var(--space-5);
+}
 .facts {
   list-style: none;
   margin: 0;
@@ -441,8 +441,7 @@ h3 { margin: 0 0 var(--space-2); font-size: 22px; line-height: 1.25; }
 
 @media (max-width: 980px) {
   .features { grid-template-columns: 1fr 1fr; }
-  .hero, .privacy, .steps { grid-template-columns: 1fr; }
-  .privacy .section-head { margin-bottom: var(--space-5); }
+  .hero, .steps { grid-template-columns: 1fr; }
   .stage { min-height: 380px; }
   .hero { gap: var(--space-5); padding: var(--space-6) 0; }
   .band, .steps-section, .features-section, .privacy-section, .faq-section {
@@ -486,3 +485,66 @@ h3 { margin: 0 0 var(--space-2); font-size: 22px; line-height: 1.25; }
   .caret { animation: none; }
   .overlay { transition: none; }
 }
+
+/* Sticky-header anchor offset */
+#top, #how, #features, #privacy, #faq {
+  scroll-margin-top: 88px;
+}
+
+/* Privacy: stack head above cards for clearer section rhythm */
+.privacy {
+  display: block;
+}
+.privacy .section-head {
+  max-width: 40rem;
+  margin: 0 0 var(--space-5);
+}
+.privacy .facts {
+  margin-top: 0;
+}
+
+/* Hero caption breathing room under overlay */
+.stage {
+  padding-bottom: 108px;
+}
+.stage-caption {
+  bottom: 18px;
+  line-height: 1.4;
+}
+
+/* Header: brand left, nav center-right cluster, download far right */
+.header-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+}
+.header-bar .brand { flex: 0 0 auto; }
+.header-bar .site-nav {
+  margin-left: auto;
+  margin-right: var(--space-3);
+}
+.header-bar > .button {
+  flex: 0 0 auto;
+}
+
+/* Footer: tighter, professional alignment */
+.footer-bar {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: var(--space-4) var(--space-5);
+}
+.footer-bar nav { margin-left: 0; justify-self: end; }
+.footer-bar p { justify-self: start; }
+
+@media (max-width: 720px) {
+  .header-bar .site-nav {
+    margin-left: 0;
+    margin-right: 0;
+  }
+  .footer-bar {
+    grid-template-columns: 1fr;
+  }
+  .footer-bar nav { justify-self: start; }
+}
+
