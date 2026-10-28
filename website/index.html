@@ -102,7 +102,7 @@
         </div>
       </section>
 
-      <section class="band" id="how" aria-labelledby="how-title">
+            <section class="band steps-section" id="how" aria-labelledby="how-title">
         <div class="wrap">
           <div class="section-head">
             <p class="eyebrow">How it works</p>
@@ -110,14 +110,17 @@
           </div>
           <ol class="steps">
             <li>
+              <span class="step-index">01</span>
               <strong>Hold</strong>
               <p>Press and hold the hotkey (default Ctrl+Win). The compact listener appears and stays with you while you talk.</p>
             </li>
             <li>
+              <span class="step-index">02</span>
               <strong>Speak</strong>
               <p>Talk naturally — English, Urdu, Roman Urdu, or a mix. When you release, the character picks up a pen and writes.</p>
             </li>
             <li>
+              <span class="step-index">03</span>
               <strong>Paste</strong>
               <p>Clean text lands at the caret. The overlay ducks away with a soft chime. No labels, no Groq branding in the UI.</p>
             </li>
@@ -125,40 +128,40 @@
         </div>
       </section>
 
-      <section class="wrap features" id="features" aria-labelledby="features-title">
+            <section class="wrap" id="features" aria-labelledby="features-title">
         <div class="section-head">
           <p class="eyebrow">Features</p>
           <h2 id="features-title">Built for the focused field</h2>
         </div>
-        <div class="feature-grid">
-          <article>
+        <ul class="features">
+          <li>
             <h3>Animated listener</h3>
             <p>A soft, friendly character listens with glowing ear rings, then writes with a tiny gold pen — the same overlay that ships in the app.</p>
-          </article>
-          <article>
+          </li>
+          <li>
             <h3>Instant push-to-talk</h3>
             <p>The mic stays warm, so the first press shows the listener immediately. No “Starting…” delay.</p>
-          </article>
-          <article>
+          </li>
+          <li>
             <h3>Any language in, English out</h3>
             <p>Speak Urdu or mix languages; Bolo can translate into clean English, or keep the language you spoke.</p>
-          </article>
-          <article>
+          </li>
+          <li>
             <h3>Works where you type</h3>
             <p>Word, browsers, Slack, mail, terminals — wherever the caret is. Tray app, global hotkey, optional dictionary and history.</p>
-          </article>
-          <article>
+          </li>
+          <li>
             <h3>Long takes stay quick</h3>
             <p>Longer speech is cut on pauses and transcribed while you keep talking, so release still feels snappy.</p>
-          </article>
-          <article>
+          </li>
+          <li>
             <h3>Your key, or ours</h3>
             <p>Ships ready to dictate with a built-in Groq key. Add your own in Settings anytime; it stays in Windows Credential Manager.</p>
-          </article>
-        </div>
+          </li>
+        </ul>
       </section>
 
-      <section class="wrap privacy" id="privacy" aria-labelledby="privacy-title">
+            <section class="wrap privacy" id="privacy" aria-labelledby="privacy-title">
         <div class="section-head">
           <p class="eyebrow">Privacy</p>
           <h2 id="privacy-title">Audio goes to Groq. Nothing sits on a Bolo server.</h2>
@@ -166,23 +169,24 @@
             Each take is uploaded to Groq for transcription (and optional cleanup). Bolo does not run its own backend for your audio, and it does not collect telemetry.
           </p>
         </div>
-        <div class="privacy-grid">
-          <div>
+        <ul class="facts">
+          <li>
             <h3>What leaves the PC</h3>
-            <ul>
-              <li>Audio for the current take, as 16 kHz mono FLAC (or WAV)</li>
-              <li>Optional short cleanup requests to Groq when that setting is on</li>
-            </ul>
-          </div>
-          <div>
+            <p>Audio for the current take as 16 kHz mono FLAC (or WAV), plus optional short cleanup requests to Groq when that setting is on.</p>
+          </li>
+          <li>
             <h3>What stays local</h3>
-            <ul>
-              <li>Settings, dictionary, and history on this PC</li>
-              <li>Your Groq API key in Windows Credential Manager</li>
-              <li>No Bolo account and no Bolo analytics</li>
-            </ul>
-          </div>
-        </div>
+            <p>Settings, dictionary, and history on this PC. Your Groq API key stays in Windows Credential Manager. No Bolo account and no Bolo analytics.</p>
+          </li>
+          <li>
+            <h3>Groq, and nowhere else</h3>
+            <p>Audio and the transcript go to Groq. No other provider is used. If Groq cannot take the request, the same audio stays on this PC.</p>
+          </li>
+          <li>
+            <h3>No telemetry</h3>
+            <p>There is no analytics call home. The diagnostic log records durations and errors, not the API key and not the transcript.</p>
+          </li>
+        </ul>
       </section>
 
       <section class="wrap faq-section" id="faq" aria-labelledby="faq-title">

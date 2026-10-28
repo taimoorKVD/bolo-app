@@ -299,7 +299,7 @@ h3 { margin: 0 0 8px; font-size: 22px; }
   margin: 0;
   padding: 0;
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 14px;
 }
 .features li, .steps li, .facts li {
@@ -309,6 +309,7 @@ h3 { margin: 0 0 8px; font-size: 22px; }
   padding: 18px 18px 16px;
 }
 .features p, .steps p, .facts p, .faq p { margin: 0; color: var(--muted); }
+.steps strong { display: block; margin-bottom: 8px; font-family: var(--serif); font-size: 22px; font-weight: 600; }
 
 .steps-section { padding: 72px 0; }
 .steps {
