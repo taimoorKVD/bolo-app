@@ -751,7 +751,7 @@ pub fn paste_last(app: &AppHandle) {
                     },
                 );
                 let generation = lock(&app.state::<AppState>().engine).generation;
-                schedule_hide(app, generation, 1_600);
+                schedule_hide(app, generation, DISMISS_MS);
             }
             Ok(_) => {
                 publish(
@@ -764,7 +764,7 @@ pub fn paste_last(app: &AppHandle) {
                         engine: None,
                     },
                 );
-                schedule_hide(app.clone(), lock(&app.state::<AppState>().engine).generation, 1_600);
+                schedule_hide(app.clone(), lock(&app.state::<AppState>().engine).generation, DISMISS_MS);
             }
             Err(err) => fail(&app, &format!("Couldn't paste the last take ({err}).")),
         }
@@ -1037,7 +1037,7 @@ async fn deliver(app: &AppHandle, mut outcome: Outcome, generation: u64) {
             engine: outcome.engine.clone(),
         },
     );
-    schedule_hide(app.clone(), generation, 1_600);
+    schedule_hide(app.clone(), generation, DISMISS_MS);
 }
 
 fn absorb_dictionary(app: &AppHandle, text: &str) {
@@ -1209,6 +1209,9 @@ fn show_problem(app: &AppHandle, message: &str, hide_ms: u64) {
     schedule_hide(app.clone(), generation, hide_ms);
 }
 
+/// Long enough for the overlay's dismiss motion and sound, then the window hides.
+const DISMISS_MS: u64 = 700;
+
 fn schedule_hide(app: AppHandle, generation: u64, delay_ms: u64) {
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(delay_ms));
@@ -1254,9 +1257,9 @@ fn publish(app: &AppHandle, event: &DictationEvent) {
         return;
     }
     let (width, height) = if event.phase == "error" {
-        (340.0, 148.0)
+        (280.0, 200.0)
     } else {
-        (280.0, 56.0)
+        (268.0, 150.0)
     };
     let _ = overlay.set_size(LogicalSize::new(width, height));
     position_overlay(&overlay);

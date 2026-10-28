@@ -141,12 +141,12 @@ pub fn whisper_prompt_with(words: &[String], recent: &[String]) -> Option<String
         prompt.push('.');
     }
     if !snippets.is_empty() {
+        // Prior text as a style example only — no meta label. Whisper often
+        // echoes labels like "Recent dictation:" into the pasted transcript.
         if !prompt.is_empty() {
             prompt.push(' ');
         }
-        prompt.push_str("Recent dictation: ");
-        prompt.push_str(&snippets.join(" | "));
-        prompt.push('.');
+        prompt.push_str(&snippets.join(" "));
     }
     // Whisper prompts are capped at 224 tokens. Stay well under that in characters.
     if prompt.chars().count() > 800 {
@@ -167,6 +167,33 @@ fn snippet(text: &str, max_chars: usize) -> String {
         let cut: String = flat.chars().take(max_chars).collect();
         format!("{cut}…")
     }
+}
+
+/// Drop Whisper prompt echoes that sometimes prepend the pasted transcript.
+fn strip_prompt_leak(text: &str) -> String {
+    let mut out = text.trim().to_string();
+    loop {
+        let before = out.clone();
+        let trimmed = out.trim_start();
+        let next = if let Some(rest) = trimmed.strip_prefix("Recent dictation:") {
+            rest
+        } else if let Some(rest) = trimmed.strip_prefix("Dictation transcript.") {
+            rest
+        } else if let Some(rest) = trimmed.strip_prefix("Dictation transcript:") {
+            rest
+        } else {
+            break;
+        };
+        out = next
+            .trim_start()
+            .trim_matches(|c| c == '"' || c == '\'' || c == '“' || c == '”')
+            .trim()
+            .to_string();
+        if out == before {
+            break;
+        }
+    }
+    out
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -287,7 +314,7 @@ fn prefer_attempt(first: Attempt, second: Attempt) -> Attempt {
     if chosen.language.is_empty() {
         chosen.language = fallback_language;
     }
-    chosen.text = chosen.text.trim().to_string();
+    chosen.text = strip_prompt_leak(&chosen.text);
     chosen
 }
 
@@ -427,7 +454,7 @@ fn parse_attempt(body: &str) -> anyhow::Result<Attempt> {
                 .map(confidence)
                 .unwrap_or((None, None));
             return Ok(Attempt {
-                text: text.trim().to_string(),
+                text: strip_prompt_leak(&text),
                 avg_logprob,
                 no_speech_prob,
                 language: verbose.language.map(|value| language_code(&value)).unwrap_or_default(),
@@ -437,7 +464,7 @@ fn parse_attempt(body: &str) -> anyhow::Result<Attempt> {
     let parsed: SimpleTranscript =
         serde_json::from_str(body).context("transcription response was not JSON")?;
     Ok(Attempt {
-        text: parsed.text.trim().to_string(),
+        text: strip_prompt_leak(&parsed.text),
         avg_logprob: None,
         no_speech_prob: None,
         language: String::new(),
@@ -617,10 +644,15 @@ mod tests {
         )
         .unwrap();
         assert!(with_recent.contains("Bolo"));
-        assert!(with_recent.contains("Recent dictation"));
+        assert!(!with_recent.contains("Recent dictation"));
         assert!(with_recent.contains("Priya"));
         assert!(with_recent.chars().count() <= 800);
         assert_eq!(whisper_prompt_with(&[], &["  ".into()]), None);
+        assert_eq!(
+            strip_prompt_leak("Recent dictation:\"Hey, can you listen to me?\""),
+            "Hey, can you listen to me?"
+        );
+        assert_eq!(strip_prompt_leak("Ship it tomorrow."), "Ship it tomorrow.");
     }
 
     #[test]

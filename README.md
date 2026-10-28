@@ -11,6 +11,14 @@
 </p>
 
 <p align="center">
+  <img src="src/assets/readme/overlay-listen.png" alt="Bolo listening overlay — soft character with glowing ear rings" width="320" />
+  &nbsp;
+  <img src="src/assets/readme/overlay-write.png" alt="Bolo writing overlay — character scribbling with a gold pen" width="320" />
+</p>
+
+<p align="center"><em>Listening → writing → hide with a soft chime — the in-app overlay.</em></p>
+
+<p align="center">
   <a href="https://bolo.thebetawebsite.com/downloads/Bolo_0.1.0_x64-setup.exe"><img src="https://img.shields.io/badge/Download-Windows%20x64-0078D6?style=for-the-badge&logo=windows&logoColor=white" alt="Download for Windows" /></a>
   <img src="https://img.shields.io/badge/version-0.1.0-C9A227?style=for-the-badge&labelColor=100F0C&color=C9A227" alt="Version 0.1.0" />
   <img src="https://img.shields.io/badge/Windows-10%20%7C%2011-0A66C2?style=for-the-badge&logo=windows&logoColor=white" alt="Windows 10 or 11" />
@@ -21,7 +29,7 @@
 
 **Hold a key. Speak. Let go.** The text lands at your cursor.
 
-Bolo is push-to-talk dictation for Windows. Hold a global hotkey in any app, speak (English, Urdu, Roman Urdu, or a mix), release, and Bolo pastes clean text at the caret. It runs from the system tray with a small recording tally — no Bolo servers storing your audio, and no telemetry.
+Bolo is push-to-talk dictation for Windows. Hold a global hotkey in any app, speak (English, Urdu, Roman Urdu, or a mix), release, and Bolo pastes clean text at the caret. While you hold, a warm animated listener watches; on release it writes with a tiny pen, then slips away with a soft chime. It runs from the system tray — no Bolo servers storing your audio, and no telemetry.
 
 ### Get the app
 
@@ -36,23 +44,17 @@ Bolo is push-to-talk dictation for Windows. Hold a global hotkey in any app, spe
   </a>
 </p>
 
-<p align="center"><b><a href="https://bolo.thebetawebsite.com/downloads/Bolo_0.1.0_x64-setup.exe">↓ Download Bolo for Windows</a></b></p>
+<p align="center"><b><a href="https://bolo.thebetawebsite.com/downloads/Bolo_0.1.0_x64-setup.exe">Download Bolo for Windows</a></b></p>
 
 ### At a glance
 
+- Compact animated overlay: listen rings → pen on notebook → hide with sound
 - Works in Word, browsers, Slack, email, terminals — wherever the caret is
 - Default hotkey **Ctrl+Win**; speak, release, paste
 - Urdu / mixed speech → English, or keep the language you spoke
 - Long takes cut on pauses and transcribe while you keep talking
 - Settings for mic, language, cleanup, dictionary, history, and privacy
 
-Long takes are cut on pauses into roughly 20–30 second pieces and transcribed while you are still talking, so letting go stays quick. There is no recording-length cap. An earlier build stopped a take at 120 seconds, and the live buffer stopped accepting samples after about 180 seconds of stereo 48 kHz audio.
-
-Settings live in their own window: General, Hotkey, Microphone, Language, Cleanup, Dictionary, History, Privacy, and About.
-
-Audio is uploaded to Groq as 16 kHz mono FLAC, or WAV if FLAC encoding fails. No other AI provider is used. Nothing is stored on a Bolo server, and there is no telemetry.
-
-If you already used Cadence, the Groq key in Credential Manager and the files in the `com.cadence.dictation` config folder are copied forward. The old key entry and the old folder are left in place until you remove the key or delete the folder yourself.
 ## What you need
 
 - Windows 10 or 11, 64-bit
@@ -78,7 +80,7 @@ Hold **Ctrl + Win** (the default), speak, and release. Ctrl + Space and a few ot
 | Setting | Behavior |
 | --- | --- |
 | Groq API key | A build compiled with `BOLO_BUILTIN_GROQ_KEY` set uses that key when you have not saved your own. Settings says â€œUsing Bolo built-in keyâ€ and does not show the key. â€œUse my own Groq API keyâ€ saves yours in Windows Credential Manager (target `com.bolo.dictation/groq-api-key`) and uses it instead. â€œReturn to built-in keyâ€ clears yours. A key still stored as `com.cadence.dictation/groq-api-key` or the older keyring target `groq-api-key.com.cadence.dictation` is read and copied forward. A save counts only after the same value is read back. The key is not written to `settings.json`, history, or the log, and it is not sent to the window. A build without the variable still requires your own key. A 429 on the built-in key asks you to add your own. |
-| Hotkey | Hold to record, release to transcribe. The microphone stays open from launch, with about a second of pre-roll, so the first press shows Listening immediately and marks that buffer. It does not open a device on the key-down path. If the stream has died, Bolo reopens it in the background and still keeps the pre-roll. A release shorter than about a quarter second waits briefly for a second tap, which leaves the mic open until you tap again. A longer hold stops the moment you release. Modifier-only chords need two modifiers so a lone Ctrl cannot start a recording. Paste the last take again with Ctrl+Win+V (changeable in Settings). |
+| Hotkey | Hold to record, release to transcribe. The microphone stays open from launch, with about a second of pre-roll, so the first press shows the listener overlay immediately and marks that buffer. It does not open a device on the key-down path. If the stream has died, Bolo reopens it in the background and still keeps the pre-roll. A release shorter than about a quarter second waits briefly for a second tap, which leaves the mic open until you tap again. A longer hold stops the moment you release. Modifier-only chords need two modifiers so a lone Ctrl cannot start a recording. Paste the last take again with Ctrl+Win+V (changeable in Settings). |
 | Microphone | **System default (auto)** is the default. It follows the Windows default when you plug or unplug a headset. A named mic is remembered: if it is missing or will not open, Bolo uses another live mic without failing the take, and switches back when the preferred one returns. The sidebar shows which mic is in use, and the Microphone section shows a live level. |
 | Language and model | `whisper-large-v3-turbo` (default) or `whisper-large-v3`. Spoken language is `auto`, or an ISO 639-1 code passed to Whisper. Output defaults to **English (translate)**; **Same as spoken** leaves the transcript in the language you used. When the output is English and the speech is not, Bolo calls Groq `/audio/translations` with `whisper-large-v3` (turbo does not translate). Urdu and mixed Urdu/English, including Roman Urdu, are transcribed and then translated with Llama so the meaning stays exact. The log records `speech language=â€¦ path=â€¦` (`transcribe`, `translate`, or `mixed-llama`). Temperature is 0. An empty or low-confidence result is sent once more without the prompt. Network errors and HTTP 5xx are retried with backoff. A Groq 429 is retried once, then described as a rate limit. If Groq is rate limiting, returning 5xx, or unreachable, Bolo uses a local whisper.cpp model (`base.en` by default, or `small.en`) and tries Groq again on the next take. The model and the Windows whisper.cpp build download on first use. The tally shows which engine produced the text. |
 | Cleanup | On when `settings.json` has no `cleanupEnabled` field (a new install). A file that already saved `false` stays off until you turn it on. On, Groq-hosted `openai/gpt-oss-20b` (Settings â†’ Cleanup model) punctuates and applies spoken corrections without adding or dropping what you said. The request gives up after 1.2 seconds. A failure is tried once more with a shorter instruction. A 404 from a removed model tries `openai/gpt-oss-120b`, then `qwen/qwen3.6-27b`, instead of failing the paste. If that also fails, Bolo pastes the local edit and logs both reasons in `cleanup_why`. **Verbatim** pastes the transcript unchanged, including fillers. Slack, Discord, and Teams stay casual. Word, Outlook, PowerPoint, OneNote, and a browser whose title says Gmail or Outlook stay formal. Code editors and terminals skip the model. The local edit also handles "scratch that", "no wait", "I mean", and spoken punctuation such as "new line" and "period". |
@@ -169,7 +171,7 @@ npm install
 npm run dev
 ```
 
-Open `http://127.0.0.1:1420` for settings and `http://127.0.0.1:1420/?view=overlay` for the recording tally. Outside the Tauri shell those pages use local preview data and do not call Groq.
+Open `http://127.0.0.1:1420` for settings and `http://127.0.0.1:1420/?view=overlay` for the animated listen/write overlay. Outside the Tauri shell those pages use local preview data and do not call Groq.
 
 `cargo test --manifest-path src-tauri/Cargo.toml` covers silence trimming, the click rejection, gain, FLAC encoding, filler removal, spoken corrections, cleanup reasons, foreground-app tone, hotkey chords, double-tap decisions, settings carryover from Cadence, history, and microphone selection. A short real capture runs only when the machine has an input device. Live Groq calls, including the latency budget, run only when `GROQ_API_KEY` is set. Otherwise those cases print `SKIP` and pass. The encode timing case always prints a `LATENCY` line.
 

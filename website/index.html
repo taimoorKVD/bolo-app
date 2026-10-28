@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8" />
@@ -6,27 +6,20 @@
     <title>Bolo — speak anywhere in Windows</title>
     <meta
       name="description"
-      content="Bolo is push-to-talk dictation for Windows. Hold Ctrl+Win, speak in any language including Urdu, and the text lands at your cursor."
+      content="Hold a key, speak, and Bolo pastes clean text at your cursor. Push-to-talk dictation for Windows with a warm animated listener."
     />
-    <meta name="theme-color" content="#100F0C" />
-    <meta property="og:title" content="Bolo — بولو, speak" />
+    <meta property="og:title" content="Bolo — speak anywhere in Windows" />
     <meta
       property="og:description"
-      content="Speak anywhere in Windows. The text lands at your cursor."
+      content="Hold Ctrl+Win, speak, let go. An animated listener watches while you talk, then writes your words into the focused field."
     />
     <meta property="og:type" content="website" />
-    <meta property="og:image" content="assets/icon.png" />
-    <meta property="og:locale" content="en_US" />
-    <meta name="twitter:card" content="summary" />
-    <meta name="twitter:title" content="Bolo — بولو, speak" />
-    <meta
-      name="twitter:description"
-      content="Speak anywhere in Windows. The text lands at your cursor."
-    />
-    <meta name="twitter:image" content="assets/icon.png" />
+    <meta property="og:url" content="https://bolo.thebetawebsite.com/" />
+    <meta property="og:image" content="https://bolo.thebetawebsite.com/assets/og.png" />
+    <meta name="twitter:card" content="summary_large_image" />
     <link rel="icon" href="assets/favicon.ico" sizes="any" />
-    <link rel="icon" href="assets/favicon-32.png" type="image/png" sizes="32x32" />
-    <link rel="apple-touch-icon" href="assets/icon-256.png" />
+    <link rel="icon" type="image/png" href="assets/icon-32.png" sizes="32x32" />
+    <link rel="apple-touch-icon" href="assets/icon-180.png" />
     <link rel="stylesheet" href="styles.css" />
     <script type="application/json" id="bolo-release">
 {
@@ -36,7 +29,7 @@
   "downloads": {
     "nsis": {
       "href": "downloads/Bolo_0.1.0_x64-setup.exe",
-      "bytes": 2536067
+      "bytes": 2725556
     }
   }
 }
@@ -45,20 +38,19 @@
   <body>
     <a class="skip" href="#main">Skip to content</a>
     <header class="site-header">
-      <div class="wrap header-bar">
-        <a class="brand" href="#top">
-          <img src="assets/lockup.svg" alt="Bolo" width="168" height="48" />
+      <div class="wrap nav">
+        <a class="brand" href="#top" aria-label="Bolo home">
+          <img src="assets/lockup.svg" alt="Bolo" width="148" height="40" />
         </a>
-        <button class="nav-toggle" type="button" aria-expanded="false" aria-controls="site-nav">
-          <span class="sr-only">Menu</span>
-          <span class="nav-toggle-bars" aria-hidden="true"></span>
+        <button class="nav-toggle" type="button" aria-expanded="false" aria-controls="site-nav" aria-label="Menu">
+          <span class="nav-toggle-bars"></span>
         </button>
-        <nav id="site-nav" class="site-nav" aria-label="Page">
-          <a href="#product">Product</a>
+        <nav id="site-nav" class="site-nav" aria-label="Primary">
           <a href="#how">How it works</a>
+          <a href="#features">Features</a>
           <a href="#privacy">Privacy</a>
           <a href="#faq">FAQ</a>
-          <a class="button button-small" data-download="nsis" href="downloads/Bolo_0.1.0_x64-setup.exe">Download</a>
+          <a class="button button-sm" data-download="nsis" href="downloads/Bolo_0.1.0_x64-setup.exe">Download</a>
         </nav>
       </div>
     </header>
@@ -66,12 +58,15 @@
     <main id="main">
       <section class="hero wrap" id="top" aria-labelledby="hero-title">
         <div class="hero-copy">
-          <img class="hero-mark" src="assets/icon-256.png" alt="" width="72" height="72" />
-          <p class="eyebrow">Windows dictation</p>
-          <h1 id="hero-title">Bolo <span class="dash">—</span> <bdi lang="ur">بولو</bdi>, speak</h1>
-          <p class="lede">Speak anywhere in Windows. The text lands at your cursor.</p>
+          <p class="eyebrow">Push-to-talk for Windows</p>
+          <h1 id="hero-title">Hold a key. Speak. Let go.</h1>
+          <p class="lead">
+            Bolo — <bdi lang="ur">بولو</bdi>, speak — pastes clean text at your cursor.
+            While you talk, a warm animated listener leans in; when you release, it writes into the field and slips away.
+          </p>
           <div class="cta-row">
             <a class="button" data-download="nsis" href="downloads/Bolo_0.1.0_x64-setup.exe">Download for Windows</a>
+            <a class="text-link" href="#how">See how it works</a>
           </div>
           <p class="release-meta">
             <span data-field="version">Version 0.1.0</span>
@@ -80,125 +75,113 @@
           </p>
         </div>
 
-        <div class="stage">
-          <div class="window">
-            <div class="window-bar">
-              <img src="assets/favicon-32.png" alt="" width="16" height="16" />
-              <span>Notes</span>
+        <div class="hero-demo" aria-label="Product demo">
+          <div class="stage" data-demo-root>
+            <div class="window" aria-hidden="true">
+              <div class="window-bar">
+                <img src="assets/icon-32.png" alt="" />
+                <span>Any app</span>
+              </div>
+              <p class="editor-line">
+                <span data-demo-text></span><span class="caret"></span>
+              </p>
             </div>
-            <p class="editor-line">
-              <span id="demo-text"></span><span class="caret" aria-hidden="true"></span>
-            </p>
+            <div class="overlay" data-demo-overlay data-phase="listening" aria-hidden="true">
+              <video
+                class="overlay-video"
+                data-demo-video
+                muted
+                playsinline
+                loop
+                preload="auto"
+                poster="assets/icon-128.png"
+              ></video>
+            </div>
+            <p class="stage-caption" data-demo-caption>Hold Ctrl+Win — the listener watches while you speak</p>
           </div>
-          <div class="pill" id="demo-pill" data-phase="listening">
-            <span class="lamp" aria-hidden="true"></span>
-            <strong id="demo-label">Listening</strong>
-            <span class="bars" aria-hidden="true">
-              <span></span><span></span><span></span><span></span><span></span><span></span><span></span>
-            </span>
-            <span class="timer" id="demo-timer">0:01</span>
-          </div>
-          <p class="stage-caption" id="demo-status">Listening, then transcribing, then inserted at the cursor.</p>
         </div>
       </section>
 
-      <section class="band" id="product" aria-labelledby="product-title">
+      <section class="band" id="how" aria-labelledby="how-title">
         <div class="wrap">
           <div class="section-head">
-            <p class="eyebrow">Product</p>
-            <h2 id="product-title">Dictation that stays out of the way</h2>
-            <p class="section-lede">
-              Bolo lives in the system tray. Hold a key in whatever app has the caret, speak, and let go.
-            </p>
+            <p class="eyebrow">How it works</p>
+            <h2 id="how-title">Three beats. No waiting screen.</h2>
           </div>
-          <ul class="features">
+          <ol class="steps">
             <li>
-              <h3>Instant push-to-talk</h3>
-              <p>Ctrl+Win is the default. The microphone stays open, so the pill says Listening as the key goes down.</p>
+              <strong>Hold</strong>
+              <p>Press and hold the hotkey (default Ctrl+Win). The compact listener appears and stays with you while you talk.</p>
             </li>
             <li>
-              <h3>Any language to English</h3>
-              <p>Urdu, Roman Urdu, mixed speech, and other languages come back in English. Or keep the language you spoke.</p>
+              <strong>Speak</strong>
+              <p>Talk naturally — English, Urdu, Roman Urdu, or a mix. When you release, the character picks up a pen and writes.</p>
             </li>
             <li>
-              <h3>Cleanup, or verbatim</h3>
-              <p>Cleanup punctuates and applies spoken corrections without adding words. Verbatim pastes every word, including um and uh.</p>
+              <strong>Paste</strong>
+              <p>Clean text lands at the caret. The overlay ducks away with a soft chime. No labels, no Groq branding in the UI.</p>
             </li>
-            <li>
-              <h3>Every app</h3>
-              <p>The transcript is pasted at the caret. If the field cannot take a paste, Bolo types it.</p>
-            </li>
-            <li>
-              <h3>Offline fallback</h3>
-              <p>If Groq is rate limiting or unreachable, whisper.cpp on this PC transcribes the take and the next one tries Groq again.</p>
-            </li>
-            <li>
-              <h3>Personal dictionary</h3>
-              <p>Names and spellings you care about are prompted exactly, and capitalized names from your dictation are remembered.</p>
-            </li>
-            <li>
-              <h3>Paste the last take</h3>
-              <p>Ctrl+Win+V inserts the previous transcript again. Change that chord in Settings.</p>
-            </li>
-            <li>
-              <h3>Long dictation</h3>
-              <p>A long take is cut on pauses and transcribed while you are still speaking. There is no length cap.</p>
-            </li>
-          </ul>
+          </ol>
         </div>
       </section>
 
-      <section class="wrap steps-section" id="how" aria-labelledby="how-title">
+      <section class="wrap features" id="features" aria-labelledby="features-title">
         <div class="section-head">
-          <p class="eyebrow">How it works</p>
-          <h2 id="how-title">Three beats, then the caret moves on</h2>
+          <p class="eyebrow">Features</p>
+          <h2 id="features-title">Built for the focused field</h2>
         </div>
-        <ol class="steps">
-          <li>
-            <span class="step-index">01</span>
-            <h3>Hold Ctrl+Win</h3>
-            <p>Listening is on screen immediately. The stream was already warm, with about a second of pre-roll, so the first words are not clipped.</p>
-          </li>
-          <li>
-            <span class="step-index">02</span>
-            <h3>Speak, then release</h3>
-            <p>English, Urdu, Roman Urdu, or a mix. A short tap can wait for a second press. A normal hold stops the moment you let go.</p>
-          </li>
-          <li>
-            <span class="step-index">03</span>
-            <h3>Read it where you were typing</h3>
-            <p>The words land at the cursor. Output is English unless you chose Same as spoken. Paste that take again with Ctrl+Win+V.</p>
-          </li>
-        </ol>
+        <div class="feature-grid">
+          <article>
+            <h3>Animated listener</h3>
+            <p>A soft, friendly character listens with glowing ear rings, then writes with a tiny gold pen — the same overlay that ships in the app.</p>
+          </article>
+          <article>
+            <h3>Instant push-to-talk</h3>
+            <p>The mic stays warm, so the first press shows the listener immediately. No “Starting…” delay.</p>
+          </article>
+          <article>
+            <h3>Any language in, English out</h3>
+            <p>Speak Urdu or mix languages; Bolo can translate into clean English, or keep the language you spoke.</p>
+          </article>
+          <article>
+            <h3>Works where you type</h3>
+            <p>Word, browsers, Slack, mail, terminals — wherever the caret is. Tray app, global hotkey, optional dictionary and history.</p>
+          </article>
+          <article>
+            <h3>Long takes stay quick</h3>
+            <p>Longer speech is cut on pauses and transcribed while you keep talking, so release still feels snappy.</p>
+          </article>
+          <article>
+            <h3>Your key, or ours</h3>
+            <p>Ships ready to dictate with a built-in Groq key. Add your own in Settings anytime; it stays in Windows Credential Manager.</p>
+          </article>
+        </div>
       </section>
 
-      <section class="band" id="privacy" aria-labelledby="privacy-title">
-        <div class="wrap privacy">
+      <section class="wrap privacy" id="privacy" aria-labelledby="privacy-title">
+        <div class="section-head">
+          <p class="eyebrow">Privacy</p>
+          <h2 id="privacy-title">Audio goes to Groq. Nothing sits on a Bolo server.</h2>
+          <p class="section-lead">
+            Each take is uploaded to Groq for transcription (and optional cleanup). Bolo does not run its own backend for your audio, and it does not collect telemetry.
+          </p>
+        </div>
+        <div class="privacy-grid">
           <div>
-            <p class="eyebrow">Privacy</p>
-            <h2 id="privacy-title">Your audio does not sit on a Bolo server</h2>
-            <p class="section-lede">
-              Bolo has no account and no telemetry. The only network path for a take is Groq, using the key on this PC.
-            </p>
+            <h3>What leaves the PC</h3>
+            <ul>
+              <li>Audio for the current take, as 16 kHz mono FLAC (or WAV)</li>
+              <li>Optional short cleanup requests to Groq when that setting is on</li>
+            </ul>
           </div>
-          <ul class="facts">
-            <li>
-              <h3>Groq, and nowhere else</h3>
-              <p>Audio and the transcript go to Groq. No other provider is used. If Groq cannot take the request, the same audio stays on this PC.</p>
-            </li>
-            <li>
-              <h3>History is a local file</h3>
-              <p>The last 50 transcripts can stay on this PC. Turn that off, or clear them. A take’s audio is kept only until the paste is confirmed.</p>
-            </li>
-            <li>
-              <h3>No telemetry</h3>
-              <p>There is no analytics call home. The diagnostic log records durations and errors, not the API key and not the transcript.</p>
-            </li>
-            <li>
-              <h3>The key stays in Windows</h3>
-              <p>A Groq key you add is a local credential in Windows Credential Manager. It is not written into settings.json, and it is not shown in the log. The built-in key is not displayed.</p>
-            </li>
-          </ul>
+          <div>
+            <h3>What stays local</h3>
+            <ul>
+              <li>Settings, dictionary, and history on this PC</li>
+              <li>Your Groq API key in Windows Credential Manager</li>
+              <li>No Bolo account and no Bolo analytics</li>
+            </ul>
+          </div>
         </div>
       </section>
 
@@ -236,6 +219,12 @@
               The setup is per-user and does not need an administrator account. A microphone is required. An elevated window, such as a terminal opened as Administrator, will not receive dictation.
             </p>
           </details>
+          <details>
+            <summary>What is the little character on screen?</summary>
+            <p>
+              That is the listening overlay. It loops a soft listen animation while you hold the hotkey, switches to a writing loop while Bolo transcribes, then hides with a gentle chime when the text is pasted.
+            </p>
+          </details>
         </div>
       </section>
 
@@ -259,7 +248,7 @@
     <footer class="site-footer">
       <div class="wrap footer-bar">
         <img src="assets/lockup.svg" alt="" width="140" height="40" />
-        <p>Bolo · <bdi lang="ur">بولو</bdi> · push-to-talk dictation for Windows.</p>
+        <p>Bolo — <bdi lang="ur">بولو</bdi> — push-to-talk dictation for Windows.</p>
         <nav aria-label="Footer">
           <a href="#privacy">Privacy</a>
           <a href="#faq">FAQ</a>

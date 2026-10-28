@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Bolo",
+  "productName": "Bolo.com",
   "version": "0.1.0",
   "identifier": "com.bolo.dictation",
   "build": {
@@ -14,7 +14,7 @@
     "windows": [
       {
         "label": "settings",
-        "title": "Bolo",
+        "title": "Bolo.com",
         "url": "index.html",
         "create": false,
         "width": 1120,
@@ -27,11 +27,11 @@
       },
       {
         "label": "overlay",
-        "title": "Bolo",
+        "title": "Bolo.com",
         "url": "index.html?view=overlay",
         "create": false,
-        "width": 420,
-        "height": 112,
+        "width": 268,
+        "height": 150,
         "visible": false,
         "resizable": false,
         "decorations": false,
@@ -58,10 +58,10 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "publisher": "Bolo",
-    "copyright": "Copyright © 2026 Bolo",
+    "publisher": "Bolo.com",
+    "copyright": "Copyright © 2026 Bolo.com",
     "shortDescription": "Push-to-talk voice dictation",
-    "longDescription": "Hold a hotkey, speak, and Bolo inserts the transcript at your cursor using Groq Whisper.",
+    "longDescription": "Hold a hotkey, speak, and Bolo.com inserts the transcript at your cursor using Groq Whisper.",
     "category": "Utility",
     "windows": {
       "webviewInstallMode": {
