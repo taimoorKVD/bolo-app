@@ -23,8 +23,6 @@ dist-ssr
 *.sln
 *.sw?
 
-# Installers copied by scripts/build-website.ps1
-website/downloads/
 
 target-msix/
 
@@ -35,3 +33,6 @@ src-tauri/target-store/
 *.key
 *.key.pub
 _secrets/
+
+# Leftover output of the removed build-website.ps1
+website/
