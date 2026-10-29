@@ -548,3 +548,13 @@ h3 { margin: 0 0 var(--space-2); font-size: 22px; line-height: 1.25; }
   .footer-bar nav { justify-self: start; }
 }
 
+
+/* Privacy policy page */
+.legal { max-width: 760px; padding-top: 64px; padding-bottom: 96px; }
+.legal h1 { font-family: var(--serif); font-size: clamp(2rem, 4vw, 2.8rem); margin: 0.2em 0 0.3em; color: var(--ink); }
+.legal h2 { font-family: var(--serif); color: var(--gold); font-size: 1.35rem; margin: 2.2em 0 0.6em; }
+.legal p, .legal li { color: var(--muted); line-height: 1.7; }
+.legal ul { padding-left: 1.2em; }
+.legal li { margin: 0.5em 0; }
+.legal strong { color: var(--ink); }
+.legal a { color: var(--gold); }

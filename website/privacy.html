@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Privacy Policy – Bolo</title>
+    <meta name="description" content="How Bolo handles your voice, transcripts, settings and API key. Audio goes to Groq for transcription; Bolo runs no servers of its own and has no ads, tracking or analytics." />
+    <link rel="canonical" href="https://bolo.thebetawebsite.com/privacy/" />
+    <link rel="icon" href="/assets/favicon.ico" sizes="any" />
+    <link rel="icon" type="image/png" href="/assets/icon-32.png" sizes="32x32" />
+    <link rel="apple-touch-icon" href="/assets/icon-180.png" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <a class="skip" href="#main">Skip to content</a>
+    <header class="site-header">
+      <div class="wrap header-bar">
+        <a class="brand" href="/" aria-label="Bolo home">
+          <img src="/assets/lockup.svg" alt="Bolo" width="148" height="40" />
+        </a>
+        <button class="nav-toggle" type="button" aria-expanded="false" aria-controls="site-nav" aria-label="Menu">
+          <span class="nav-toggle-bars"></span>
+        </button>
+        <nav id="site-nav" class="site-nav" aria-label="Primary">
+          <a href="/#how">How it works</a>
+          <a href="/#features">Features</a>
+          <a href="/privacy/" aria-current="page">Privacy</a>
+          <a href="/#faq">FAQ</a>
+        </nav>
+        <a class="button button-small" href="/downloads/Bolo_0.1.0_x64-setup.exe">Download</a>
+      </div>
+    </header>
+
+    <main id="main">
+      <article class="wrap legal">
+        <div class="section-head">
+          <p class="eyebrow">Privacy Policy</p>
+          <h1>Bolo Privacy Policy</h1>
+          <p class="section-lede">Effective date: October 29, 2026</p>
+        </div>
+
+        <p>Bolo (also listed as Bolo.com) is a push-to-talk dictation app for Windows published by Taimoor Hussain. This policy explains what Bolo does with your voice and your text. In short: your audio goes to Groq to be turned into text, everything else stays on your PC, and Bolo has no servers of its own.</p>
+
+        <h2>Audio and the microphone</h2>
+        <ul>
+          <li>To start instantly, Bolo keeps the microphone open while it is running and holds only the last second of sound in memory, overwriting it continuously. That rolling buffer is never saved or sent anywhere unless you start a take.</li>
+          <li>A take starts when you press your hotkey and ends when you release it (or, in hands-free mode, which you turn on with a double-tap, when you press the hotkey again). The take includes that short buffer so your first word is not cut off.</li>
+          <li>The audio for a take is sent to Groq for transcription with Whisper. Until the text has been pasted, the take is kept in a temporary file on your PC so it can be recovered after a crash; it is deleted once the paste succeeds.</li>
+        </ul>
+
+        <h2>Groq</h2>
+        <p>Bolo uses <a href="https://groq.com">Groq</a> for speech-to-text and, if you turn on cleanup, to remove filler words and fix punctuation in the transcript. For those features, the take's audio and the transcript text are sent to Groq's API. Groq handles that data under its own <a href="https://groq.com/privacy-policy/">privacy policy</a>. Bolo does not send your audio or text to any other company.</p>
+
+        <h2>Bolo runs no servers</h2>
+        <p>Bolo has no backend and no account system. Nothing you say or type is uploaded to, or stored on, any server run by Bolo or its publisher.</p>
+
+        <h2>What stays on your PC</h2>
+        <ul>
+          <li><strong>History:</strong> your most recent 50 transcripts are saved on your PC so you can copy or paste them again. You can turn history off in Settings.</li>
+          <li><strong>Settings and dictionary:</strong> your hotkey, language, cleanup choices and custom words are saved on your PC.</li>
+          <li><strong>Your Groq API key:</strong> if you add your own key, it is stored in Windows Credential Manager. It is not written to the settings file and it is not logged.</li>
+          <li><strong>Diagnostic log:</strong> a local log records timings and errors. It does not contain your API key or your transcripts.</li>
+        </ul>
+
+        <h2>Offline fallback</h2>
+        <p>If Groq is unavailable, Bolo can transcribe on your PC instead using an open-source Whisper model. The first time this is needed, Bolo downloads the model from Hugging Face and the whisper.cpp program from GitHub. These are plain file downloads; no audio or text is sent to them. You can turn the offline fallback off in Settings.</p>
+
+        <h2>No ads, tracking or analytics</h2>
+        <p>Bolo shows no ads, contains no trackers, and collects no analytics or telemetry. This website does not use analytics or tracking cookies either.</p>
+
+        <h2>Clipboard and other apps</h2>
+        <p>To paste your text, Bolo briefly places the transcript on the clipboard, presses Ctrl+V for you, and then restores what was there before. Bolo checks which app is in front only to choose a cleanup style on your PC; that is not sent anywhere.</p>
+
+        <h2>Deleting your data</h2>
+        <p>You can clear your history in the app, remove your API key in Settings, and uninstall Bolo at any time. Because Bolo keeps no copy on any server, there is nothing for us to delete remotely. For data held by Groq, see Groq's privacy policy.</p>
+
+        <h2>Children</h2>
+        <p>Bolo is a general productivity tool and does not knowingly collect personal information from anyone, including children.</p>
+
+        <h2>Changes</h2>
+        <p>If this policy changes, the new version will be posted on this page with a new effective date.</p>
+
+        <h2>Contact</h2>
+        <p>Questions about privacy can be sent to Taimoor Hussain, the publisher of Bolo, through this website: <a href="https://bolo.thebetawebsite.com/">bolo.thebetawebsite.com</a>.</p>
+      </article>
+    </main>
+
+    <footer class="site-footer">
+      <div class="wrap footer-bar">
+        <img src="/assets/lockup.svg" alt="" width="140" height="40" />
+        <p>Bolo – <bdi lang="ur">بولو</bdi> – push-to-talk dictation for Windows.</p>
+        <nav aria-label="Footer">
+          <a href="/privacy/">Privacy</a>
+          <a href="/#faq">FAQ</a>
+          <a href="/downloads/Bolo_0.1.0_x64-setup.exe">Download</a>
+        </nav>
+      </div>
+    </footer>
+    <script>
+      (function () {
+        var t = document.querySelector(".nav-toggle"), n = document.getElementById("site-nav");
+        if (!t || !n) return;
+        t.addEventListener("click", function () {
+          var open = t.getAttribute("aria-expanded") === "true";
+          t.setAttribute("aria-expanded", String(!open));
+          n.classList.toggle("is-open", !open);
+        });
+      })();
+    </script>
+  </body>
+</html>
