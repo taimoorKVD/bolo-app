@@ -110,6 +110,7 @@ impl LiveTake {
 
 pub struct WarmMic {
     cmd: Sender<Cmd>,
+    watch: Arc<Watch>,
     level: Arc<AtomicU32>,
     live: Arc<AtomicBool>,
 }
@@ -129,7 +130,7 @@ impl WarmMic {
         // Ask the thread to record this preference even if spawn raced.
         // The same name does not reopen the stream.
         let _ = cmd_tx.send(Cmd::Retarget(preference));
-        Self { cmd: cmd_tx, level, live }
+        Self { cmd: cmd_tx, watch, level, live }
     }
 
     /// True once a capture stream is playing. Key-down does not wait on this.
@@ -145,6 +146,11 @@ impl WarmMic {
         } else {
             (rms * 4.5).clamp(0.0, 1.0)
         }
+    }
+
+    /// Reopen the capture stream even if it looks healthy (resume, device reset).
+    pub fn force_reopen(&self) {
+        self.watch.force_reopen.store(true, Ordering::Relaxed);
     }
 
     pub fn retarget(&self, preference: Option<String>) {
@@ -249,6 +255,9 @@ struct Watch {
     note: Mutex<String>,
     preference_epoch: AtomicU64,
     default_event: AtomicBool,
+    /// Set on resume from sleep/hibernate: WASAPI streams can stay "live"
+    /// after resume but stop delivering samples, so reopen unconditionally.
+    force_reopen: AtomicBool,
     config_dir: Option<PathBuf>,
 }
 
@@ -261,6 +270,7 @@ impl Watch {
             note: Mutex::new(String::new()),
             preference_epoch: AtomicU64::new(0),
             default_event: AtomicBool::new(false),
+            force_reopen: AtomicBool::new(false),
             config_dir,
         }
     }
@@ -290,6 +300,7 @@ enum ReopenReason {
     StreamError,
     Preference,
     DeviceChanged,
+    Resume,
 }
 
 impl ReopenReason {
@@ -299,6 +310,7 @@ impl ReopenReason {
             Self::StreamError => "stream-error",
             Self::Preference => "preference",
             Self::DeviceChanged => "device-changed",
+            Self::Resume => "resume",
         }
     }
 }
@@ -419,7 +431,12 @@ fn io_loop(state: Arc<Mutex<Capture>>, live: Arc<AtomicBool>, watch: Arc<Watch>)
             NameCheck::Same
         };
         let names_differ = matches!(names, NameCheck::Differ);
-        let reason = plan_reopen(have_stream, ever_opened, preference_dirty, default_event, names_differ);
+        let forced = watch.force_reopen.swap(false, Ordering::Relaxed);
+        let reason = if forced {
+            Some(ReopenReason::Resume)
+        } else {
+            plan_reopen(have_stream, ever_opened, preference_dirty, default_event, names_differ)
+        };
 
         if reason.is_none() {
             if preference_dirty && !matches!(names, NameCheck::Unknown) {
@@ -432,7 +449,10 @@ fn io_loop(state: Arc<Mutex<Capture>>, live: Arc<AtomicBool>, watch: Arc<Watch>)
             continue;
         }
         let reason = reason.expect("reason");
-        if matches!(reason, ReopenReason::StreamError) && Instant::now() < reopen_after {
+        if matches!(reason, ReopenReason::StreamError | ReopenReason::Resume) && Instant::now() < reopen_after {
+            if forced {
+                watch.force_reopen.store(true, Ordering::Relaxed);
+            }
             std::thread::sleep(Duration::from_millis(40));
             continue;
         }
@@ -464,6 +484,10 @@ fn io_loop(state: Arc<Mutex<Capture>>, live: Arc<AtomicBool>, watch: Arc<Watch>)
             }
             Err(err) => {
                 reopen_after = Instant::now() + Duration::from_millis(400);
+                if matches!(reason, ReopenReason::Resume) {
+                    // Audio services may still be starting after resume; retry.
+                    watch.force_reopen.store(true, Ordering::Relaxed);
+                }
                 if err != last_fail || last_fail_at.elapsed() >= Duration::from_secs(5) {
                     log_warm(
                         &watch,

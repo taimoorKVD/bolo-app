@@ -1,6 +1,6 @@
 [package]
 name = "cadence"
-version = "0.1.0"
+version = "0.1.1"
 description = "Bolo push-to-talk voice dictation for Windows"
 authors = ["Bolo"]
 edition = "2021"
@@ -15,12 +15,19 @@ rust-version = "1.85"
 name = "cadence_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+# In-app updates for the direct-download build. The Microsoft Store build
+# (scripts/build-msix.ps1) uses --no-default-features: the Store updates it.
+default = ["updater"]
+updater = ["dep:tauri-plugin-updater"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-autostart = "2"
+tauri-plugin-updater = { version = "2", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"

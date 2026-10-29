@@ -1,6 +1,7 @@
 import { api, inTauri } from "./api";
 import { mountOverlay } from "./overlay";
 import { mountSettings } from "./settings";
+import { mountUpdatePrompt } from "./update";
 
 const root = document.querySelector<HTMLElement>("#app");
 
@@ -32,6 +33,7 @@ async function boot(): Promise<void> {
       return;
     }
     const loaded = await mountSettings(root);
+    if (!smoke) void mountUpdatePrompt();
     if (!smoke) return;
     if (loaded.ok) await api.smokeFinished(true, loaded.detail);
     else await api.smokeFinished(false, loaded.error);

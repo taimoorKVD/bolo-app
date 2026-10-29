@@ -5,14 +5,26 @@ param(
   [string]$Publisher = "CN=00000000-0000-0000-0000-000000000000",
   [string]$PublisherDisplayName = "PLACEHOLDER",
   [string]$Version = "",
-  [switch]$Build
+  [switch]$Build,
+  [switch]$SkipBuild
 )
 $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot -Parent
 if (-not $Version) { $v = (Get-Content "$root\src-tauri\tauri.conf.json" -Raw | ConvertFrom-Json).version; $Version = "$v.0" }
-if ($Build) { Push-Location $root; npx tauri build --no-bundle; Pop-Location }
-$exe = "$root\src-tauri\target\release\cadence.exe"
-if (-not (Test-Path $exe)) { throw "Missing $exe - run with -Build" }
+# The Store updates the MSIX itself, so this build has no in-app updater
+# (--no-default-features drops the `updater` cargo feature). It builds into its
+# own target dir so an updater-enabled NSIS build can never be packaged by mistake.
+$storeTarget = "$root\src-tauri\target-store"
+$exe = "$storeTarget\release\cadence.exe"
+if (-not $SkipBuild -or -not (Test-Path $exe)) {
+  Push-Location $root
+  $env:CARGO_TARGET_DIR = $storeTarget
+  try {
+    npx tauri build --no-bundle -- --no-default-features
+    if ($LASTEXITCODE -ne 0) { throw "tauri build failed" }
+  } finally { Remove-Item Env:CARGO_TARGET_DIR -ErrorAction SilentlyContinue; Pop-Location }
+}
+if (-not (Test-Path $exe)) { throw "Missing $exe" }
 
 $tools = "$env:LOCALAPPDATA\bolo-sdk-tools"
 $makeappx = Get-ChildItem "$tools\bt" -Recurse -Filter makeappx.exe -ErrorAction SilentlyContinue | Where-Object FullName -like "*\x64\*" | Select-Object -First 1

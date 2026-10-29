@@ -5,6 +5,7 @@ mod cleanup;
 mod context;
 mod credentials;
 mod dictation;
+mod health;
 mod hotkey;
 mod insert;
 mod listener;
@@ -13,8 +14,11 @@ mod micwatch;
 mod offline;
 mod pipeline;
 mod spool;
+#[cfg(windows)]
+mod startup;
 mod store;
 mod transcribe;
+mod updater;
 mod warm;
 
 #[cfg(test)]
@@ -42,6 +46,7 @@ pub fn run() {
             show_settings(&app);
         }));
     }
+    builder = updater::init(builder);
     builder
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
@@ -65,7 +70,11 @@ pub fn run() {
             mic_level,
             copy_text,
             open_groq_keys,
-            smoke_finished
+            smoke_finished,
+            updater::check_for_update,
+            updater::pending_update,
+            updater::install_update,
+            updater::updates_enabled
         ])
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
@@ -82,6 +91,7 @@ pub fn run() {
             // loads the bundled page and invokes get_settings before manage().
             // A setup error then aborts the process with state still missing, so
             // this hook always returns Ok once state is registered.
+            let boot = std::time::Instant::now();
             let smoke = std::env::var("CADENCE_SMOKE").ok().as_deref() == Some("1");
             let dir = config_dir(app);
             if let Err(err) = std::fs::create_dir_all(&dir) {
@@ -107,12 +117,20 @@ pub fn run() {
             listener.set_on_status(move |status| {
                 let _ = emit_app.emit("listener-status", &status);
             });
+            let timing_dir = dir.clone();
+            listener::set_timing_sink(move |name, ms| {
+                logbuf::log_line(&timing_dir, "info", &format!("startup {name}={ms}"));
+            });
             let (tx, rx) = mpsc::channel::<InputEvent>();
+            // Install the keyboard hook first so the hotkey works even while
+            // WebView2 and the tray are still starting.
             listener::spawn(listener, tx);
+            logbuf::log_line(&dir, "info", &format!("startup listener_spawned_ms={}", boot.elapsed().as_millis()));
 
             if let Err(err) = create_windows(app, smoke) {
                 logbuf::log_line(&dir, "error", &format!("windows: {err}"));
             }
+            logbuf::log_line(&dir, "info", &format!("startup windows_created_ms={}", boot.elapsed().as_millis()));
             let handle = app.handle().clone();
             if let Err(err) = std::thread::Builder::new()
                 .name("cadence-dictation".into())
@@ -135,6 +153,9 @@ pub fn run() {
             if let Some(overlay) = app.get_webview_window("overlay") {
                 let _ = overlay.set_ignore_cursor_events(true);
                 let _ = overlay.hide();
+                if !smoke {
+                    warm_overlay(app.handle().clone(), dir.clone());
+                }
             }
 
             let tray_ok = match setup_tray(app.handle(), &settings.hotkey) {
@@ -159,7 +180,15 @@ pub fn run() {
                 "info",
                 &format!("Bolo ready, hold {}", display(&settings.hotkey)),
             );
+            logbuf::log_line(&dir, "info", &format!("startup setup_ms={}", boot.elapsed().as_millis()));
             micwatch::spawn(app.handle().clone());
+            health::spawn(app.handle().clone());
+            updater::spawn(app.handle());
+            #[cfg(windows)]
+            {
+                let startup_dir = dir.clone();
+                std::thread::spawn(move || startup::clean_stale_autostart(&startup_dir));
+            }
             dictation::recover_spool(app.handle());
             offline::prefetch(dir.clone(), settings.offline_model.clone());
             Ok(())
@@ -214,6 +243,29 @@ fn create_windows(app: &tauri::App, smoke: bool) -> Result<(), String> {
     Ok(())
 }
 
+/// WebView2 does not load a window that has never been shown, so the first
+/// key-down after login used to wait for the overlay page to load. Show it
+/// once, off-screen and without focus, so the page is loaded before any press.
+fn warm_overlay(app: tauri::AppHandle, dir: std::path::PathBuf) {
+    let started = std::time::Instant::now();
+    let Some(overlay) = app.get_webview_window("overlay") else { return };
+    park_offscreen(&overlay);
+    let _ = overlay.show();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        let idle = app
+            .try_state::<AppState>()
+            .map(|state| dictation::is_idle(&state))
+            .unwrap_or(true);
+        if let Some(overlay) = app.get_webview_window("overlay") {
+            if idle {
+                let _ = overlay.hide();
+            }
+        }
+        logbuf::log_line(&dir, "info", &format!("startup overlay_warmed_ms={}", started.elapsed().as_millis()));
+    });
+}
+
 fn park_offscreen<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) {
     // Outside any real virtual-screen layout. Windows parks its own hidden
     // windows in this region.
@@ -250,7 +302,7 @@ fn setup_tray(app: &tauri::AppHandle, hotkey: &hotkey::Hotkey) -> tauri::Result<
     Ok(())
 }
 
-fn show_settings(app: &tauri::AppHandle) {
+pub(crate) fn show_settings(app: &tauri::AppHandle) {
     if std::env::var("CADENCE_SMOKE").ok().as_deref() == Some("1") {
         return;
     }

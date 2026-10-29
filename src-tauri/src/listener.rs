@@ -13,7 +13,7 @@ use crate::hotkey::{kind_from_vk, should_swallow_keydown, snapshot_from_kinds, K
 #[cfg(windows)]
 use std::collections::HashSet;
 use serde::Serialize;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
@@ -41,6 +41,10 @@ pub struct ListenerControl {
     pub paste_hotkey: Arc<RwLock<Hotkey>>,
     pub paused: Arc<AtomicBool>,
     pub status: Arc<Mutex<ListenerStatus>>,
+    /// Win32 id of the hook thread (0 until it starts). Used to post a reinstall.
+    pub hook_thread: Arc<AtomicU32>,
+    /// `KBDLLHOOKSTRUCT.time` of the last key the hook saw (GetTickCount base).
+    pub last_key_tick: Arc<AtomicU32>,
     on_status: Arc<Mutex<Option<StatusHook>>>,
 }
 
@@ -54,6 +58,8 @@ impl ListenerControl {
                 running: false,
                 error: None,
             })),
+            hook_thread: Arc::new(AtomicU32::new(0)),
+            last_key_tick: Arc::new(AtomicU32::new(0)),
             on_status: Arc::new(Mutex::new(None)),
         }
     }
@@ -77,6 +83,26 @@ impl ListenerControl {
         *self.hotkey.write().unwrap_or_else(|err| err.into_inner()) = hotkey;
     }
 
+    /// Ask the hook thread to drop and reinstall its keyboard hook. Windows
+    /// silently unhooks a low-level hook that misses LowLevelHooksTimeout,
+    /// which happens under load at login and after resume.
+    pub fn request_reinstall(&self) -> bool {
+        #[cfg(windows)]
+        {
+            use windows::Win32::Foundation::{LPARAM, WPARAM};
+            use windows::Win32::UI::WindowsAndMessaging::PostThreadMessageW;
+            let id = self.hook_thread.load(Ordering::SeqCst);
+            if id == 0 {
+                return false;
+            }
+            unsafe { PostThreadMessageW(id, WM_REINSTALL, WPARAM(0), LPARAM(0)).is_ok() }
+        }
+        #[cfg(not(windows))]
+        {
+            false
+        }
+    }
+
     pub fn current_paste_hotkey(&self) -> Hotkey {
         self.paste_hotkey
             .read()
@@ -88,6 +114,9 @@ impl ListenerControl {
         *self.paste_hotkey.write().unwrap_or_else(|err| err.into_inner()) = hotkey;
     }
 }
+
+#[cfg(windows)]
+const WM_REINSTALL: u32 = 0x8000 + 0x42; // WM_APP + 0x42
 
 pub fn spawn(control: ListenerControl, tx: Sender<InputEvent>) {
     let reported = control.clone();
@@ -131,6 +160,7 @@ fn run_platform(control: ListenerControl, tx: Sender<InputEvent>) -> Result<(), 
     }
 
     static HOOK: Mutex<Option<HookShared>> = Mutex::new(None);
+    static LAST_TICK: AtomicU32 = AtomicU32::new(0);
 
     unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
         if code < 0 {
@@ -149,6 +179,7 @@ fn run_platform(control: ListenerControl, tx: Sender<InputEvent>) -> Result<(), 
             return unsafe { CallNextHookEx(None, code, wparam, lparam) };
         }
         let vk = info.vkCode as u16;
+        LAST_TICK.store(info.time, Ordering::Relaxed);
         let swallow = {
             let mut guard = HOOK.lock().unwrap_or_else(|err| err.into_inner());
             let Some(shared) = guard.as_mut() else {
@@ -164,6 +195,7 @@ fn run_platform(control: ListenerControl, tx: Sender<InputEvent>) -> Result<(), 
     }
 
     fn on_key(shared: &mut HookShared, vk: u16, is_down: bool) -> bool {
+        shared.control.last_key_tick.store(LAST_TICK.load(Ordering::Relaxed), Ordering::Relaxed);
         let repeat = is_down && shared.down.contains(&vk);
         if is_down {
             shared.down.insert(vk);
@@ -219,10 +251,59 @@ fn run_platform(control: ListenerControl, tx: Sender<InputEvent>) -> Result<(), 
         });
     }
 
+    use windows::Win32::System::Threading::{
+        GetCurrentThread, GetCurrentThreadId, SetThreadPriority, THREAD_PRIORITY_TIME_CRITICAL,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{PeekMessageW, UnhookWindowsHookEx, HHOOK, PM_NOREMOVE};
+
+    let started = std::time::Instant::now();
     unsafe {
-        let _hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_proc), None, 0)
-            .map_err(|err| format!("couldn't install the keyboard hook: {err}"))?;
-        set_status(&control, true, None);
+        // The hook callback must return within LowLevelHooksTimeout or Windows
+        // drops it. At login the CPU is saturated, so run this thread first.
+        let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+        // Create the message queue before publishing the id so a posted
+        // reinstall is never lost.
+        let mut probe = MSG::default();
+        let _ = PeekMessageW(&mut probe, None, 0, 0, PM_NOREMOVE);
+        control.hook_thread.store(GetCurrentThreadId(), Ordering::SeqCst);
+    }
+
+    let install = |control: &ListenerControl| -> HHOOK {
+        // Retry with backoff: SetWindowsHookExW can fail while the desktop
+        // session is still coming up.
+        let mut delay = 100u64;
+        let mut attempt = 0u32;
+        loop {
+            attempt += 1;
+            match unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_proc), None, 0) } {
+                Ok(hook) => {
+                    set_status(control, true, None);
+                    return hook;
+                }
+                Err(err) => {
+                    let message = format!("couldn't install the keyboard hook (attempt {attempt}): {err}");
+                    set_status(control, false, Some(message));
+                    thread::sleep(std::time::Duration::from_millis(delay));
+                    delay = (delay * 2).min(5_000);
+                }
+            }
+        }
+    };
+
+    let mut hook = install(&control);
+    crate::listener::note_timing("hook_installed_ms", started.elapsed().as_millis() as u64);
+    let reset_keys = || {
+        if let Ok(mut guard) = HOOK.lock() {
+            if let Some(shared) = guard.as_mut() {
+                shared.down.clear();
+                shared.swallowed.clear();
+                shared.edges = EdgeListener::default();
+                shared.paste_edges = EdgeListener::default();
+            }
+        }
+    };
+    let _ = &LAST_TICK;
+    unsafe {
         let mut message = MSG::default();
         loop {
             // GetMessageW returns nonzero for a message, 0 for WM_QUIT, and -1 on failure.
@@ -232,14 +313,43 @@ fn run_platform(control: ListenerControl, tx: Sender<InputEvent>) -> Result<(), 
                 break;
             }
             if status < 0 {
+                let _ = UnhookWindowsHookEx(hook);
                 return Err("the keyboard hook message loop failed".into());
+            }
+            if message.hwnd.0.is_null() && message.message == WM_REINSTALL {
+                let at = std::time::Instant::now();
+                let _ = UnhookWindowsHookEx(hook);
+                reset_keys();
+                hook = install(&control);
+                crate::listener::note_timing("hook_reinstalled_ms", at.elapsed().as_millis() as u64);
+                continue;
             }
             let _ = TranslateMessage(&message);
             DispatchMessageW(&message);
         }
+        let _ = UnhookWindowsHookEx(hook);
     }
     set_status(&control, false, None);
     Ok(())
+}
+
+type TimingHook = Box<dyn Fn(&str, u64) + Send + Sync>;
+static TIMING: Mutex<Option<TimingHook>> = Mutex::new(None);
+
+/// Route listener timings to the app log (set once from setup).
+pub fn set_timing_sink(sink: impl Fn(&str, u64) + Send + Sync + 'static) {
+    if let Ok(mut slot) = TIMING.lock() {
+        *slot = Some(Box::new(sink));
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) fn note_timing(name: &str, ms: u64) {
+    if let Ok(slot) = TIMING.lock() {
+        if let Some(sink) = slot.as_ref() {
+            sink(name, ms);
+        }
+    }
 }
 
 #[cfg(windows)]

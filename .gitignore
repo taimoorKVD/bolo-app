@@ -27,3 +27,11 @@ dist-ssr
 website/downloads/
 
 target-msix/
+
+# Store (MSIX) build without the updater
+src-tauri/target-store/
+
+# Updater signing keys must never be committed
+*.key
+*.key.pub
+_secrets/

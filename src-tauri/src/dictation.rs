@@ -279,6 +279,11 @@ fn instant_listen_event(level: f32) -> DictationEvent {
     }
 }
 
+/// True when no take is arming, recording, or being transcribed.
+pub fn is_idle(state: &AppState) -> bool {
+    matches!(lock(&state.engine).phase, Phase::Idle)
+}
+
 pub fn hotkey(app: &AppHandle, edge: HotkeyEdge) {
     match edge {
         HotkeyEdge::Pressed => on_press(app),
