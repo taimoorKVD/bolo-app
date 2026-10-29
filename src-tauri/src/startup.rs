@@ -12,6 +12,8 @@ use std::process::Command;
 
 const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+/// Value name tauri-plugin-autostart writes (the product name).
+const OWN_RUN_NAME: &str = "Bolo.com";
 
 pub fn clean_stale_autostart(log_dir: &Path) {
     let Ok(current) = std::env::current_exe() else { return };
@@ -26,6 +28,10 @@ pub fn clean_stale_autostart(log_dir: &Path) {
     let text = String::from_utf8_lossy(&output.stdout);
     for line in text.lines() {
         let Some((name, data)) = parse_value(line) else { continue };
+        // Our own value is rewritten by apply_autostart; never delete it.
+        if name.eq_ignore_ascii_case(OWN_RUN_NAME) {
+            continue;
+        }
         let lower = data.to_lowercase();
         if !lower.contains("cadence.exe") || lower.contains(&current) {
             continue;

@@ -127,8 +127,28 @@ pub fn run() {
             listener::spawn(listener, tx);
             logbuf::log_line(&dir, "info", &format!("startup listener_spawned_ms={}", boot.elapsed().as_millis()));
 
-            if let Err(err) = create_windows(app, smoke) {
-                logbuf::log_line(&dir, "error", &format!("windows: {err}"));
+            // WebView2 can take 10+ s on the first launch after install. Building
+            // the overlay from a worker thread lets setup return at once; the
+            // settings window is created on first open (show_settings).
+            if smoke {
+                if let Err(err) = create_windows(app, smoke) {
+                    logbuf::log_line(&dir, "error", &format!("windows: {err}"));
+                }
+            } else {
+                let win_app = app.handle().clone();
+                let win_dir = dir.clone();
+                std::thread::spawn(move || {
+                    let t0 = std::time::Instant::now();
+                    match build_window(&win_app, "overlay") {
+                        Ok(overlay) => {
+                            logbuf::log_line(&win_dir, "info", &format!("startup overlay_built_ms={} since_boot_ms={}", t0.elapsed().as_millis(), boot.elapsed().as_millis()));
+                            let _ = overlay.set_ignore_cursor_events(true);
+                            let _ = overlay.hide();
+                            warm_overlay(win_app.clone(), win_dir.clone());
+                        }
+                        Err(err) => logbuf::log_line(&win_dir, "error", &format!("overlay window: {err}")),
+                    }
+                });
             }
             logbuf::log_line(&dir, "info", &format!("startup windows_created_ms={}", boot.elapsed().as_millis()));
             let handle = app.handle().clone();
@@ -150,11 +170,10 @@ pub fn run() {
                 transcribe::prewarm(&prewarm_dir).await;
             });
 
-            if let Some(overlay) = app.get_webview_window("overlay") {
-                let _ = overlay.set_ignore_cursor_events(true);
-                let _ = overlay.hide();
-                if !smoke {
-                    warm_overlay(app.handle().clone(), dir.clone());
+            if smoke {
+                if let Some(overlay) = app.get_webview_window("overlay") {
+                    let _ = overlay.set_ignore_cursor_events(true);
+                    let _ = overlay.hide();
                 }
             }
 
@@ -310,7 +329,38 @@ pub(crate) fn show_settings(app: &tauri::AppHandle) {
         let _ = window.show();
         let _ = window.unminimize();
         let _ = window.set_focus();
+        return;
     }
+    // Created lazily. build() must not run on the main thread from an IPC
+    // handler, so build from a worker thread; it dispatches to the main loop.
+    let app = app.clone();
+    std::thread::spawn(move || match build_window(&app, "settings") {
+        Ok(window) => {
+            let _ = window.show();
+            let _ = window.unminimize();
+            let _ = window.set_focus();
+        }
+        Err(err) => eprintln!("settings window: {err}"),
+    });
+}
+
+/// Build one window from tauri.conf.json, or return it if it already exists.
+fn build_window(app: &tauri::AppHandle, label: &str) -> Result<tauri::WebviewWindow, String> {
+    if let Some(window) = app.get_webview_window(label) {
+        return Ok(window);
+    }
+    let config = app
+        .config()
+        .app
+        .windows
+        .iter()
+        .find(|config| config.label == label)
+        .cloned()
+        .ok_or_else(|| format!("no window config for {label}"))?;
+    tauri::WebviewWindowBuilder::from_config(app, &config)
+        .map_err(|err| err.to_string())?
+        .build()
+        .map_err(|err| err.to_string())
 }
 
 fn update_tooltip(app: &tauri::AppHandle, hotkey: &hotkey::Hotkey) {

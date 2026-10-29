@@ -19,7 +19,7 @@ pub const CLEANUP_MODELS: &[&str] = &[
     "openai/gpt-oss-120b",
     "qwen/qwen3.6-27b",
 ];
-const CLEANUP_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1200);
+const CLEANUP_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(3000);
 
 fn model_order(preferred: &str) -> Vec<String> {
     let mut out = Vec::new();
@@ -535,7 +535,7 @@ async fn post_chat(
     max_tokens: u32,
     using_builtin: bool,
 ) -> Result<String, CleanupFail> {
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "model": model,
         "temperature": 0,
         "max_tokens": max_tokens,
@@ -544,6 +544,16 @@ async fn post_chat(
             { "role": "user", "content": user }
         ]
     });
+    // gpt-oss models reason before answering, and reasoning tokens count
+    // against max_tokens. With the small budget used here the answer was
+    // often cut off before any text ("cleanup response had no text").
+    if model.starts_with("openai/gpt-oss") {
+        body["reasoning_effort"] = serde_json::json!("low");
+        body["include_reasoning"] = serde_json::json!(false);
+        body["max_tokens"] = serde_json::json!(max_tokens + 512);
+    } else if model.starts_with("qwen/") {
+        body["reasoning_effort"] = serde_json::json!("none");
+    }
     let response = match client
         .post("https://api.groq.com/openai/v1/chat/completions")
         .timeout(CLEANUP_TIMEOUT)

@@ -77,7 +77,7 @@ impl Default for Settings {
             cleanup_enabled: true,
             language: "auto".into(),
             dictionary: Vec::new(),
-            launch_at_startup: false,
+            launch_at_startup: true,
             history_enabled: true,
             paste_hotkey: Hotkey::paste_again(),
             offline_model: "base.en".into(),
