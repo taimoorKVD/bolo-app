@@ -1,6 +1,6 @@
 [package]
 name = "cadence"
-version = "0.1.1"
+version = "0.1.2"
 description = "Bolo push-to-talk voice dictation for Windows"
 authors = ["Bolo"]
 edition = "2021"
