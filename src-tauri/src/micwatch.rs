@@ -1,7 +1,7 @@
 //! Watch for microphones being plugged, unplugged, or chosen as the Windows default.
 //!
 //! Every recording already re-resolves the device. This thread updates the
-//! settings window while Cadence is idle. On Windows it also registers an
+//! settings window while Bolo is idle. On Windows it also registers an
 //! endpoint notification callback so a hot-plug is noticed immediately; a
 //! one-second poll covers the same changes if the callback cannot be installed.
 
@@ -14,7 +14,7 @@ use tauri::{AppHandle, Emitter, Manager};
 
 pub fn spawn(app: AppHandle) {
     let _ = std::thread::Builder::new()
-        .name("cadence-mics".into())
+        .name("bolo-mics".into())
         .spawn(move || watch(app));
 }
 

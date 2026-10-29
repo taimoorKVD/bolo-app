@@ -630,8 +630,8 @@ mod tests {
     fn prompt_includes_terms_and_truncates() {
         assert_eq!(whisper_prompt(&[]), None);
         assert_eq!(
-            whisper_prompt(&["  Cadence  ".into(), "".into(), "Tauri".into()]).as_deref(),
-            Some("Dictation transcript. Spell these terms exactly when spoken: Cadence, Tauri.")
+            whisper_prompt(&["  Bolo  ".into(), "".into(), "Tauri".into()]).as_deref(),
+            Some("Dictation transcript. Spell these terms exactly when spoken: Bolo, Tauri.")
         );
         let huge = vec!["Supercalifragilistic".to_string(); 80];
         let prompt = whisper_prompt(&huge).unwrap();

@@ -287,7 +287,7 @@ pub fn start_recording(wanted: Option<&str>) -> anyhow::Result<RecordingSession>
     let error_flag = Arc::clone(&error);
 
     let worker = thread::Builder::new()
-        .name("cadence-audio".into())
+        .name("bolo-audio".into())
         .spawn(move || {
             capture_until_stop(
                 wanted.as_deref(),
@@ -1430,7 +1430,7 @@ mod tests {
                 return;
             }
         };
-        let missing = "Cadence Missing Mic 9000";
+        let missing = "Bolo Missing Mic 9000";
         let report = match capture_for(Some(missing), Duration::from_millis(400)) {
             Ok(report) => report,
             Err(err) => {

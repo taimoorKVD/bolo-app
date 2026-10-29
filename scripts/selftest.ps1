@@ -95,11 +95,11 @@ function Invoke-LimitedCargo {
 }
 
 function Initialize-SmokeJob {
-    if ("CadenceSmokeJob" -as [type]) { return $true }
+    if ("BoloSmokeJob" -as [type]) { return $true }
     $source = @'
 using System;
 using System.Runtime.InteropServices;
-public static class CadenceSmokeJob {
+public static class BoloSmokeJob {
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     static extern IntPtr CreateJobObject(IntPtr lpJobAttributes, string lpName);
     [DllImport("kernel32.dll", SetLastError = true)]
@@ -222,7 +222,7 @@ function Invoke-StartupSmoke {
         return $false
     }
 
-    $work = Join-Path ([System.IO.Path]::GetTempPath()) ("cadence-smoke-" + [guid]::NewGuid().ToString("n"))
+    $work = Join-Path ([System.IO.Path]::GetTempPath()) ("bolo-smoke-" + [guid]::NewGuid().ToString("n"))
     New-Item -ItemType Directory -Path $work | Out-Null
     $result = Join-Path $work "result.txt"
     $pretty = @'
@@ -249,9 +249,9 @@ function Invoke-StartupSmoke {
     $psi.FileName = $exe
     $psi.WorkingDirectory = $root
     $psi.UseShellExecute = $false
-    $psi.EnvironmentVariables["CADENCE_SMOKE"] = "1"
-    $psi.EnvironmentVariables["CADENCE_SMOKE_RESULT"] = $result
-    $psi.EnvironmentVariables["CADENCE_CONFIG_DIR"] = $work
+    $psi.EnvironmentVariables["BOLO_SMOKE"] = "1"
+    $psi.EnvironmentVariables["BOLO_SMOKE_RESULT"] = $result
+    $psi.EnvironmentVariables["BOLO_CONFIG_DIR"] = $work
 
     $jobReady = Initialize-SmokeJob
     $proc = $null
@@ -264,7 +264,7 @@ function Invoke-StartupSmoke {
         $proc.StartInfo = $psi
         [void]$proc.Start()
         if ($jobReady) {
-            $job = [CadenceSmokeJob]::TryAssign([int]$proc.Id)
+            $job = [BoloSmokeJob]::TryAssign([int]$proc.Id)
             if ($job -eq [IntPtr]::Zero) {
                 Write-Host "Smoke process was not placed in a kill-on-close job. taskkill /T will still run."
             }
@@ -314,7 +314,7 @@ function Invoke-StartupSmoke {
         $detail = "Could not start or watch ${exe}: $($_.Exception.Message)"
     } finally {
         if ($job -ne [IntPtr]::Zero) {
-            try { [CadenceSmokeJob]::TerminateAndClose($job) } catch {}
+            try { [BoloSmokeJob]::TerminateAndClose($job) } catch {}
             $job = [IntPtr]::Zero
         }
         Stop-SmokeTree $proc

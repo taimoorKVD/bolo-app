@@ -92,7 +92,7 @@ pub fn run() {
             // A setup error then aborts the process with state still missing, so
             // this hook always returns Ok once state is registered.
             let boot = std::time::Instant::now();
-            let smoke = std::env::var("CADENCE_SMOKE").ok().as_deref() == Some("1");
+            let smoke = std::env::var("BOLO_SMOKE").ok().as_deref() == Some("1");
             let dir = config_dir(app);
             if let Err(err) = std::fs::create_dir_all(&dir) {
                 eprintln!("config directory: {err}");
@@ -153,7 +153,7 @@ pub fn run() {
             logbuf::log_line(&dir, "info", &format!("startup windows_created_ms={}", boot.elapsed().as_millis()));
             let handle = app.handle().clone();
             if let Err(err) = std::thread::Builder::new()
-                .name("cadence-dictation".into())
+                .name("bolo-dictation".into())
                 .spawn(move || {
                     while let Ok(event) = rx.recv() {
                         match event {
@@ -217,7 +217,7 @@ pub fn run() {
 }
 
 fn config_dir(app: &tauri::App) -> std::path::PathBuf {
-    if let Some(dir) = std::env::var_os("CADENCE_CONFIG_DIR") {
+    if let Some(dir) = std::env::var_os("BOLO_CONFIG_DIR") {
         let dir = std::path::PathBuf::from(dir);
         if !dir.as_os_str().is_empty() {
             return dir;
@@ -225,7 +225,7 @@ fn config_dir(app: &tauri::App) -> std::path::PathBuf {
     }
     app.path()
         .app_config_dir()
-        .unwrap_or_else(|_| std::env::temp_dir().join("cadence"))
+        .unwrap_or_else(|_| std::env::temp_dir().join("bolo"))
 }
 
 fn create_windows(app: &tauri::App, smoke: bool) -> Result<(), String> {
@@ -242,7 +242,7 @@ fn create_windows(app: &tauri::App, smoke: bool) -> Result<(), String> {
             // moved off-screen before anything shows it.
             builder = builder.visible(false).focused(false).skip_taskbar(true);
             if config.label == "settings" {
-                builder = builder.initialization_script("window.__CADENCE_SMOKE__ = true;");
+                builder = builder.initialization_script("window.__BOLO_SMOKE__ = true;");
             }
         }
         let window = builder.build().map_err(|err| err.to_string())?;
@@ -322,7 +322,7 @@ fn setup_tray(app: &tauri::AppHandle, hotkey: &hotkey::Hotkey) -> tauri::Result<
 }
 
 pub(crate) fn show_settings(app: &tauri::AppHandle) {
-    if std::env::var("CADENCE_SMOKE").ok().as_deref() == Some("1") {
+    if std::env::var("BOLO_SMOKE").ok().as_deref() == Some("1") {
         return;
     }
     if let Some(window) = app.get_webview_window("settings") {
@@ -559,14 +559,14 @@ fn open_groq_keys() -> Result<(), String> {
     open::that("https://console.groq.com/keys").map_err(|err| err.to_string())
 }
 
-/// Used by the Windows startup smoke test. Ignored unless CADENCE_SMOKE=1,
+/// Used by the Windows startup smoke test. Ignored unless BOLO_SMOKE=1,
 /// so a page cannot exit the normal app by calling it.
 #[tauri::command]
 fn smoke_finished(app: tauri::AppHandle, ok: bool, detail: Option<String>) {
-    if std::env::var("CADENCE_SMOKE").ok().as_deref() != Some("1") {
+    if std::env::var("BOLO_SMOKE").ok().as_deref() != Some("1") {
         return;
     }
-    if let Some(path) = std::env::var_os("CADENCE_SMOKE_RESULT") {
+    if let Some(path) = std::env::var_os("BOLO_SMOKE_RESULT") {
         let line = if ok {
             format!("OK {}\n", detail.unwrap_or_default())
         } else {

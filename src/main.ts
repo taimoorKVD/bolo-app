@@ -7,7 +7,7 @@ const root = document.querySelector<HTMLElement>("#app");
 
 declare global {
   interface Window {
-    __CADENCE_SMOKE__?: boolean;
+    __BOLO_SMOKE__?: boolean;
   }
 }
 
@@ -23,7 +23,7 @@ async function currentView(): Promise<"settings" | "overlay"> {
 
 async function boot(): Promise<void> {
   if (!root) return;
-  const smoke = window.__CADENCE_SMOKE__ === true;
+  const smoke = window.__BOLO_SMOKE__ === true;
   const view = await currentView();
   document.body.classList.add(view === "overlay" ? "view-overlay" : "view-settings");
   if (!inTauri()) document.body.classList.add("browser-preview");

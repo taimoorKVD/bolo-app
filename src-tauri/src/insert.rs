@@ -719,7 +719,7 @@ fn pastes_into_a_real_edit_control() {
     use windows::Win32::Foundation::HWND;
     use windows::Win32::UI::WindowsAndMessaging::{GetWindowTextW, SendMessageW, WM_PASTE};
 
-    const PHRASE: &str = "cadence paste ok";
+    const PHRASE: &str = "bolo paste ok";
 
     eprintln!("paste test: creating a hidden edit control");
     let mut host = EditHost::spawn();

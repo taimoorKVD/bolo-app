@@ -121,7 +121,7 @@ const WM_REINSTALL: u32 = 0x8000 + 0x42; // WM_APP + 0x42
 pub fn spawn(control: ListenerControl, tx: Sender<InputEvent>) {
     let reported = control.clone();
     let thread_status = reported.clone();
-    match thread::Builder::new().name("cadence-hotkey".into()).spawn(move || {
+    match thread::Builder::new().name("bolo-hotkey".into()).spawn(move || {
         if let Err(err) = run_platform(control, tx) {
             set_status(&thread_status, false, Some(err));
         }

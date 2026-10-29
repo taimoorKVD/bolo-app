@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Draw the Cadence app icon: a dark tile, a tally lamp, and a short waveform."""
+"""Draw the Bolo app icon: a dark tile, a tally lamp, and a short waveform."""
 
 import struct
 import zlib
@@ -78,7 +78,7 @@ def main() -> None:
         + chunk(b"IDAT", zlib.compress(raw, 9))
         + chunk(b"IEND", b"")
     )
-    out = Path("/tmp/cadence-icon.png")
+    out = Path("/tmp/bolo-icon.png")
     out.write_bytes(png)
     print(out)
 

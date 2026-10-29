@@ -923,7 +923,7 @@ mod tests {
 
     #[test]
     fn learns_a_mid_sentence_name_and_skips_weekdays() {
-        let mut dictionary = vec!["Cadence".into()];
+        let mut dictionary = vec!["Bolo".into()];
         let added = learn_terms("Meet Priya on Wednesday about Tauri", &mut dictionary);
         assert_eq!(added, vec!["Priya".to_string(), "Tauri".to_string()]);
         assert!(dictionary.iter().any(|term| term == "Priya"));

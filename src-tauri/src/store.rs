@@ -431,10 +431,10 @@ mod tests {
 
     #[test]
     fn roundtrip_on_disk() {
-        let dir = std::env::temp_dir().join(format!("cadence-test-{}", now_ms()));
+        let dir = std::env::temp_dir().join(format!("bolo-test-{}", now_ms()));
         let _ = fs::remove_dir_all(&dir);
         let mut settings = Settings::default();
-        settings.dictionary = vec!["Cadence".into(), "Tauri".into()];
+        settings.dictionary = vec!["Bolo".into(), "Tauri".into()];
         settings.language = "en".into();
         save_settings(&dir, &settings).unwrap();
         let loaded = load_settings(&dir);

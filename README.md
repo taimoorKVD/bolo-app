@@ -122,7 +122,7 @@ The build is unsigned. SmartScreen will warn until the binary is signed with a c
 
 WebView2 is configured as a silent download bootstrapper, so a Windows 10 machine without the runtime can install it during setup if it is online.
 
-The development binary is still named `cadence.exe`. That keeps the Windows self-test path stable.
+The binary is still named `cadence.exe` (from the project's original name, Cadence). Renaming it would change the installed path that the NSIS updater, the autostart Run entry, and the old-copy cleanup rely on.
 
 ## Tests
 
@@ -136,7 +136,7 @@ That runs `scripts/selftest.ps1`, which prints a pass/fail line for microphone s
 
 The icon check builds the NSIS setup (`npm run tauri -- build --bundles nsis`) and compares the icon Windows displays for `cadence.exe` and the setup `.exe` with every image in `src-tauri/icons/icon.ico`, including the 32px image `ExtractAssociatedIcon` returns. A different image in that icon group fails the check. The WiX package uses that same `.ico` as `ARPPRODUCTICON` when `npm run tauri build` produces the MSI.
 
-The smoke test builds the release app with `npm run tauri -- build --no-bundle`. That is the same frontend embedding the installer uses: the Tauri CLI passes `tauri/custom-protocol` and embeds `frontendDist`. A plain `cargo build --release` does not, so that exe loads `http://localhost:1420` and the window shows a connection error. The test launches `cadence.exe` with `CADENCE_SMOKE=1`. The settings window is created only after app state is registered, parked off-screen, kept off the taskbar, and not focused. It still loads the bundled page and invokes `get_settings` the same way the UI does. The test fails if that command errors, if it does not return, or if a UTF-8 BOM settings file (PowerShell `ConvertTo-Json` shape, microphone null, cleanup on, history left on when the field is omitted) is not what comes back. Afterwards the script kills that process tree, including a WebView2 child that outlives the exe. Quit Bolo first if it is already running; a second instance exits without running the check.
+The smoke test builds the release app with `npm run tauri -- build --no-bundle`. That is the same frontend embedding the installer uses: the Tauri CLI passes `tauri/custom-protocol` and embeds `frontendDist`. A plain `cargo build --release` does not, so that exe loads `http://localhost:1420` and the window shows a connection error. The test launches `cadence.exe` with `BOLO_SMOKE=1`. The settings window is created only after app state is registered, parked off-screen, kept off the taskbar, and not focused. It still loads the bundled page and invokes `get_settings` the same way the UI does. The test fails if that command errors, if it does not return, or if a UTF-8 BOM settings file (PowerShell `ConvertTo-Json` shape, microphone null, cleanup on, history left on when the field is omitted) is not what comes back. Afterwards the script kills that process tree, including a WebView2 child that outlives the exe. Quit Bolo first if it is already running; a second instance exits without running the check.
 
 The paste check does not steal foreground focus and does not send Ctrl+V. It writes the clipboard, then sends `WM_PASTE` to a real Edit control â€” the message that control handles for Ctrl+V â€” and fails within a few seconds if any step stalls. If the clipboard holds an image, the test copies it, runs the paste, and puts the image back. If that image cannot be copied, the test prints `SKIP` and leaves the clipboard alone.
 
