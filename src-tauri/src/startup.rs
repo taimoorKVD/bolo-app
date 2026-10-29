@@ -1,75 +1,60 @@
 //! Login-time hygiene.
 //!
 //! Older Bolo/Cadence installs registered their own `HKCU\...\Run` entries.
-//! Two entries pointing at two different `cadence.exe` copies race at login:
-//! the single-instance plugin keeps whichever starts first (possibly an old
-//! build) and the other exits, so the hotkey sometimes belongs to stale code.
-//! This removes Run values that launch a different cadence.exe than this one.
+//! Two entries pointing at two different `cadence.exe` copies race at login,
+//! so the hotkey sometimes belongs to stale code.
+//!
+//! Scope is deliberately narrow: only values whose *name* is one this app
+//! itself has ever written are considered, and only when they launch a
+//! different cadence.exe. Other programs' Run entries are never touched.
+//! Uses the registry API directly (no hidden `reg.exe` child processes).
 
-use std::os::windows::process::CommandExt;
 use std::path::Path;
-use std::process::Command;
+use windows::core::{HSTRING, PCWSTR};
+use windows::Win32::System::Registry::{
+    RegCloseKey, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER,
+    KEY_QUERY_VALUE, KEY_SET_VALUE,
+};
 
-const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-/// Value name tauri-plugin-autostart writes (the product name).
-const OWN_RUN_NAME: &str = "Bolo.com";
+const RUN_SUBKEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+/// Value names earlier Bolo/Cadence builds wrote. `Bolo.com` (current) is
+/// rewritten by apply_autostart and is never deleted here.
+const LEGACY_RUN_NAMES: &[&str] = &["Bolo", "Cadence", "cadence"];
 
 pub fn clean_stale_autostart(log_dir: &Path) {
     let Ok(current) = std::env::current_exe() else { return };
     let current = current.to_string_lossy().to_lowercase();
-    let Ok(output) = Command::new("reg")
-        .args(["query", RUN_KEY])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-    else {
-        return;
-    };
-    let text = String::from_utf8_lossy(&output.stdout);
-    for line in text.lines() {
-        let Some((name, data)) = parse_value(line) else { continue };
-        // Our own value is rewritten by apply_autostart; never delete it.
-        if name.eq_ignore_ascii_case(OWN_RUN_NAME) {
-            continue;
+    unsafe {
+        let mut key = HKEY::default();
+        let sub = HSTRING::from(RUN_SUBKEY);
+        if RegOpenKeyExW(HKEY_CURRENT_USER, PCWSTR(sub.as_ptr()), Some(0), KEY_QUERY_VALUE | KEY_SET_VALUE, &mut key).is_err() {
+            return;
         }
-        let lower = data.to_lowercase();
-        if !lower.contains("cadence.exe") || lower.contains(&current) {
-            continue;
+        for name in LEGACY_RUN_NAMES {
+            let Some(data) = read_string(key, name) else { continue };
+            let lower = data.to_lowercase();
+            if !lower.contains("cadence.exe") || lower.contains(&current) {
+                continue;
+            }
+            let hname = HSTRING::from(*name);
+            let removed = RegDeleteValueW(key, PCWSTR(hname.as_ptr())).is_ok();
+            crate::logbuf::log_line(
+                log_dir,
+                "info",
+                &format!("startup removed legacy autostart entry name={name} ok={removed} target={data}"),
+            );
         }
-        let removed = Command::new("reg")
-            .args(["delete", RUN_KEY, "/v", name, "/f"])
-            .creation_flags(CREATE_NO_WINDOW)
-            .status()
-            .map(|status| status.success())
-            .unwrap_or(false);
-        crate::logbuf::log_line(
-            log_dir,
-            "info",
-            &format!("startup removed stale autostart entry name={name} ok={removed} target={data}"),
-        );
+        let _ = RegCloseKey(key);
     }
 }
 
-/// `    Name    REG_SZ    C:\path\cadence.exe` -> ("Name", "C:\path\cadence.exe")
-fn parse_value(line: &str) -> Option<(&str, &str)> {
-    let line = line.trim();
-    for kind in ["REG_SZ", "REG_EXPAND_SZ"] {
-        let marker = format!("    {kind}    ");
-        if let Some(at) = line.find(&marker) {
-            return Some((line[..at].trim(), line[at + marker.len()..].trim()));
-        }
-    }
-    None
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn parses_reg_query_lines() {
-        let line = r"    Bolo    REG_SZ    C:\Users\x\AppData\Local\Bolo\cadence.exe";
-        assert_eq!(
-            super::parse_value(line),
-            Some(("Bolo", r"C:\Users\x\AppData\Local\Bolo\cadence.exe"))
-        );
-    }
+unsafe fn read_string(key: HKEY, name: &str) -> Option<String> {
+    let hname = HSTRING::from(name);
+    let mut size = 0u32;
+    RegQueryValueExW(key, PCWSTR(hname.as_ptr()), None, None, None, Some(&mut size)).ok().ok()?;
+    if size == 0 { return None; }
+    let mut buf = vec![0u8; size as usize];
+    RegQueryValueExW(key, PCWSTR(hname.as_ptr()), None, None, Some(buf.as_mut_ptr()), Some(&mut size)).ok().ok()?;
+    let wide: Vec<u16> = buf[..size as usize].chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+    Some(String::from_utf16_lossy(&wide).trim_end_matches('\0').to_string())
 }

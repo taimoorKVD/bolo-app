@@ -65,8 +65,8 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "publisher": "Bolo.com",
-    "copyright": "Copyright © 2026 Bolo.com",
+    "publisher": "Kingdom Vision",
+    "copyright": "Copyright (c) 2026 Kingdom Vision",
     "shortDescription": "Push-to-talk voice dictation",
     "longDescription": "Hold a hotkey, speak, and Bolo.com inserts the transcript at your cursor using Groq Whisper.",
     "category": "Utility",
