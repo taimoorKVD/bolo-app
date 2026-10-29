@@ -45,8 +45,7 @@ pub struct RecordingSession {
     pub stop: Arc<AtomicBool>,
     pub started: Instant,
     pub error: Arc<Mutex<Option<String>>>,
-    pub device_note: Option<String>,
-    /// Device this take actually opened. The overlay text is `device_note`.
+    /// Device this take actually opened.
     #[cfg_attr(not(test), allow(dead_code))]
     pub active_name: String,
     pub used_fallback: bool,
@@ -267,7 +266,6 @@ pub(crate) fn host_mics(host: &cpal::Host) -> anyhow::Result<Vec<ListedMic>> {
 struct OpenedMic {
     active_name: String,
     used_fallback: bool,
-    note: String,
 }
 
 pub fn start_recording(wanted: Option<&str>) -> anyhow::Result<RecordingSession> {
@@ -310,7 +308,6 @@ pub fn start_recording(wanted: Option<&str>) -> anyhow::Result<RecordingSession>
         stop,
         started: Instant::now(),
         error,
-        device_note: Some(ready.note),
         active_name: ready.active_name,
         used_fallback: ready.used_fallback,
     })
@@ -383,12 +380,10 @@ fn capture_until_stop(
                     Some(_) => !opened_preference,
                     None => skipped_first,
                 };
-                let note = usage_line(preference.as_deref(), name, used_fallback);
                 if ready_tx
                     .send(Ok(OpenedMic {
                         active_name: name.clone(),
                         used_fallback,
-                        note,
                     }))
                     .is_err()
                 {
@@ -582,6 +577,7 @@ pub fn speech_threshold(noise_rms: f32) -> f32 {
 }
 
 /// Drop leading and trailing silence. Pauses in the middle of a sentence stay.
+#[cfg(test)]
 pub fn trim_silence(samples: &[f32], sample_rate: u32) -> Vec<f32> {
     trim_silence_with(samples, sample_rate, speech_threshold(0.0))
 }

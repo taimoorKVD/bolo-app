@@ -35,7 +35,6 @@ enum Cmd {
 struct Armed {
     id: u64,
     active_name: String,
-    used_fallback: bool,
     note: String,
     level: Arc<AtomicU32>,
     chunks: Arc<Mutex<VecDeque<FinishedAudio>>>,
@@ -50,7 +49,6 @@ pub struct LiveTake {
     /// The device this take is reading. Logged by the warm thread's note.
     #[allow(dead_code)]
     pub active_name: String,
-    pub used_fallback: bool,
     pub started: Instant,
     pub open_wait_ms: u64,
     stop: Arc<AtomicBool>,
@@ -112,6 +110,7 @@ pub struct WarmMic {
     cmd: Sender<Cmd>,
     watch: Arc<Watch>,
     level: Arc<AtomicU32>,
+    #[cfg_attr(not(test), allow(dead_code))]
     live: Arc<AtomicBool>,
 }
 
@@ -134,6 +133,7 @@ impl WarmMic {
     }
 
     /// True once a capture stream is playing. Key-down does not wait on this.
+    #[cfg(test)]
     pub fn is_live(&self) -> bool {
         self.live.load(Ordering::Relaxed)
     }
@@ -178,7 +178,6 @@ impl WarmMic {
             cmd: self.cmd.clone(),
             device_note: Some(armed.note),
             active_name: armed.active_name,
-            used_fallback: armed.used_fallback,
             started: Instant::now(),
             open_wait_ms: waited.elapsed().as_millis() as u64,
             stop: Arc::new(AtomicBool::new(false)),
@@ -251,7 +250,6 @@ impl Capture {
 struct Watch {
     preference: Mutex<Option<String>>,
     active_name: Mutex<String>,
-    used_fallback: Mutex<bool>,
     note: Mutex<String>,
     preference_epoch: AtomicU64,
     default_event: AtomicBool,
@@ -266,7 +264,6 @@ impl Watch {
         Self {
             preference: Mutex::new(preference),
             active_name: Mutex::new(String::new()),
-            used_fallback: Mutex::new(false),
             note: Mutex::new(String::new()),
             preference_epoch: AtomicU64::new(0),
             default_event: AtomicBool::new(false),
@@ -381,9 +378,8 @@ fn handle_cmd(cmd: Cmd, state: &Arc<Mutex<Capture>>, watch: &Watch, next_id: &mu
             // job and does not block this reply.
             watch.set_preference(preference);
             let active_name = watch.active_name.lock().unwrap_or_else(|err| err.into_inner()).clone();
-            let used_fallback = *watch.used_fallback.lock().unwrap_or_else(|err| err.into_inner());
             let note = watch.note.lock().unwrap_or_else(|err| err.into_inner()).clone();
-            match arm_take(state, next_id, &active_name, used_fallback, &note) {
+            match arm_take(state, next_id, &active_name, &note) {
                 Ok(armed) => {
                     let id = armed.id;
                     if reply.send(Ok(armed)).is_err() {
@@ -573,9 +569,6 @@ fn open_replacing(
                 if let Ok(mut guard) = state.lock() {
                     guard.apply_format(opened.channels, opened.sample_rate);
                     guard.error = None;
-                }
-                if let Ok(mut slot) = watch.used_fallback.lock() {
-                    *slot = opened.used_fallback;
                 }
                 if let Ok(mut slot) = watch.note.lock() {
                     *slot = opened.note;
@@ -909,7 +902,6 @@ fn arm_take(
     state: &Mutex<Capture>,
     next_id: &mut u64,
     active_name: &str,
-    used_fallback: bool,
     note: &str,
 ) -> Result<Armed, String> {
     let mut guard = state.lock().map_err(|_| "The audio buffer was unavailable.".to_string())?;
@@ -935,7 +927,6 @@ fn arm_take(
     Ok(Armed {
         id,
         active_name: active_name.to_string(),
-        used_fallback,
         note,
         level: Arc::clone(&guard.level),
         chunks,
