@@ -1,9 +1,14 @@
-import { inTauri, onDictation } from "./api";
-import type { DictationEvent, DictationPhase } from "./types";
-
-const dismissUrl = new URL("./assets/dismiss.wav", import.meta.url).href;
-const listenUrl = new URL("./assets/listen.webm", import.meta.url).href;
-const writeUrl = new URL("./assets/write.webm", import.meta.url).href;
+import { api, inTauri, onDictation } from "./api";
+import {
+  DEFAULT_CHARACTER,
+  activeCharacter,
+  clipUrls,
+  resolvePack,
+  soundUrl,
+  type SoundCue,
+  type SoundPackId,
+} from "./characters";
+import type { DictationEvent, DictationPhase, Settings } from "./types";
 
 type Pose = "listen" | "write" | "leave" | "error" | "hidden";
 
@@ -14,19 +19,41 @@ export function mountOverlay(root: HTMLElement): void {
   stage.setAttribute("role", "status");
   stage.setAttribute("aria-live", "polite");
 
-  const listen = clip("clip-listen", listenUrl);
-  const write = clip("clip-write", writeUrl);
+  const initial = clipUrls(DEFAULT_CHARACTER);
+  const listen = clip("clip-listen", initial.listen);
+  const write = clip("clip-write", initial.write);
   const note = el("p", "listener-note");
   note.hidden = true;
   stage.append(listen, write, note);
   root.append(stage);
 
-  const dismiss = new Audio(dismissUrl);
-  dismiss.preload = "auto";
-  dismiss.load();
+  const cues = new CuePlayer();
+  let characterId = DEFAULT_CHARACTER;
+  let prefs: Partial<Settings> = {};
   let pose: Pose = "hidden";
-  let warmToken = 0;
-  let warmed = false;
+
+  const useCharacter = (id: string) => {
+    if (id === characterId) return;
+    characterId = id;
+    const urls = clipUrls(id);
+    listen.src = urls.listen;
+    write.src = urls.write;
+    syncClips(pose, listen, write);
+  };
+  const applyPrefs = (settings: Partial<Settings>) => {
+    prefs = settings;
+    const id = activeCharacter(settings);
+    cues.configure(resolvePack(settings.soundPack, id), settings.soundVolume ?? 0.6);
+    useCharacter(id);
+  };
+  const refreshPrefs = async () => {
+    try {
+      applyPrefs(await api.getSettings());
+    } catch (error) {
+      console.warn("overlay could not read settings", error);
+    }
+  };
+  void refreshPrefs();
 
   const apply = (event: DictationEvent) => {
     const next = poseFor(event.phase);
@@ -39,9 +66,7 @@ export function mountOverlay(root: HTMLElement): void {
     if (next !== pose) {
       if (next === "leave") {
         // Start the sound before the hide motion so it is not late.
-        playDismissNow(dismiss, () => {
-          warmToken += 1;
-        });
+        cues.play("dismiss");
         stage.classList.add("is-leaving");
       } else {
         stage.classList.remove("is-leaving");
@@ -53,14 +78,16 @@ export function mountOverlay(root: HTMLElement): void {
       }
       pose = next;
       stage.dataset.pose = next;
-      syncClips(next, listen, write);
-      if (next === "listen" && !warmed) {
-        warmed = true;
-        warmDismiss(dismiss, () => warmToken, () => {
-          warmToken += 1;
-          return warmToken;
-        });
+      if (next === "listen") {
+        // Smart rules (night, holiday) can change between takes.
+        const id = activeCharacter(prefs);
+        if (id !== characterId) useCharacter(id);
+        cues.play("start");
+        void refreshPrefs();
+      } else if (next === "write") {
+        cues.play("done");
       }
+      syncClips(next, listen, write);
     }
 
     const problem = next === "error" ? overlayProblem(event.message) : "";
@@ -164,35 +191,62 @@ function overlayProblem(message: string | null): string {
     .replace(/Groq/g, "the service");
 }
 
-function playDismissNow(audio: HTMLAudioElement, bump: () => void): void {
-  bump();
-  audio.volume = 1;
-  try {
-    audio.pause();
-    audio.currentTime = 0;
-  } catch {
-    // The element may not be seekable until the first bytes arrive.
-  }
-  const pending = audio.play();
-  if (pending) void pending.catch(() => {});
-}
+/** Plays the start, done, and dismiss cues for the chosen pack. */
+class CuePlayer {
+  private pack: SoundPackId | null = null;
+  private volume = 0.6;
+  private audio = new Map<SoundCue, HTMLAudioElement>();
+  private tokens = new WeakMap<HTMLAudioElement, number>();
 
-function warmDismiss(audio: HTMLAudioElement, token: () => number, bump: () => number): void {
-  const mine = bump();
-  audio.volume = 0;
-  const pending = audio.play();
-  const reset = () => {
-    if (mine !== token()) return;
-    audio.pause();
-    try {
-      audio.currentTime = 0;
-    } catch {
-      // Ignore a seek that races the first play.
+  configure(pack: SoundPackId, volume: number): void {
+    this.volume = Math.max(0, Math.min(1, Number.isFinite(volume) ? volume : 0.6));
+    if (pack === this.pack) return;
+    this.pack = pack;
+    this.audio.clear();
+    for (const cue of ["start", "done", "dismiss"] as SoundCue[]) {
+      const url = soundUrl(pack, cue);
+      if (!url) continue;
+      const node = new Audio(url);
+      node.preload = "auto";
+      node.load();
+      this.audio.set(cue, node);
+      this.warm(node);
     }
-    audio.volume = 1;
-  };
-  if (pending) void pending.then(reset).catch(reset);
-  else reset();
+  }
+
+  play(cue: SoundCue): void {
+    const node = this.audio.get(cue);
+    if (!node || this.volume <= 0) return;
+    this.tokens.set(node, (this.tokens.get(node) ?? 0) + 1);
+    node.volume = this.volume;
+    try {
+      node.pause();
+      node.currentTime = 0;
+    } catch {
+      // The element may not be seekable until the first bytes arrive.
+    }
+    const pending = node.play();
+    if (pending) void pending.catch(() => {});
+  }
+
+  /** Decode once silently so the first real cue is not late. */
+  private warm(node: HTMLAudioElement): void {
+    const mine = (this.tokens.get(node) ?? 0) + 1;
+    this.tokens.set(node, mine);
+    node.volume = 0;
+    const reset = () => {
+      if (mine !== this.tokens.get(node)) return;
+      node.pause();
+      try {
+        node.currentTime = 0;
+      } catch {
+        // Ignore a seek that races the first play.
+      }
+    };
+    const pending = node.play();
+    if (pending) void pending.then(reset).catch(reset);
+    else reset();
+  }
 }
 
 function demoEvent(demo: string | null): DictationEvent {

@@ -46,6 +46,67 @@ pub struct Settings {
     /// A 404 tries the next built-in model.
     #[serde(default = "default_cleanup_model")]
     pub cleanup_model: String,
+    /// Overlay character id. Missing or unknown values fall back to `classic`.
+    #[serde(default = "default_character")]
+    pub character: String,
+    /// Sound pack id, `match` or `off`. Missing files follow the character.
+    #[serde(default = "default_sound_pack")]
+    pub sound_pack: String,
+    /// Cue volume from 0 to 1.
+    #[serde(default = "default_sound_volume")]
+    pub sound_volume: f64,
+    #[serde(default)]
+    pub smart_mood: bool,
+    #[serde(default)]
+    pub smart_time_of_day: bool,
+    #[serde(default)]
+    pub smart_holiday: bool,
+}
+
+const SOUND_PACKS: [&str; 9] = [
+    "match", "off", "soft-chime", "chiptune", "robot", "magic", "wood", "paper", "neon",
+];
+
+fn default_character() -> String {
+    "classic".into()
+}
+
+fn default_sound_pack() -> String {
+    "match".into()
+}
+
+fn default_sound_volume() -> f64 {
+    0.6
+}
+
+fn normalize_character(id: &str) -> String {
+    let id = id.trim().to_ascii_lowercase();
+    let known = id == "classic"
+        || (id.len() == 3
+            && id.starts_with('c')
+            && id[1..].parse::<u8>().map(|n| (2..=28).contains(&n)).unwrap_or(false));
+    if known {
+        id
+    } else {
+        default_character()
+    }
+}
+
+fn normalize_sound_pack(id: &str) -> String {
+    let id = id.trim().to_ascii_lowercase();
+    if SOUND_PACKS.contains(&id.as_str()) {
+        id
+    } else {
+        default_sound_pack()
+    }
+}
+
+fn normalize_volume(v: f64) -> f64 {
+    if v.is_finite() {
+        v.clamp(0.0, 1.0)
+    } else {
+        default_sound_volume()
+    }
 }
 
 fn default_cleanup_model() -> String {
@@ -84,6 +145,12 @@ impl Default for Settings {
             output: "english".into(),
             verbatim: false,
             cleanup_model: CLEANUP_MODEL.to_string(),
+            character: default_character(),
+            sound_pack: default_sound_pack(),
+            sound_volume: default_sound_volume(),
+            smart_mood: false,
+            smart_time_of_day: false,
+            smart_holiday: false,
         }
     }
 }
@@ -120,6 +187,9 @@ pub fn prepare_settings(mut settings: Settings) -> Settings {
     settings.offline_model = offline::normalize_model(&settings.offline_model).to_string();
     settings.output = normalize_output(&settings.output).to_string();
     settings.cleanup_model = settings.cleanup_model.trim().to_string();
+    settings.character = normalize_character(&settings.character);
+    settings.sound_pack = normalize_sound_pack(&settings.sound_pack);
+    settings.sound_volume = normalize_volume(settings.sound_volume);
     settings.dictionary = settings
         .dictionary
         .into_iter()
@@ -206,6 +276,9 @@ pub fn normalize_settings(mut settings: Settings) -> Settings {
     if cleanup_model_error(&settings.cleanup_model).is_some() {
         settings.cleanup_model = CLEANUP_MODEL.to_string();
     }
+    settings.character = normalize_character(&settings.character);
+    settings.sound_pack = normalize_sound_pack(&settings.sound_pack);
+    settings.sound_volume = normalize_volume(settings.sound_volume);
     settings
 }
 
@@ -549,5 +622,27 @@ mod carryover {
         assert!(crate::credentials::CADENCE_TARGET.contains("com.cadence.dictation"));
         assert!(crate::credentials::TARGET.starts_with("com.bolo.dictation"));
         assert!(crate::credentials::LEGACY_TARGET.contains("cadence"));
+    }
+
+    #[test]
+    fn character_settings_default_and_normalize() {
+        let old: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(old.character, "classic");
+        assert_eq!(old.sound_pack, "match");
+        assert!((old.sound_volume - 0.6).abs() < 1e-9);
+        let mut s = Settings::default();
+        s.character = "c99".into();
+        s.sound_pack = "whoosh".into();
+        s.sound_volume = 4.0;
+        let s = normalize_settings(s);
+        assert_eq!(s.character, "classic");
+        assert_eq!(s.sound_pack, "match");
+        assert_eq!(s.sound_volume, 1.0);
+        let mut s = Settings::default();
+        s.character = "C07".into();
+        s.sound_pack = "robot".into();
+        let s = prepare_settings(s);
+        assert_eq!(s.character, "c07");
+        assert_eq!(s.sound_pack, "robot");
     }
 }

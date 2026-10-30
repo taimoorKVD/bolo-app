@@ -27,6 +27,12 @@ const settings: Settings = {
   output: "english",
   verbatim: false,
   cleanupModel: "openai/gpt-oss-20b",
+  character: "classic",
+  soundPack: "match",
+  soundVolume: 0.6,
+  smartMood: false,
+  smartTimeOfDay: false,
+  smartHoliday: false,
 };
 
 let apiKey: string | null = null;

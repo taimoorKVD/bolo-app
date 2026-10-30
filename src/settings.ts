@@ -1,4 +1,15 @@
 import { api, onDictation, onListenerStatus, onMicStatus } from "./api";
+import {
+  CHARACTERS,
+  DEFAULT_CHARACTER,
+  GROUPS,
+  SOUND_PACKS,
+  clipUrls,
+  findCharacter,
+  resolvePack,
+  soundUrl,
+  type CharacterGroup,
+} from "./characters";
 import lockupUrl from "./brand-lockup.svg";
 import { formatDuration, formatHotkey, formatWhen, modelLabel } from "./format";
 import { listenerNotice, visibleMessage } from "./notices";
@@ -50,6 +61,7 @@ type SectionId =
   | "language"
   | "cleanup"
   | "dictionary"
+  | "character"
   | "history"
   | "privacy"
   | "about";
@@ -61,6 +73,7 @@ const NAV: Array<[SectionId, string, string]> = [
   ["language", "Language", "Accuracy"],
   ["cleanup", "Cleanup", "Style"],
   ["dictionary", "Dictionary", "Names"],
+  ["character", "Character", "Look & sounds"],
   ["history", "History", "On this PC"],
   ["privacy", "Privacy", "Local only"],
   ["about", "About", "Bolo"],
@@ -75,6 +88,15 @@ function normalizeSettings(settings: Settings): Settings {
     output: settings.output === "same" ? "same" : "english",
     verbatim: settings.verbatim === true,
     cleanupModel: settings.cleanupModel?.trim() || "openai/gpt-oss-20b",
+    character: findCharacter(settings.character).id,
+    soundPack: SOUND_PACKS.some(([id]) => id === settings.soundPack) ? settings.soundPack : "match",
+    soundVolume:
+      typeof settings.soundVolume === "number" && Number.isFinite(settings.soundVolume)
+        ? Math.max(0, Math.min(1, settings.soundVolume))
+        : 0.6,
+    smartMood: settings.smartMood === true,
+    smartTimeOfDay: settings.smartTimeOfDay === true,
+    smartHoliday: settings.smartHoliday === true,
   };
 }
 
@@ -160,6 +182,7 @@ function render(root: HTMLElement, draft: Draft): void {
     languagePanel(draft),
     cleanupPanel(draft),
     dictionaryPanel(draft),
+    characterPanel(draft),
     historyPanel(draft),
     privacyPanel(draft),
     aboutPanel(draft),
@@ -951,6 +974,213 @@ function dictionaryPanel(draft: Draft): HTMLElement {
     markDirty(draft);
   });
   panel.append(area);
+  return panel;
+}
+
+function characterPanel(draft: Draft): HTMLElement {
+  const panel = panelEl(
+    "character",
+    "Character & sounds",
+    "Pick who listens while you talk and what you hear. Changes apply to the next dictation after you save.",
+  );
+  panel.classList.add("character-panel");
+  const s = draft.settings;
+
+  // Live preview of the selected character.
+  const preview = el("div", "char-preview");
+  const video = document.createElement("video");
+  video.className = "char-preview-clip";
+  video.muted = true;
+  video.loop = true;
+  video.autoplay = true;
+  video.playsInline = true;
+  video.setAttribute("aria-hidden", "true");
+  const previewName = el("strong", "char-preview-name");
+  const poseRow = el("div", "char-pose-row");
+  let previewPose: "listen" | "write" = "listen";
+  const paintPreview = () => {
+    const urls = clipUrls(s.character);
+    const src = previewPose === "listen" ? urls.listen : urls.write;
+    if (video.src !== src) video.src = src;
+    video.playbackRate = 1;
+    void video.play().catch(() => {});
+    previewName.textContent = findCharacter(s.character).name;
+    for (const b of poseRow.querySelectorAll<HTMLButtonElement>("button")) {
+      b.classList.toggle("is-on", b.dataset.pose === previewPose);
+    }
+  };
+  for (const [pose, label] of [["listen", "Listening"], ["write", "Writing"]] as const) {
+    const b = button(label, "ghost");
+    b.dataset.pose = pose;
+    b.addEventListener("click", () => {
+      previewPose = pose;
+      paintPreview();
+    });
+    poseRow.append(b);
+  }
+  const previewCopy = el("div", "char-preview-copy");
+  previewCopy.append(el("span", "eyebrow", "Live preview"), previewName, poseRow);
+  preview.append(video, previewCopy);
+
+  // Tabs and cards.
+  const tabs = el("div", "char-tabs");
+  tabs.setAttribute("role", "tablist");
+  const grid = el("div", "char-grid");
+  let group: CharacterGroup = findCharacter(s.character).group;
+  const paintGrid = () => {
+    grid.replaceChildren();
+    for (const b of tabs.querySelectorAll<HTMLButtonElement>("button")) {
+      const on = b.dataset.group === group;
+      b.classList.toggle("is-on", on);
+      b.setAttribute("aria-selected", String(on));
+    }
+    for (const c of CHARACTERS.filter((item) => item.group === group)) {
+      const card = document.createElement("button");
+      card.type = "button";
+      card.className = "char-card";
+      card.dataset.character = c.id;
+      card.classList.toggle("is-on", c.id === s.character);
+      card.setAttribute("aria-pressed", String(c.id === s.character));
+      const img = document.createElement("img");
+      img.src = clipUrls(c.id).thumb;
+      img.alt = "";
+      img.loading = "lazy";
+      card.append(img, el("span", "char-card-name", c.name));
+      if (c.id === DEFAULT_CHARACTER) card.append(el("span", "char-badge", "Default"));
+      card.addEventListener("click", () => {
+        s.character = c.id;
+        markDirty(draft);
+        paintGrid();
+        paintPreview();
+        paintPackHint();
+      });
+      grid.append(card);
+    }
+  };
+  for (const [id, label] of GROUPS) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "char-tab";
+    b.dataset.group = id;
+    b.setAttribute("role", "tab");
+    b.textContent = label;
+    b.addEventListener("click", () => {
+      group = id;
+      paintGrid();
+    });
+    tabs.append(b);
+  }
+
+  // Smart toggles.
+  const smart = el("div", "char-smart");
+  smart.append(el("h3", "char-sub", "Smart switching"));
+  smart.append(
+    toggle(
+      "Time of day",
+      "From 9 pm to 6 am, Night Owl Mode listens instead.",
+      s.smartTimeOfDay,
+      (on) => {
+        s.smartTimeOfDay = on;
+        markDirty(draft);
+      },
+    ),
+    toggle(
+      "Holiday",
+      "On Eid, the Eid skin takes over for three days.",
+      s.smartHoliday,
+      (on) => {
+        s.smartHoliday = on;
+        markDirty(draft);
+      },
+    ),
+  );
+  const mood = toggle("Mood mirror · coming soon", "The character will react to your tone of voice.", false, () => {});
+  mood.classList.add("is-soon");
+  const moodInput = mood.querySelector("input");
+  if (moodInput) moodInput.disabled = true;
+  smart.append(mood);
+
+  // Sounds.
+  const sounds = el("div", "char-sounds");
+  sounds.append(el("h3", "char-sub", "Sounds"));
+  const packLabel = document.createElement("label");
+  packLabel.className = "field";
+  packLabel.append(el("span", "field-label", "Sound pack"));
+  const select = document.createElement("select");
+  select.setAttribute("aria-label", "Sound pack");
+  for (const [id, name] of SOUND_PACKS) {
+    const option = document.createElement("option");
+    option.value = id;
+    option.textContent = name;
+    select.append(option);
+  }
+  select.value = s.soundPack;
+  const packHint = el("p", "field-note");
+  const paintPackHint = () => {
+    const resolved = resolvePack(s.soundPack, s.character);
+    const name = SOUND_PACKS.find(([id]) => id === resolved)?.[1] ?? "";
+    const blurb = SOUND_PACKS.find(([id]) => id === s.soundPack)?.[2] ?? "";
+    packHint.textContent = s.soundPack === "match" ? `${blurb}. Now: ${name}.` : blurb;
+  };
+  select.addEventListener("change", () => {
+    s.soundPack = select.value;
+    markDirty(draft);
+    paintPackHint();
+  });
+  packLabel.append(select);
+
+  const cueList = el("div", "cue-list");
+  let previewAudio: HTMLAudioElement | null = null;
+  for (const [cue, title] of [
+    ["start", "Start listening"],
+    ["done", "Done talking"],
+    ["dismiss", "Dismiss"],
+  ] as const) {
+    const row = el("div", "cue-row");
+    const play = button("▶", "ghost");
+    play.classList.add("cue-play");
+    play.setAttribute("aria-label", `Preview ${title}`);
+    play.addEventListener("click", () => {
+      const url = soundUrl(resolvePack(s.soundPack, s.character), cue);
+      if (!url) return;
+      previewAudio?.pause();
+      previewAudio = new Audio(url);
+      previewAudio.volume = s.soundVolume;
+      void previewAudio.play().catch(() => {});
+    });
+    row.append(play, el("span", "cue-title", title));
+    cueList.append(row);
+  }
+
+  const volume = document.createElement("label");
+  volume.className = "field volume-field";
+  const volumeValue = el("span", "volume-value", `${Math.round(s.soundVolume * 100)}%`);
+  const head = el("span", "field-label", "Volume");
+  const range = document.createElement("input");
+  range.type = "range";
+  range.min = "0";
+  range.max = "100";
+  range.step = "5";
+  range.value = String(Math.round(s.soundVolume * 100));
+  range.setAttribute("aria-label", "Sound volume");
+  range.addEventListener("input", () => {
+    s.soundVolume = Number(range.value) / 100;
+    volumeValue.textContent = `${range.value}%`;
+    markDirty(draft);
+  });
+  volume.append(head, range, volumeValue);
+  sounds.append(packLabel, packHint, cueList, volume);
+
+  const side = el("div", "char-side");
+  side.append(smart, sounds);
+  const layout = el("div", "char-layout");
+  const pick = el("div", "char-pick");
+  pick.append(tabs, grid);
+  layout.append(pick, side);
+  panel.append(preview, layout);
+  paintGrid();
+  paintPreview();
+  paintPackHint();
   return panel;
 }
 
