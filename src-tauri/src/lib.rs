@@ -460,8 +460,13 @@ fn clear_api_key() -> Result<(), String> {
 }
 
 #[tauri::command]
-fn list_microphones() -> Result<Vec<audio::MicInfo>, String> {
-    audio::list_microphones().map_err(|err| err.to_string())
+async fn list_microphones() -> Result<Vec<audio::MicInfo>, String> {
+    // Device enumeration can take >1 s; keep it off the main thread so other
+    // IPC calls (and window painting) are not queued behind it.
+    tauri::async_runtime::spawn_blocking(audio::list_microphones)
+        .await
+        .map_err(|err| err.to_string())?
+        .map_err(|err| err.to_string())
 }
 
 #[tauri::command]

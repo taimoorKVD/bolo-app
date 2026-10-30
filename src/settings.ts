@@ -135,15 +135,22 @@ export type SettingsLoad =
   | { ok: false; error: string };
 
 export async function mountSettings(root: HTMLElement): Promise<SettingsLoad> {
-  root.replaceChildren(loadingShell());
+  const splash = loadingShell();
+  const splashAt = performance.now();
+  root.replaceChildren(splash);
+  // Microphone enumeration can take a second on Windows; don't hold the
+  // whole window on it. The list fills in once it arrives.
+  const micsPromise = api.listMicrophones().catch(() => [] as MicInfo[]);
   try {
-    const [settings, keyStatus, mics, history, info] = await Promise.all([
+    const [settings, keyStatus, history, info] = await Promise.all([
       api.getSettings(),
       api.apiKeyStatus(),
-      api.listMicrophones().catch(() => [] as MicInfo[]),
       api.getHistory(),
       api.getAppInfo(),
     ]);
+    const quick = await Promise.race([micsPromise, new Promise<null>((r) => setTimeout(() => r(null), 120))]);
+    const mics = quick ?? [];
+    await leaveSplash(splash, splashAt);
     render(root, (currentDraft = {
       settings: normalizeSettings(settings),
       keyStatus,
@@ -164,6 +171,13 @@ export async function mountSettings(root: HTMLElement): Promise<SettingsLoad> {
       lastError: info.lastError,
       section: "home",
     }));
+    root.firstElementChild?.classList.add("app-enter");
+    if (quick === null) {
+      const draft = currentDraft;
+      void micsPromise.then((devices) => {
+        if (draft && currentDraft === draft) applyDevices(draft, devices);
+      });
+    }
     return { ok: true, detail: JSON.stringify(settings) };
   } catch (error) {
     const message = messageOf(error);
@@ -1653,11 +1667,37 @@ function advancedPanel(draft: Draft): HTMLElement {
 }
 
 function loadingShell(): HTMLElement {
-  const shell = el("div", "shell loading-shell");
-  shell.append(el("p", "eyebrow", "Dictation"), logoHeading());
-  shell.append(el("p", "lede", "Loading your settings…"));
+  const shell = el("div", "splash");
   shell.setAttribute("role", "status");
+  shell.setAttribute("aria-live", "polite");
+  const inner = el("div", "splash-inner");
+  const mark = el("div", "splash-mark");
+  const img = document.createElement("img");
+  img.className = "splash-logo";
+  img.src = lockupUrl;
+  img.alt = "Bolo";
+  mark.append(img);
+  const waves = el("div", "splash-waves");
+  waves.setAttribute("aria-hidden", "true");
+  for (let i = 0; i < 5; i += 1) {
+    const bar = el("span", "");
+    bar.style.setProperty("--i", String(i));
+    waves.append(bar);
+  }
+  const progress = el("div", "splash-bar");
+  progress.setAttribute("aria-hidden", "true");
+  progress.append(el("span", ""));
+  inner.append(el("p", "eyebrow splash-eyebrow", "Dictation"), mark, waves, el("p", "splash-text", "Loading your settings…"), progress);
+  shell.append(inner);
   return shell;
+}
+
+/** Fade the splash out, only if it became visible (it fades in after 150 ms). */
+function leaveSplash(splash: HTMLElement, since: number): Promise<void> {
+  const shown = performance.now() - since > 160;
+  if (!shown || matchMedia("(prefers-reduced-motion: reduce)").matches) return Promise.resolve();
+  splash.classList.add("leaving");
+  return new Promise((resolve) => setTimeout(resolve, 180));
 }
 
 function errorShell(message: string, retry: () => void): HTMLElement {

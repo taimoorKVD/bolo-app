@@ -392,7 +392,11 @@ fn handle_cmd(cmd: Cmd, state: &Arc<Mutex<Capture>>, watch: &Watch, next_id: &mu
             }
         }
         Cmd::End { id, reply } => {
-            let _ = reply.send(disarm_take(state, id));
+            let result = disarm_take(state, id);
+            if let Ok(finished) = &result {
+                check_silent_device(finished, watch);
+            }
+            let _ = reply.send(result);
         }
     }
 }
@@ -502,6 +506,35 @@ enum NameCheck {
     Same,
     Differ,
     Unknown,
+}
+
+/// On "Automatic", a take of pure digital silence means the default input is
+/// dead (typically an empty headset jack). Remember it and reopen on the next
+/// device so the following take works. Any signal clears the mark.
+fn check_silent_device(finished: &FinishedAudio, watch: &Watch) {
+    let frames = finished.interleaved.len() / finished.channels.max(1) as usize;
+    if finished.sample_rate == 0 || frames < (finished.sample_rate as usize) * 6 / 10 {
+        return;
+    }
+    let name = watch.active_name.lock().unwrap_or_else(|err| err.into_inner()).clone();
+    if name.is_empty() {
+        return;
+    }
+    let peak = audio::peak_level(&finished.interleaved);
+    let auto = watch
+        .preference
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .as_deref()
+        .map_or(true, |pref| pref.trim().is_empty());
+    if peak < 0.0005 {
+        if auto && audio::mark_silent_mic(&name) {
+            log_warm(watch, &format!("mic silent peak={peak:.6} device=\"{name}\"; switching to another microphone"));
+            watch.force_reopen.store(true, Ordering::Relaxed);
+        }
+    } else {
+        audio::clear_silent_mic(&name);
+    }
 }
 
 fn device_names_differ(host: &cpal::Host, preference: &Option<String>, active_name: &str) -> NameCheck {
@@ -763,6 +796,7 @@ mod default_device {
             // eRender is 0. Capture and "all" are the default microphone changing.
             if flow.0 != 0 {
                 self.watch.default_event.store(true, Ordering::Relaxed);
+                crate::audio::clear_silent_mics();
             }
             Ok(())
         }

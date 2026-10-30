@@ -161,6 +161,49 @@ pub fn mic_status(preference: Option<&str>) -> MicStatus {
     }
 }
 
+/// Microphones that delivered pure digital silence on a recent take while the
+/// user was on "Automatic". Windows often makes an empty headset jack the
+/// default input; we then fall back to a microphone that actually hears.
+static SILENT_MICS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+pub fn mark_silent_mic(name: &str) -> bool {
+    let key = normalize_mic_name(name);
+    let mut list = SILENT_MICS.lock().unwrap_or_else(|err| err.into_inner());
+    if list.contains(&key) {
+        return false;
+    }
+    list.push(key);
+    true
+}
+
+pub fn clear_silent_mic(name: &str) {
+    let key = normalize_mic_name(name);
+    SILENT_MICS.lock().unwrap_or_else(|err| err.into_inner()).retain(|item| *item != key);
+}
+
+pub fn clear_silent_mics() {
+    SILENT_MICS.lock().unwrap_or_else(|err| err.into_inner()).clear();
+}
+
+fn is_silent_mic(name: &str) -> bool {
+    let key = normalize_mic_name(name);
+    SILENT_MICS.lock().unwrap_or_else(|err| err.into_inner()).contains(&key)
+}
+
+/// The system default, unless it is known to be silent and another device isn't.
+fn auto_default(devices: &[ListedMic]) -> &ListedMic {
+    let default = devices.iter().find(|device| device.is_default).unwrap_or(&devices[0]);
+    if !is_silent_mic(&default.name) {
+        return default;
+    }
+    devices.iter().find(|device| !is_silent_mic(&device.name)).unwrap_or(default)
+}
+
+/// Peak of a take; digital silence (an empty jack) is essentially zero.
+pub fn peak_level(samples: &[f32]) -> f32 {
+    samples.iter().fold(0.0f32, |peak, sample| peak.max(sample.abs()))
+}
+
 pub fn normalize_mic_name(name: &str) -> String {
     name.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
 }
@@ -174,7 +217,7 @@ pub fn resolve_microphone(devices: &[ListedMic], preference: Option<&str>) -> Re
     if devices.is_empty() {
         return Err("No microphone is available. Plug one in and try again.".into());
     }
-    let default = devices.iter().find(|device| device.is_default).unwrap_or(&devices[0]);
+    let default = auto_default(devices);
     let preference = trimmed(preference);
     if let Some(pref) = preference {
         if let Some(found) = find_named(devices, &pref) {
@@ -209,8 +252,11 @@ pub fn open_order(devices: &[ListedMic], preference: Option<&str>) -> Vec<String
             push_unique(&mut names, &found.name);
         }
     }
-    if let Some(default) = devices.iter().find(|device| device.is_default) {
-        push_unique(&mut names, &default.name);
+    if !devices.is_empty() {
+        push_unique(&mut names, &auto_default(devices).name);
+    }
+    for device in devices.iter().filter(|device| !is_silent_mic(&device.name)) {
+        push_unique(&mut names, &device.name);
     }
     for device in devices {
         push_unique(&mut names, &device.name);
