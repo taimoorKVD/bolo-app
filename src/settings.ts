@@ -81,7 +81,7 @@ const NAV: Array<[SectionId, string, string]> = [
 
 /** Rows on the Advanced page. Each opens its own page. */
 const ADVANCED: Array<[SectionId, string, string]> = [
-  ["key", "Your own service key", "Use a personal Groq key instead of Bolo’s"],
+  ["key", "Your own service key", "Use your own key instead of the built-in one"],
   ["engine", "Speech quality and offline mode", "Faster or more accurate, and what happens without internet"],
   ["cleanup", "Text clean-up style", "How much Bolo tidies your words"],
   ["dictionary", "My words list", "Names and words Bolo should spell right"],
@@ -1018,7 +1018,7 @@ function characterPanel(draft: Draft): HTMLElement {
   const paintPreview = () => {
     const urls = clipUrls(s.character);
     const src = previewPose === "listen" ? urls.listen : urls.write;
-    if (video.src !== src) video.src = src;
+    if (!sameSrc(video, src)) video.src = src;
     video.playbackRate = 1;
     void video.play().catch(() => {});
     previewName.textContent = findCharacter(s.character).name;
@@ -1250,8 +1250,8 @@ function characterPanel(draft: Draft): HTMLElement {
   paintSoundsOn();
 
   smart.classList.add("card", "rows");
-  all.append(tabs, grid, smart);
-  panel.append(preview, featured, seeAll, all, sounds);
+  all.append(tabs, grid);
+  panel.append(preview, featured, seeAll, all, sounds, smart);
   paintFeatured();
   paintGrid();
   paintPreview();
@@ -1442,7 +1442,9 @@ async function save(draft: Draft): Promise<void> {
     draft.dirty = false;
     const saved = normalizeSettings(await api.getSettings());
     // Keep edits made while this save was in flight.
-    if (!draft.dirty) draft.settings = saved;
+    // Update in place: panels keep a reference to this object.
+    if (!draft.dirty) Object.assign(draft.settings, saved);
+    void announceSettings();
     if (status) {
       status.textContent = "Saved";
       status.className = "save-status good is-shown";
@@ -1454,6 +1456,22 @@ async function save(draft: Draft): Promise<void> {
       status.textContent = messageOf(error);
       status.className = "save-status bad is-shown";
     }
+  }
+}
+
+/** Compare against the attribute: `.src` is absolute, Vite URLs are not. */
+function sameSrc(video: HTMLVideoElement, src: string): boolean {
+  return video.getAttribute("src") === src;
+}
+
+/** Tell the overlay right away so the next take uses the new character and sounds. */
+async function announceSettings(): Promise<void> {
+  if (!("__TAURI_INTERNALS__" in window)) return;
+  try {
+    const { emit } = await import("@tauri-apps/api/event");
+    await emit("bolo-settings-changed");
+  } catch {
+    // The overlay also re-reads settings at the start of each take.
   }
 }
 
@@ -1604,7 +1622,7 @@ function homePanel(draft: Draft): HTMLElement {
 function refreshHome(draft: Draft): void {
   const clip = document.querySelector<HTMLVideoElement>("[data-home-clip]");
   const src = clipUrls(activeCharacter(draft.settings)).listen;
-  if (clip && clip.src !== src) clip.src = src;
+  if (clip && !sameSrc(clip, src)) clip.src = src;
   const keys = document.querySelector<HTMLElement>("[data-home-keys]");
   if (keys) keys.textContent = formatHotkey(draft.settings.hotkey);
   const status = document.querySelector<HTMLElement>("[data-home-status]");

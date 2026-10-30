@@ -567,3 +567,20 @@ input.switch:disabled { opacity: .45; }
 .v2 .card > button.ghost, .v2 .card > button.primary { justify-self: start; }
 @media (max-width: 800px) { .v2 .sidenav { width: 100%; grid-template-columns: 1fr; } .v2 .rail { align-items: stretch; } .v2 .brand { padding: 0 0 14px; justify-items: center; } }
 @media (max-width: 800px) { .v2 .nav-item { justify-self: stretch; width: auto; } }
+
+/* QA fixes: no horizontal clipping at narrow widths or high scaling */
+.v2 .sheet { width: 100%; min-width: 0; }
+.v2 .sheet > * { min-width: 0; }
+.banner { overflow-wrap: anywhere; }
+.char-preview { flex-wrap: wrap; }
+.char-preview-clip { max-width: 100%; }
+.char-preview-copy { min-width: 0; }
+.v2 .cue-play { width: auto; padding: 4px 10px !important; white-space: nowrap; }
+.cue-list { flex-wrap: wrap; }
+.row-controls { flex-wrap: wrap; min-width: 0; }
+.row-controls select { max-width: 100%; }
+@media (max-width: 560px) { .char-featured { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.link-row { min-width: 0; width: 100%; }
+.link-row .switch-copy { min-width: 0; flex: 1; }
+.link-row .switch-copy > * { white-space: normal; overflow-wrap: anywhere; }
+.v2 .page-head p { overflow-wrap: anywhere; }

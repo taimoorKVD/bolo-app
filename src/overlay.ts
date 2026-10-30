@@ -31,6 +31,7 @@ export function mountOverlay(root: HTMLElement): void {
   let characterId = DEFAULT_CHARACTER;
   let prefs: Partial<Settings> = {};
   let pose: Pose = "hidden";
+  let pendingRefresh = false;
 
   const useCharacter = (id: string) => {
     if (id === characterId) return;
@@ -54,6 +55,15 @@ export function mountOverlay(root: HTMLElement): void {
     }
   };
   void refreshPrefs();
+  if (inTauri()) {
+    void import("@tauri-apps/api/event").then(({ listen }) =>
+      listen("bolo-settings-changed", () => {
+        // Swap only while hidden so a take in progress never flashes.
+        if (pose === "hidden") void refreshPrefs();
+        else pendingRefresh = true;
+      }),
+    );
+  }
 
   const apply = (event: DictationEvent) => {
     const next = poseFor(event.phase);
@@ -94,6 +104,10 @@ export function mountOverlay(root: HTMLElement): void {
     note.textContent = problem;
     note.hidden = problem.length === 0;
     root.hidden = next === "hidden";
+    if (next === "hidden" && pendingRefresh) {
+      pendingRefresh = false;
+      void refreshPrefs();
+    }
   };
 
   void onDictation(apply);
@@ -218,7 +232,8 @@ class CuePlayer {
     const node = this.audio.get(cue);
     if (!node || this.volume <= 0) return;
     this.tokens.set(node, (this.tokens.get(node) ?? 0) + 1);
-    node.volume = this.volume;
+    // The mic is already open for the start cue, so keep it soft.
+    node.volume = cue === "start" ? this.volume * 0.45 : this.volume;
     try {
       node.pause();
       node.currentTime = 0;
