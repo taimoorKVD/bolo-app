@@ -194,8 +194,37 @@ fn run_platform(control: ListenerControl, tx: Sender<InputEvent>) -> Result<(), 
         }
     }
 
+    fn physically_down(vk: u16) -> bool {
+        use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
+        (unsafe { GetAsyncKeyState(vk as i32) } as u16 & 0x8000) != 0
+    }
+
+    /// A key-up can be lost (Win+L, a UAC prompt, the hook timing out). Then the
+    /// hotkey looks held forever and Bolo never stops listening. Drop keys the
+    /// keyboard says are up and release the hotkey if it is no longer held.
+    fn resync(shared: &mut HookShared) {
+        let before = shared.down.len();
+        shared.down.retain(|&k| physically_down(k));
+        if shared.down.len() == before {
+            return;
+        }
+        shared.swallowed.retain(|k| shared.down.contains(k));
+        let kinds: Vec<KeyKind> = shared.down.iter().copied().map(kind_from_vk).collect();
+        let snap = snapshot_from_kinds(&kinds);
+        let paused = shared.control.paused.load(Ordering::SeqCst);
+        let hotkey = shared.control.current_hotkey();
+        let paste_hotkey = shared.control.current_paste_hotkey();
+        if let Some(edge) = shared.edges.observe(is_held(&snap, &hotkey), paused) {
+            let _ = shared.tx.send(InputEvent::Dictation(edge));
+        }
+        let _ = shared.paste_edges.observe(is_held(&snap, &paste_hotkey), paused);
+    }
+
     fn on_key(shared: &mut HookShared, vk: u16, is_down: bool) -> bool {
         shared.control.last_key_tick.store(LAST_TICK.load(Ordering::Relaxed), Ordering::Relaxed);
+        // Forget other keys whose key-up we never saw.
+        shared.down.retain(|&k| k == vk || physically_down(k));
+        shared.swallowed.retain(|&k| k == vk || shared.down.contains(&k));
         let repeat = is_down && shared.down.contains(&vk);
         if is_down {
             shared.down.insert(vk);
@@ -304,6 +333,9 @@ fn run_platform(control: ListenerControl, tx: Sender<InputEvent>) -> Result<(), 
     };
     let _ = &LAST_TICK;
     unsafe {
+        use windows::Win32::UI::WindowsAndMessaging::{SetTimer, WM_TIMER};
+        // Checks for lost key-ups while a key is held.
+        let _ = SetTimer(None, 0, 300, None);
         let mut message = MSG::default();
         loop {
             // GetMessageW returns nonzero for a message, 0 for WM_QUIT, and -1 on failure.
@@ -315,6 +347,16 @@ fn run_platform(control: ListenerControl, tx: Sender<InputEvent>) -> Result<(), 
             if status < 0 {
                 let _ = UnhookWindowsHookEx(hook);
                 return Err("the keyboard hook message loop failed".into());
+            }
+            if message.hwnd.0.is_null() && message.message == WM_TIMER {
+                if let Ok(mut guard) = HOOK.try_lock() {
+                    if let Some(shared) = guard.as_mut() {
+                        if !shared.down.is_empty() {
+                            resync(shared);
+                        }
+                    }
+                }
+                continue;
             }
             if message.hwnd.0.is_null() && message.message == WM_REINSTALL {
                 let at = std::time::Instant::now();

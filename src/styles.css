@@ -620,3 +620,18 @@ input.switch:disabled { opacity: .45; }
 .splash-logo { width:min(300px, 72vw); }
 .splash-mark { translate: 27.5% 0; }
 .splash-mark::after { inset: -22px 52% -22px -22px; border-radius: 40px; }
+
+.audio-fix {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin: 10px 0;
+  padding: 10px 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(214, 176, 92, 0.45);
+  background: rgba(214, 176, 92, 0.08);
+}
+.audio-fix[hidden] { display: none; }
+.audio-fix-text { margin: 0; flex: 1 1 220px; }
+.audio-fix-text.ok { color: #8fd18f; }

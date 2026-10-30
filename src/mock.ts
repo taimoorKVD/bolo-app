@@ -129,6 +129,10 @@ export async function mockInvoke<T>(command: string, args?: Record<string, unkno
         lastError: previewParam("error"),
       } satisfies AppInfo as T;
     }
+    case "audio_health":
+    case "fix_mic_level":
+    case "fix_output_volume":
+      return { micLevel: 0.8, micMuted: false, micQuiet: false, outputLevel: 0.5, outputMuted: false, outputQuiet: false } as T;
     case "mic_level":
       return (0.12 + 0.5 * Math.abs(Math.sin(Date.now() / 260))) as T;
     case "get_mic_status":

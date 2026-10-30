@@ -200,6 +200,29 @@ fn auto_default(devices: &[ListedMic]) -> &ListedMic {
 }
 
 /// Peak of a take; digital silence (an empty jack) is essentially zero.
+/// Open every input briefly and remember which ones deliver pure digital
+/// silence (an empty jack, a level of 0). Runs at startup and when devices
+/// change, so the very first take already uses a microphone that hears.
+pub fn probe_inputs() -> Vec<(String, f32)> {
+    let Ok(devices) = list_microphones() else { return Vec::new() };
+    let mut out = Vec::new();
+    for mic in devices {
+        let Ok(session) = start_recording(Some(&mic.name)) else { continue };
+        thread::sleep(Duration::from_millis(350));
+        let Ok(finished) = session.finish() else { continue };
+        // Skip the first 60 ms: some drivers start with a zeroed buffer.
+        let skip = (finished.sample_rate as usize * finished.channels.max(1) as usize * 60) / 1000;
+        let peak = peak_level(finished.interleaved.get(skip..).unwrap_or(&[]));
+        if finished.interleaved.len() > skip && peak < 0.0005 {
+            mark_silent_mic(&mic.name);
+        } else if peak >= 0.0005 {
+            clear_silent_mic(&mic.name);
+        }
+        out.push((mic.name, peak));
+    }
+    out
+}
+
 pub fn peak_level(samples: &[f32]) -> f32 {
     samples.iter().fold(0.0f32, |peak, sample| peak.max(sample.abs()))
 }
@@ -569,7 +592,15 @@ pub fn speech_samples(finished: &FinishedAudio) -> Result<Vec<f32>, SpeechError>
         return Err(SpeechError::Empty);
     }
     let mono = downmix(&finished.interleaved, finished.channels);
-    let trimmed = trim_silence_with(&mono, finished.sample_rate, speech_threshold(finished.noise_rms));
+    let mut trimmed = trim_silence_with(&mono, finished.sample_rate, speech_threshold(finished.noise_rms));
+    if trimmed.is_empty() {
+        // A mic whose Windows level is very low still carries speech, just
+        // far below the fixed floor. Look for a clear rise over the take's own
+        // quiet part before calling it silence, so quiet mics still work.
+        if let Some(threshold) = relative_threshold(&mono, finished.sample_rate) {
+            trimmed = trim_silence_with(&mono, finished.sample_rate, threshold);
+        }
+    }
     if trimmed.is_empty() {
         return Err(SpeechError::Silent);
     }
@@ -585,9 +616,10 @@ pub fn speech_samples(finished: &FinishedAudio) -> Result<Vec<f32>, SpeechError>
 /// alone, and a near-silent buffer is not amplified into noise.
 pub fn normalize_gain(samples: &[f32]) -> Vec<f32> {
     const TARGET_PEAK: f32 = 0.72;
-    const MAX_GAIN: f32 = 6.0;
+    // Quiet mics (low Windows level) need far more than 6x to be heard.
+    const MAX_GAIN: f32 = 60.0;
     let peak = samples.iter().fold(0.0f32, |peak, sample| peak.max(sample.abs()));
-    if peak < 0.001 {
+    if peak < 0.0003 {
         return samples.to_vec();
     }
     let gain = (TARGET_PEAK / peak).clamp(1.0, MAX_GAIN);
@@ -620,6 +652,24 @@ pub fn downmix(interleaved: &[f32], channels: u16) -> Vec<f32> {
 /// low enough for soft speech and high enough that pure digital silence is cut.
 pub fn speech_threshold(noise_rms: f32) -> f32 {
     (noise_rms.max(0.0) * 3.2 + 0.004).clamp(0.004, 0.018)
+}
+
+/// Speech floor taken from the take itself: frames clearly above the quiet
+/// 20th percentile count as speech. `None` when the take is flat (digital
+/// silence or steady noise), so silence never reaches the transcriber.
+pub fn relative_threshold(samples: &[f32], sample_rate: u32) -> Option<f32> {
+    let frame = ((sample_rate as usize) * FRAME_MS as usize) / 1000;
+    if frame == 0 || samples.len() < frame * 4 {
+        return None;
+    }
+    let mut levels: Vec<f32> = samples.chunks(frame).map(rms).collect();
+    levels.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let floor = levels[levels.len() / 5].max(0.00002);
+    let loud = levels[(levels.len() * 95) / 100];
+    if loud < 0.0004 || loud < floor * 6.0 {
+        return None;
+    }
+    Some((floor * 3.0).max(loud * 0.08).max(0.0002))
 }
 
 /// Drop leading and trailing silence. Pauses in the middle of a sentence stay.
@@ -1087,6 +1137,14 @@ fn windows_capture_format(name: &str) -> anyhow::Result<()> {
 }
 
 #[cfg(windows)]
+pub(crate) unsafe fn friendly_name(
+    device: &windows::Win32::Media::Audio::IMMDevice,
+    key: &windows::Win32::Foundation::PROPERTYKEY,
+) -> Option<String> {
+    endpoint_friendly_name(device, key)
+}
+
+#[cfg(windows)]
 unsafe fn endpoint_friendly_name(
     device: &windows::Win32::Media::Audio::IMMDevice,
     key: &windows::Win32::Foundation::PROPERTYKEY,
@@ -1144,6 +1202,18 @@ mod tests {
                 (t * 440.0 * std::f32::consts::TAU).sin() * amp
             })
             .collect()
+    }
+
+    #[test]
+    fn quiet_mic_speech_is_kept_but_flat_noise_is_not() {
+        let rate = 16_000u32;
+        let mut quiet = vec![0.00005f32; rate as usize / 2];
+        quiet.extend((0..rate as usize).map(|i| (i as f32 * 0.05).sin() * 0.003));
+        quiet.extend(vec![0.00005f32; rate as usize / 2]);
+        let finished = FinishedAudio { interleaved: quiet, channels: 1, sample_rate: rate, elapsed_ms: 2000, noise_rms: 0.0 };
+        assert!(speech_samples(&finished).is_ok(), "quiet speech must survive");
+        let flat = FinishedAudio { interleaved: vec![0.0003f32; rate as usize * 2], channels: 1, sample_rate: rate, elapsed_ms: 2000, noise_rms: 0.0 };
+        assert!(matches!(speech_samples(&flat), Err(SpeechError::Silent)));
     }
 
     #[test]

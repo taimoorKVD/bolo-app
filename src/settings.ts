@@ -703,8 +703,44 @@ function micPanel(draft: Draft): HTMLElement {
       }
     })();
   });
-  panel.append(meter, el("p", "field-note", "Talk and watch the bar move. If it stays still, pick another mic."), select, refresh, note);
+  const health = el("div", "audio-fix");
+  health.hidden = true;
+  panel.append(meter, el("p", "field-note", "Talk and watch the bar move. If it stays still, pick another mic."), health, select, refresh, note);
+  void paintMicFix(health);
   return panel;
+}
+
+function showFix(slot: HTMLElement, message: string, label: string, fix: () => Promise<string>): void {
+  const text = el("p", "audio-fix-text", message);
+  const action = button(label, "primary");
+  action.addEventListener("click", () => {
+    action.disabled = true;
+    void (async () => {
+      try {
+        const done = await fix();
+        slot.replaceChildren(el("p", "audio-fix-text ok", done));
+        window.setTimeout(() => (slot.hidden = true), 2600);
+      } catch (error) {
+        action.disabled = false;
+        text.textContent = messageOf(error);
+      }
+    })();
+  });
+  slot.replaceChildren(text, action);
+  slot.hidden = false;
+}
+
+async function paintMicFix(slot: HTMLElement): Promise<void> {
+  try {
+    const health = await api.audioHealth();
+    if (!health.micQuiet) return;
+    showFix(slot, "Your microphone is turned down too low, so Bolo can't hear you.", "Fix it", async () => {
+      await api.fixMicLevel();
+      return "Fixed. Your microphone is ready.";
+    });
+  } catch {
+    /* best effort */
+  }
 }
 
 async function paintMeter(): Promise<void> {
@@ -1192,12 +1228,34 @@ function characterPanel(draft: Draft): HTMLElement {
   };
   const play = button("▶ Play", "ghost");
   play.setAttribute("aria-label", "Play the start and finish sounds");
-  play.addEventListener("click", () => {
+  const speakerFix = el("div", "audio-fix");
+  speakerFix.hidden = true;
+  const playBoth = () => {
     playCue("start");
     window.setTimeout(() => playCue("done"), 900);
+  };
+  play.addEventListener("click", () => {
+    playBoth();
+    void (async () => {
+      try {
+        const health = await api.audioHealth();
+        if (!health.outputQuiet) {
+          speakerFix.hidden = true;
+          return;
+        }
+        showFix(speakerFix, "Your speakers are muted or turned all the way down, so you can't hear Bolo.", "Turn sound up", async () => {
+          await api.fixOutputVolume();
+          playBoth();
+          return "Sound is on.";
+        });
+      } catch {
+        /* volume check is best effort */
+      }
+    })();
   });
   const pickRow = el("div", "row-controls");
   pickRow.append(select, play);
+  queueMicrotask(() => pickRow.after(speakerFix));
   soundHead.append(headCopy, pickRow);
   const packHint = el("p", "field-note");
   const paintPackHint = () => {

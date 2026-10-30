@@ -96,3 +96,12 @@ export type DictationEvent = {
   level: number;
   engine?: string | null;
 };
+
+export interface AudioHealth {
+  micLevel: number | null;
+  micMuted: boolean;
+  micQuiet: boolean;
+  outputLevel: number | null;
+  outputMuted: boolean;
+  outputQuiet: boolean;
+}

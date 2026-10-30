@@ -106,6 +106,23 @@ impl LiveTake {
     }
 }
 
+/// Probe every input in the background and move off a silent one before the
+/// user's next take, instead of failing that take first.
+fn spawn_probe(watch: Arc<Watch>, delay_ms: u64) {
+    let _ = std::thread::Builder::new().name("bolo-probe".into()).spawn(move || {
+        std::thread::sleep(Duration::from_millis(delay_ms));
+        let found = crate::audio::probe_inputs();
+        let silent: Vec<&str> = found.iter().filter(|(_, peak)| *peak < 0.0005).map(|(n, _)| n.as_str()).collect();
+        if let Some(dir) = &watch.config_dir {
+            crate::logbuf::log_line(dir, "info", &format!("mic probe inputs={} silent={}", found.len(), silent.len()));
+        }
+        let active = watch.active_name.lock().map(|n| n.clone()).unwrap_or_default();
+        if !active.is_empty() && silent.iter().any(|n| crate::audio::normalize_mic_name(n) == crate::audio::normalize_mic_name(&active)) {
+            watch.force_reopen.store(true, Ordering::Relaxed);
+        }
+    });
+}
+
 pub struct WarmMic {
     cmd: Sender<Cmd>,
     watch: Arc<Watch>,
@@ -129,6 +146,7 @@ impl WarmMic {
         // Ask the thread to record this preference even if spawn raced.
         // The same name does not reopen the stream.
         let _ = cmd_tx.send(Cmd::Retarget(preference));
+        spawn_probe(Arc::clone(&watch), 1500);
         Self { cmd: cmd_tx, watch, level, live }
     }
 
@@ -146,6 +164,11 @@ impl WarmMic {
         } else {
             (rms * 4.5).clamp(0.0, 1.0)
         }
+    }
+
+    /// Name of the microphone the warm stream is using now (may be empty).
+    pub fn active_name(&self) -> String {
+        self.watch.active_name.lock().map(|n| n.clone()).unwrap_or_default()
     }
 
     /// Reopen the capture stream even if it looks healthy (resume, device reset).
@@ -797,6 +820,7 @@ mod default_device {
             if flow.0 != 0 {
                 self.watch.default_event.store(true, Ordering::Relaxed);
                 crate::audio::clear_silent_mics();
+                crate::warm::spawn_probe(Arc::clone(&self.watch), 600);
             }
             Ok(())
         }
