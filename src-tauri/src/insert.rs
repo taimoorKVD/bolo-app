@@ -65,7 +65,7 @@ pub fn text_landed(before: &str, after: &str, phrase: &str) -> bool {
 
 pub fn insert_text(text: &str) -> anyhow::Result<Insertion> {
     let text = text.trim();
-    if text.is_empty() {
+    if !text.chars().any(char::is_alphanumeric) {
         return Err(anyhow!("nothing to insert"));
     }
     #[cfg(windows)]

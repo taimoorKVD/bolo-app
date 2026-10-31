@@ -146,7 +146,9 @@ pub fn stitch_products(products: &[Product]) -> Result<String, String> {
             }
             continue;
         }
-        if !product.text.trim().is_empty() {
+        // A very short take can come back as just "." or "?". That is not
+        // speech, and pasting a lone punctuation mark looks like a bug.
+        if has_words(&product.text) {
             parts.push(product.text.as_str());
         }
     }
@@ -160,6 +162,10 @@ pub fn stitch_products(products: &[Product]) -> Result<String, String> {
         return Err(error);
     }
     Ok(crate::chunk::stitch(parts))
+}
+
+pub fn has_words(text: &str) -> bool {
+    text.chars().any(char::is_alphanumeric)
 }
 
 pub fn engine_label(products: &[Product]) -> Option<String> {
@@ -455,6 +461,14 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn lone_punctuation_is_not_speech() {
+        assert!(!has_words("."));
+        assert!(!has_words(" ؟ ... "));
+        assert!(has_words("ok."));
+        assert!(has_words("سلام"));
+    }
 
     fn product(_index: usize, text: &str, engine: &str, error: Option<&str>) -> Product {
         Product {

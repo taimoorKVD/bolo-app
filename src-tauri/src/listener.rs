@@ -142,6 +142,11 @@ fn set_status(control: &ListenerControl, running: bool, error: Option<String>) {
     }
 }
 
+/// Lets the hold test drive the real hook with SendInput. Real apps never set
+/// this tag, so other injected input is still ignored in normal use.
+#[cfg(windows)]
+pub(crate) const TEST_INPUT_TAG: usize = 0xB010_7E57;
+
 #[cfg(windows)]
 fn run_platform(control: ListenerControl, tx: Sender<InputEvent>) -> Result<(), String> {
     use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
@@ -161,6 +166,12 @@ fn run_platform(control: ListenerControl, tx: Sender<InputEvent>) -> Result<(), 
 
     static HOOK: Mutex<Option<HookShared>> = Mutex::new(None);
     static LAST_TICK: AtomicU32 = AtomicU32::new(0);
+    static LAST_EVENT_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    fn hook_clock_ms() -> u64 {
+        static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+        START.get_or_init(std::time::Instant::now).elapsed().as_millis() as u64
+    }
 
     unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
         if code < 0 {
@@ -169,7 +180,7 @@ fn run_platform(control: ListenerControl, tx: Sender<InputEvent>) -> Result<(), 
         let info = unsafe { &*(lparam.0 as *const KBDLLHOOKSTRUCT) };
         // Injected events include our own silent key. Ignoring them avoids
         // re-entering the hook lock from inside SendInput.
-        if info.flags.0 & 0x10 != 0 {
+        if info.flags.0 & 0x10 != 0 && info.dwExtraInfo != TEST_INPUT_TAG {
             return unsafe { CallNextHookEx(None, code, wparam, lparam) };
         }
         let message = wparam.0 as u32;
@@ -180,6 +191,7 @@ fn run_platform(control: ListenerControl, tx: Sender<InputEvent>) -> Result<(), 
         }
         let vk = info.vkCode as u16;
         LAST_TICK.store(info.time, Ordering::Relaxed);
+        LAST_EVENT_MS.store(hook_clock_ms(), Ordering::Relaxed);
         let swallow = {
             let mut guard = HOOK.lock().unwrap_or_else(|err| err.into_inner());
             let Some(shared) = guard.as_mut() else {
@@ -202,9 +214,31 @@ fn run_platform(control: ListenerControl, tx: Sender<InputEvent>) -> Result<(), 
     /// A key-up can be lost (Win+L, a UAC prompt, the hook timing out). Then the
     /// hotkey looks held forever and Bolo never stops listening. Drop keys the
     /// keyboard says are up and release the hotkey if it is no longer held.
+    /// Keys the hook swallows never reach the async key state, so
+    /// GetAsyncKeyState reads a held Win key as up. That made a held Ctrl+Win
+    /// "release" after ~0.5 s. Only keys we pass through are checked against
+    /// the keyboard; a swallowed key counts as lost only when the keyboard has
+    /// gone silent (a held key auto-repeats, so a live hold keeps sending events).
+    const SILENT_MS: u32 = 2_500;
+
+    fn still_down(shared: &HookShared, k: u16, silent: bool) -> bool {
+        if shared.swallowed.contains(&k) {
+            !silent
+        } else {
+            physically_down(k)
+        }
+    }
+
+    fn keyboard_silent() -> bool {
+        let now = hook_clock_ms();
+        now.saturating_sub(LAST_EVENT_MS.load(Ordering::Relaxed)) > SILENT_MS as u64
+    }
+
     fn resync(shared: &mut HookShared) {
         let before = shared.down.len();
-        shared.down.retain(|&k| physically_down(k));
+        let silent = keyboard_silent();
+        let keep: HashSet<u16> = shared.down.iter().copied().filter(|&k| still_down(shared, k, silent)).collect();
+        shared.down = keep;
         if shared.down.len() == before {
             return;
         }
@@ -223,7 +257,13 @@ fn run_platform(control: ListenerControl, tx: Sender<InputEvent>) -> Result<(), 
     fn on_key(shared: &mut HookShared, vk: u16, is_down: bool) -> bool {
         shared.control.last_key_tick.store(LAST_TICK.load(Ordering::Relaxed), Ordering::Relaxed);
         // Forget other keys whose key-up we never saw.
-        shared.down.retain(|&k| k == vk || physically_down(k));
+        let keep: HashSet<u16> = shared
+            .down
+            .iter()
+            .copied()
+            .filter(|&k| k == vk || still_down(shared, k, false))
+            .collect();
+        shared.down = keep;
         shared.swallowed.retain(|&k| k == vk || shared.down.contains(&k));
         let repeat = is_down && shared.down.contains(&vk);
         if is_down {
@@ -568,5 +608,84 @@ mod tests {
             status.error.as_deref(),
             Some("couldn't install the keyboard hook")
         );
+    }
+}
+
+/// Drives the real low-level hook with Ctrl+Win held 2 to 10 seconds, auto-
+/// repeat included, exactly like a keyboard. Before the fix the hook released
+/// the swallowed Win key after about 0.5 s.
+#[cfg(all(test, windows))]
+mod hold_tests {
+    use super::*;
+    use std::sync::mpsc::channel;
+    use std::time::{Duration, Instant};
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VIRTUAL_KEY,
+        VK_LCONTROL, VK_LWIN,
+    };
+
+    fn key(vk: VIRTUAL_KEY, up: bool) {
+        let input = INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: vk,
+                    wScan: 0,
+                    dwFlags: if up { KEYEVENTF_KEYUP } else { KEYBD_EVENT_FLAGS(0) },
+                    time: 0,
+                    dwExtraInfo: TEST_INPUT_TAG,
+                },
+            },
+        };
+        unsafe { SendInput(&[input], std::mem::size_of::<INPUT>() as i32) };
+    }
+
+    #[test]
+    #[ignore = "presses Ctrl+Win on the real desktop"]
+    fn long_holds_stay_held_through_the_real_hook() {
+        let (tx, rx) = channel();
+        let control = ListenerControl::new(crate::hotkey::Hotkey::default());
+        spawn(control, tx);
+        std::thread::sleep(Duration::from_millis(800));
+        for secs in [2u64, 5, 10] {
+            while rx.try_recv().is_ok() {}
+            let start = Instant::now();
+            key(VK_LCONTROL, false);
+            std::thread::sleep(Duration::from_millis(40));
+            key(VK_LWIN, false);
+            // Keyboard auto-repeat: 500 ms delay, then ~30 per second on the last key.
+            std::thread::sleep(Duration::from_millis(500));
+            let mut released_early = None;
+            while start.elapsed() < Duration::from_secs(secs) {
+                key(VK_LWIN, false);
+                std::thread::sleep(Duration::from_millis(33));
+                while let Ok(event) = rx.try_recv() {
+                    if let InputEvent::Dictation(HotkeyEdge::Released) = event {
+                        released_early.get_or_insert(start.elapsed().as_millis());
+                    }
+                }
+            }
+            key(VK_LWIN, true);
+            key(VK_LCONTROL, true);
+            let mut pressed = false;
+            let mut released = None;
+            let deadline = Instant::now() + Duration::from_millis(800);
+            while Instant::now() < deadline {
+                if let Ok(event) = rx.recv_timeout(Duration::from_millis(50)) {
+                    match event {
+                        InputEvent::Dictation(HotkeyEdge::Pressed) => pressed = true,
+                        InputEvent::Dictation(HotkeyEdge::Released) => {
+                            released.get_or_insert(start.elapsed().as_millis());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            eprintln!("hold {secs}s: released_early={released_early:?} released_at={released:?}");
+            assert!(released_early.is_none(), "a {secs}s hold was released early at {released_early:?} ms");
+            let held = released.expect("no release edge after letting go");
+            assert!(held as u64 + 100 >= secs * 1000, "held {held} ms for a {secs}s hold");
+            let _ = pressed;
+        }
     }
 }
