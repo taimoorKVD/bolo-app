@@ -353,6 +353,26 @@ pub(crate) async fn speech_with_groq(
     cleanup_model: &str,
     using_builtin: bool,
 ) -> anyhow::Result<Recognized> {
+    let mut got = speech_with_groq_raw(client, api_key, audio, model, language, output, prompt, cleanup_model, using_builtin).await?;
+    if transcribe::repetitive(&got.text) {
+        got.text = transcribe::collapse_repeats(&got.text);
+        got.path = format!("{}-collapsed", got.path);
+    }
+    Ok(got)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn speech_with_groq_raw(
+    client: &reqwest::Client,
+    api_key: &str,
+    audio: Vec<u8>,
+    model: &str,
+    language: &str,
+    output: &str,
+    prompt: Option<&str>,
+    cleanup_model: &str,
+    using_builtin: bool,
+) -> anyhow::Result<Recognized> {
     if transcribe::direct_translate(output, language) {
         let translated = transcribe::translate_audio(client, api_key, audio, prompt, using_builtin).await?;
         let code = transcribe::normalize_language(language).unwrap_or_else(|| "unknown".into());
@@ -398,7 +418,12 @@ pub(crate) async fn speech_with_groq(
         }
     }
     let detected = spoken.language.clone();
-    let route = transcribe::speech_route(output, language, &detected, &spoken.text);
+    let mut route = transcribe::speech_route(output, language, &detected, &spoken.text);
+    // Whisper's audio translation loops and drops most of a long Urdu take.
+    // We already have the Urdu text, so translate that with the LLM instead.
+    if route == SpeechRoute::Translate && transcribe::has_arabic(&spoken.text) && !transcribe::repetitive(&spoken.text) {
+        route = SpeechRoute::Mixed;
+    }
     match route {
         SpeechRoute::Transcribe => Ok(Recognized {
             text: spoken.text,
@@ -419,7 +444,7 @@ pub(crate) async fn speech_with_groq(
         }
         SpeechRoute::Mixed => {
             let outcome = cleanup::translate_preserving(client, api_key, &spoken.text, cleanup_model, using_builtin).await;
-            if outcome.used_model {
+            if outcome.used_model && !transcribe::repetitive(&outcome.text) {
                 return Ok(Recognized {
                     text: outcome.text,
                     tries: spoken.tries,
@@ -428,20 +453,27 @@ pub(crate) async fn speech_with_groq(
                     path: "mixed-llama".into(),
                 });
             }
-            match transcribe::translate_audio(client, api_key, audio, prompt, using_builtin).await {
-                Ok(translated) => Ok(Recognized {
+            match transcribe::translate_audio(client, api_key, audio, None, using_builtin).await {
+                Ok(translated) if !transcribe::repetitive(&translated.text) || spoken.text.trim().is_empty() => Ok(Recognized {
                     text: translated.text,
                     tries: spoken.tries.saturating_add(translated.tries),
                     engine: "Groq".into(),
                     language: source_language(language, &detected),
                     path: "translate".into(),
                 }),
-                Err(_) if !spoken.text.trim().is_empty() => Ok(Recognized {
+                Ok(_) | Err(_) if !spoken.text.trim().is_empty() => Ok(Recognized {
                     text: spoken.text,
                     tries: spoken.tries,
                     engine: "Groq".into(),
                     language: source_language(language, &detected),
                     path: "transcribe".into(),
+                }),
+                Ok(translated) => Ok(Recognized {
+                    text: translated.text,
+                    tries: translated.tries,
+                    engine: "Groq".into(),
+                    language: source_language(language, &detected),
+                    path: "translate".into(),
                 }),
                 Err(err) => Err(err),
             }
@@ -496,6 +528,19 @@ fn should_fallback(err: &anyhow::Error) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn whisper_loops_are_detected_and_collapsed() {
+        let bad = "Ok, so is there any, yeah. So is there any, yeah. So is there any, yeah.";
+        assert!(transcribe::repetitive(bad));
+        assert_eq!(transcribe::collapse_repeats(bad), "Ok, so is there any, yeah.");
+        assert!(transcribe::repetitive("thank you thank you thank you thank you"));
+        assert!(!transcribe::repetitive("Ok, and then we need to work on their traffic side as well to get more and more traffic on this, on my website."));
+        assert!(!transcribe::repetitive("I said many things, but it only transcript the above line as it is."));
+        assert!(!transcribe::repetitive("very very good"));
+        let fine = "First point. Second point is different. Third one too.";
+        assert_eq!(transcribe::collapse_repeats(fine), fine);
+    }
 
     #[test]
     fn urdu_with_english_words_on_auto_gets_a_clean_urdu_pass() {

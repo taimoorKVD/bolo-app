@@ -319,7 +319,7 @@ pub async fn translate_audio(
     using_builtin: bool,
 ) -> anyhow::Result<Transcript> {
     let first = request_audio(client, api_key, audio.clone(), TRANSLATIONS, WHISPER_LARGE, "", prompt, using_builtin).await?;
-    if !first.text.trim().is_empty() {
+    if !first.text.trim().is_empty() && !repetitive(&first.text) {
         return Ok(Transcript {
             text: first.text,
             tries: 1,
@@ -675,7 +675,7 @@ pub(crate) fn has_latin(text: &str) -> bool {
     text.chars().any(|c| c.is_ascii_alphabetic())
 }
 
-fn has_arabic(text: &str) -> bool {
+pub(crate) fn has_arabic(text: &str) -> bool {
     text.chars().any(|c| {
         matches!(
             c,
@@ -692,6 +692,58 @@ fn has_arabic(text: &str) -> bool {
 struct VerboseSegment {
     avg_logprob: Option<f32>,
     no_speech_prob: Option<f32>,
+}
+
+fn words(text: &str) -> Vec<String> {
+    text.split(|c: char| !c.is_alphanumeric() && c != '\'')
+        .filter(|w| !w.is_empty())
+        .map(|w| w.to_lowercase())
+        .collect()
+}
+
+/// Whisper's looping failure: one short phrase repeated over and over
+/// ("So is there any, yeah. So is there any, yeah. ..."), which hides the rest
+/// of the speech. True when one 2-6 word phrase appears 3+ times and covers at
+/// least half the words.
+pub(crate) fn repetitive(text: &str) -> bool {
+    let tokens = words(text);
+    if tokens.len() < 6 {
+        return false;
+    }
+    for n in 2..=6usize {
+        if tokens.len() < n * 3 {
+            break;
+        }
+        let mut counts: std::collections::HashMap<&[String], usize> = std::collections::HashMap::new();
+        for gram in tokens.windows(n) {
+            *counts.entry(gram).or_default() += 1;
+        }
+        if let Some(best) = counts.values().max() {
+            if *best >= 3 && best * n * 2 >= tokens.len() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Last resort: drop sentences that repeat the one before them.
+pub(crate) fn collapse_repeats(text: &str) -> String {
+    let mut out: Vec<&str> = Vec::new();
+    let mut last: Vec<String> = Vec::new();
+    for piece in text.split_inclusive(['.', '?', '!', '\u{06D4}', '\u{061F}']) {
+        let key = words(piece);
+        if key.is_empty() {
+            out.push(piece);
+            continue;
+        }
+        if !last.is_empty() && last.ends_with(&key) {
+            continue;
+        }
+        last = key;
+        out.push(piece);
+    }
+    out.concat().trim().to_string()
 }
 
 #[cfg(test)]
