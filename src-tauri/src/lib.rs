@@ -26,6 +26,8 @@ mod warm;
 mod live_tests;
 #[cfg(test)]
 mod harness;
+#[cfg(test)]
+mod qa_tests;
 
 use crate::credentials::ApiKeyStatus;
 use crate::dictation::AppState;

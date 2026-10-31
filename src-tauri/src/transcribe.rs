@@ -210,19 +210,30 @@ pub struct Transcript {
 /// "Please try again in 3.2s" / "in 850ms" from a Groq 429 message.
 pub fn retry_after_ms(message: &str) -> Option<u64> {
     let at = message.find("try again in ")? + "try again in ".len();
-    let rest = &message[at..];
-    let num: String = rest.chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
-    let value: f64 = num.parse().ok()?;
-    let unit = &rest[num.len()..];
-    if unit.starts_with("ms") {
-        Some(value as u64)
-    } else if unit.starts_with('s') {
-        Some((value * 1000.0) as u64)
-    } else if unit.starts_with('m') {
-        Some((value * 60_000.0) as u64)
-    } else {
-        None
+    // Groq writes compound waits such as "1m30s" or "7m12.5s".
+    let mut rest = &message[at..];
+    let mut total = 0f64;
+    let mut parsed = false;
+    loop {
+        let num: String = rest.chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
+        let Ok(value) = num.parse::<f64>() else { break };
+        let unit = &rest[num.len()..];
+        let (scale, len) = if unit.starts_with("ms") {
+            (1.0, 2)
+        } else if unit.starts_with('s') {
+            (1000.0, 1)
+        } else if unit.starts_with('m') {
+            (60_000.0, 1)
+        } else if unit.starts_with('h') {
+            (3_600_000.0, 1)
+        } else {
+            break;
+        };
+        total += value * scale;
+        parsed = true;
+        rest = &unit[len..];
     }
+    parsed.then_some(total as u64)
 }
 
 /// Phrases Whisper invents on silence or noise.

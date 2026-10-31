@@ -221,6 +221,9 @@ pub fn validate_settings(settings: &Settings) -> Result<(), String> {
         }
     }
     validate_hotkey(&settings.paste_hotkey)?;
+    if settings.paste_hotkey == settings.hotkey {
+        return Err("The paste-again shortcut must differ from the dictation shortcut.".into());
+    }
     match offline::normalize_model(&settings.offline_model) {
         "off" | "base.en" | "small.en" => {}
         _ => return Err("Choose base.en, small.en, or off for the on-device model.".into()),
@@ -268,7 +271,7 @@ pub fn normalize_settings(mut settings: Settings) -> Settings {
             settings.microphone = None;
         }
     }
-    if validate_hotkey(&settings.paste_hotkey).is_err() {
+    if validate_hotkey(&settings.paste_hotkey).is_err() || settings.paste_hotkey == settings.hotkey {
         settings.paste_hotkey = Hotkey::paste_again();
     }
     settings.offline_model = offline::normalize_model(&settings.offline_model).to_string();

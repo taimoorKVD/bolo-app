@@ -259,9 +259,13 @@ pub fn polish_locally(input: &str) -> String {
     apply_commands(&text)
 }
 
-fn polish_model_output(input: &str) -> String {
-    let text = apply_self_correction(input);
-    apply_commands(&text)
+/// The model already applied spoken corrections and punctuation. Only the
+/// unambiguous markers run again here: "I mean" and single words such as
+/// "period" are ordinary English ("what I mean is", "the trial period") in a
+/// rewrite, so they are left alone unless a single command word ends the take.
+pub(crate) fn polish_model_output(input: &str) -> String {
+    let text = self_correction(input, false);
+    commands_with(&text, true)
 }
 
 /// Remove standalone "um" / "uh" (and stretched forms like "umm").
@@ -677,6 +681,29 @@ struct GroqErrorDetail {
 
 /// Replace the last spoken self-correction and keep the words that survived it.
 pub fn apply_self_correction(input: &str) -> String {
+    self_correction(input, true)
+}
+
+/// "I mean" is a correction in "Email Sarah I mean Sam", not in
+/// "what I mean is" or "I mean it".
+fn i_mean_is_correction(words: &[&str], at: usize) -> bool {
+    const NOT_AFTER: &[&str] = &["what", "you", "i", "do", "if", "know"];
+    const NOT_BEFORE: &[&str] = &[
+        "is", "was", "it", "that", "this", "to", "by", "what", "well", "yes", "no", "really", "business",
+    ];
+    if at == 0 {
+        return false;
+    }
+    if NOT_AFTER.iter().any(|w| same_word(words[at - 1], w)) {
+        return false;
+    }
+    match words.get(at + 2) {
+        Some(next) => !NOT_BEFORE.iter().any(|w| same_word(next, w)),
+        None => false,
+    }
+}
+
+fn self_correction(input: &str, allow_i_mean: bool) -> String {
     let words: Vec<&str> = input.split_whitespace().collect();
     let markers: [&[&str]; 3] = [&["scratch", "that"], &["no", "wait"], &["i", "mean"]];
     let mut found: Option<(usize, usize)> = None;
@@ -684,6 +711,7 @@ pub fn apply_self_correction(input: &str) -> String {
         for marker in markers {
             if words.len() - index >= marker.len()
                 && marker.iter().zip(&words[index..]).all(|(want, got)| same_word(got, want))
+                && (marker[0] != "i" || (allow_i_mean && i_mean_is_correction(&words, index)))
             {
                 found = Some((index, marker.len()));
             }
@@ -709,6 +737,10 @@ pub fn apply_self_correction(input: &str) -> String {
 
 /// Spoken punctuation and line breaks. Longer phrases win over single words.
 pub fn apply_commands(input: &str) -> String {
+    commands_with(input, false)
+}
+
+fn commands_with(input: &str, strict: bool) -> String {
     let words: Vec<&str> = input.split_whitespace().collect();
     let commands: &[(&[&str], &str)] = &[
         (&["new", "paragraph"], "\n\n"),
@@ -725,10 +757,25 @@ pub fn apply_commands(input: &str) -> String {
         (&["period"], "."),
         (&["dash"], "—"),
     ];
-    apply_commands_plain(&words, commands)
+    apply_commands_plain(&words, commands, strict)
 }
 
-fn apply_commands_plain(words: &[&str], commands: &[(&[&str], &str)]) -> String {
+/// A lone command word after "the", "a", "trial"... is a noun, not punctuation.
+fn single_word_is_noun(words: &[&str], index: usize) -> bool {
+    const BEFORE: &[&str] = &[
+        "a", "an", "the", "this", "that", "each", "every", "per", "my", "your", "our", "their", "his",
+        "her", "its", "trial", "grace", "time", "waiting", "notice", "billing", "free", "first", "last",
+        "next", "same", "one", "long", "short", "em", "en",
+    ];
+    const AFTER: &[&str] = &["of", "cancer", "is", "was", "ends", "ended", "starts", "board", "cam"];
+    let before = index.checked_sub(1).map(|i| words[i]);
+    if before.is_some_and(|w| BEFORE.iter().any(|b| same_word(w, b))) {
+        return true;
+    }
+    words.get(index + 1).is_some_and(|w| AFTER.iter().any(|a| same_word(w, a)))
+}
+
+fn apply_commands_plain(words: &[&str], commands: &[(&[&str], &str)], strict: bool) -> String {
     let mut out = String::new();
     let mut index = 0;
     while index < words.len() {
@@ -736,6 +783,8 @@ fn apply_commands_plain(words: &[&str], commands: &[(&[&str], &str)]) -> String 
         for (phrase, insert) in commands {
             if words.len() - index >= phrase.len()
                 && phrase.iter().zip(&words[index..]).all(|(want, got)| same_word(got, want))
+                && (phrase.len() > 1
+                    || (!single_word_is_noun(words, index) && (!strict || index + 1 == words.len())))
             {
                 push_command(&mut out, insert);
                 index += phrase.len();

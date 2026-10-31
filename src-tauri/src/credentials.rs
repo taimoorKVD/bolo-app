@@ -442,6 +442,7 @@ mod tests {
     /// A blob written the way keyring 3 writes Windows passwords must still load.
     #[cfg(windows)]
     #[test]
+    #[ignore = "writes a throwaway entry to Windows Credential Manager"]
     fn windows_reads_a_legacy_utf16_blob() {
         let target = format!("com.cadence.dictation/selftest-utf16-{}", std::process::id());
         let secret = "gsk_legacy_utf16_key_123456";
