@@ -872,19 +872,20 @@ const COMMON_WORDS: &[&str] = &[
     "settings", "website", "application", "issue", "problem", "testing", "working", "words"
 ];
 
-/// Plain capitalized words seen once, waiting for a second take.
-static PENDING: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+/// Test helper: `learn_terms_with` with a per-thread pending list.
+#[cfg(test)]
+pub fn learn_terms(text: &str, dictionary: &mut Vec<String>) -> Vec<String> {
+    thread_local! {
+        static PENDING: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+    PENDING.with(|pending| learn_terms_with(text, dictionary, &mut pending.borrow_mut(), &[]))
+}
 
 /// Remember brand/tech-shaped terms (GitHub, ReactJS, AWS, Win11) at once, and
 /// plain capitalized names only after they show up mid-sentence in two takes.
 /// Common English words and sentence-start words are never learned.
-pub fn learn_terms(text: &str, dictionary: &mut Vec<String>) -> Vec<String> {
-    let mut pending = PENDING.lock().unwrap_or_else(|e| e.into_inner());
-    learn_terms_with(text, dictionary, &mut pending, &[])
-}
-
-/// `learn_terms` with the pending list passed in, so it can be saved to
-/// memory.json and survive a restart. `blocked` words are never learned.
+/// `pending` holds names seen once and is saved in memory.json so it survives
+/// a restart. `blocked` words are never learned.
 pub fn learn_terms_with(
     text: &str,
     dictionary: &mut Vec<String>,

@@ -635,3 +635,82 @@ input.switch:disabled { opacity: .45; }
 .audio-fix[hidden] { display: none; }
 .audio-fix-text { margin: 0; flex: 1 1 220px; }
 .audio-fix-text.ok { color: #8fd18f; }
+
+/* Fix last: overlay card */
+.fix-card {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(16, 15, 12, 0.94);
+  border: 1px solid rgba(198, 161, 90, 0.55);
+  border-radius: 999px;
+  padding: 6px 6px 6px 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  animation: fix-in 0.22s ease-out;
+}
+.fix-card[hidden], .fix-choices[hidden], .fix-main[hidden] { display: none; }
+.fix-card button {
+  border: 0;
+  border-radius: 999px;
+  padding: 7px 12px;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  color: var(--ink);
+  background: rgba(198, 161, 90, 0.18);
+}
+.fix-card .fix-main { background: #c6a15a; color: #17140f; font-weight: 600; }
+.fix-card .fix-choices { display: flex; gap: 6px; }
+.fix-card .fix-close { background: transparent; color: var(--muted); padding: 7px 9px; }
+.fix-card button:hover { filter: brightness(1.12); }
+@keyframes fix-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+
+/* What Bolo has learned */
+.learned-body { display: grid; gap: 22px; }
+.learned-section h3 { margin: 0 0 2px; font-size: 15px; }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0; }
+.chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  border: 1px solid rgba(198, 161, 90, 0.45);
+  background: rgba(198, 161, 90, 0.1);
+  border-radius: 999px; padding: 4px 6px 4px 12px; font-size: 13px;
+}
+.chip-x {
+  border: 0; background: transparent; color: var(--muted); cursor: pointer;
+  border-radius: 999px; width: 22px; height: 22px; padding: 0; font-size: 11px;
+}
+.chip-x:hover { color: var(--ink); background: rgba(225, 90, 74, 0.25); }
+.add-word { display: flex; gap: 8px; max-width: 420px; }
+.add-word input { flex: 1; }
+.learned-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 8px 0; border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+.learned-row p { margin: 0; }
+.fix-from { color: var(--muted); text-decoration: line-through; }
+.fix-arrow { color: var(--muted); }
+.style-sample { font-style: italic; }
+.learned-foot { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+button.danger { border-color: rgba(225, 90, 74, 0.6); color: #f0a196; }
+
+/* Fix dialog */
+.fix-dialog {
+  width: min(520px, 92vw);
+  border: 1px solid rgba(198, 161, 90, 0.45);
+  border-radius: 18px;
+  background: #1b1915;
+  color: var(--ink);
+  padding: 20px 22px;
+  display: grid;
+  gap: 10px;
+}
+.fix-dialog::backdrop { background: rgba(0, 0, 0, 0.55); }
+.fix-head { display: flex; justify-content: space-between; align-items: center; }
+.fix-head h2 { margin: 0; font-size: 18px; }
+.fix-kicker { margin: 0; color: var(--muted); font-size: 13px; }
+.fix-said {
+  margin: 0; padding: 10px 12px; border-left: 3px solid #c6a15a;
+  background: rgba(255, 255, 255, 0.04); border-radius: 8px;
+}
+.fix-label { font-size: 13px; color: var(--muted); margin-top: 6px; }
+.fix-dialog textarea { width: 100%; box-sizing: border-box; }

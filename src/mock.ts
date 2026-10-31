@@ -4,6 +4,7 @@ import type {
   AppInfo,
   HistoryEntry,
   MicInfo,
+  MemoryView,
   Settings,
 } from "./types";
 
@@ -33,6 +34,7 @@ const settings: Settings = {
   smartMood: false,
   smartTimeOfDay: false,
   smartHoliday: false,
+  keepLearning: true,
 };
 
 let apiKey: string | null = null;
@@ -46,6 +48,7 @@ let history: HistoryEntry[] = [
     model: "whisper-large-v3-turbo",
     cleaned: false,
     durationMs: 3100,
+    audioId: "spool-1",
   },
   {
     id: "sample-2",
@@ -56,6 +59,25 @@ let history: HistoryEntry[] = [
     durationMs: 4800,
   },
 ];
+
+const memory: MemoryView = {
+  words: ["Taimoor", "Kingdom Vision", "Lahore", "Groq"],
+  fixes: [
+    { from: "tie more", to: "Taimoor", createdUnixMs: Date.now() - 3600_000 },
+    { from: "bolo dot com", to: "Bolo.com", createdUnixMs: Date.now() - 86_400_000 },
+  ],
+  style: [
+    "Send the invoice to Ahmed by Friday, thanks.",
+    "Kal meeting 3 baje rakh lo, theek hai?",
+  ],
+  keepLearning: true,
+};
+
+function memoryView(): MemoryView {
+  memory.keepLearning = settings.keepLearning;
+  memory.words = settings.dictionary.length ? [...settings.dictionary] : memory.words;
+  return structuredClone(memory);
+}
 
 const mics: MicInfo[] = [
   { name: "Microphone Array", isDefault: true },
@@ -143,6 +165,54 @@ export async function mockInvoke<T>(command: string, args?: Record<string, unkno
         message: null,
         devices: structuredClone(mics),
       } as T;
+    case "get_memory":
+      return memoryView() as T;
+    case "forget_word":
+      settings.dictionary = memoryView().words.filter((w) => w !== args?.word);
+      memory.words = settings.dictionary;
+      return memoryView() as T;
+    case "add_word": {
+      const w = String(args?.word ?? "").trim();
+      if (!w) throw new Error("Type a word first.");
+      settings.dictionary = [...memoryView().words.filter((x) => x !== w), w];
+      return memoryView() as T;
+    }
+    case "forget_fix":
+      memory.fixes = memory.fixes.filter((f) => f.from !== args?.from);
+      return memoryView() as T;
+    case "forget_style":
+      memory.style.splice(Number(args?.index), 1);
+      return memoryView() as T;
+    case "set_keep_learning":
+      settings.keepLearning = Boolean(args?.on);
+      return memoryView() as T;
+    case "forget_everything":
+      settings.dictionary = [];
+      memory.words = [];
+      memory.fixes = [];
+      memory.style = [];
+      return memoryView() as T;
+    case "fix_target": {
+      const id = (args?.id as string | null) ?? history[0]?.id ?? "";
+      const entry = history.find((h) => h.id === id);
+      if (!entry) throw new Error("There's no take to fix yet.");
+      return { id, text: entry.text, canRelisten: Boolean(entry.audioId), isLast: id === history[0]?.id } as T;
+    }
+    case "take_fix_request":
+      return previewParam("fix") as T;
+    case "fix_requested":
+      return undefined as T;
+    case "fix_relisten":
+      await delay(900);
+      return { text: "Please ask Taimoor about it.", message: "Listened again and replaced the text.", learned: [] } as T;
+    case "fix_with_text": {
+      const text = String(args?.text ?? "");
+      const entry = history.find((h) => h.id === args?.id);
+      if (entry) entry.text = text;
+      return { text, message: "Fixed. Bolo will remember this.", learned: ["tie more → Taimoor"] } as T;
+    }
+    case "overlay_fix":
+      return undefined as T;
     case "dismiss_error":
       return undefined as T;
     case "copy_text":
