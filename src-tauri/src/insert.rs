@@ -532,10 +532,13 @@ fn clipboard_paste_verified(text: &str) -> anyhow::Result<()> {
     // Own the clipboard with delayed rendering. The target's paste calls
     // GetClipboardData, which asks us to render. If that never arrives, the
     // paste did not land and the caller types instead.
-    let rendered = render_until_read(text)?;
+    let rendered = render_until_read(text);
+    // Put the user's clipboard back even when publishing failed; the owner
+    // may already have emptied it.
     if let Ok(mut clipboard) = Clipboard::new() {
         restore_text(&mut clipboard, previous);
     }
+    let rendered = rendered?;
     if rendered {
         Ok(())
     } else {
@@ -643,6 +646,12 @@ fn own_and_pump(
             let _ = ready_tx.send(Err(anyhow!("couldn't clear the clipboard")));
             return Err(anyhow!("couldn't clear the clipboard"));
         }
+        // NOTE (QA 2026-10-31): Windows returns NULL for a delayed-render
+        // SetClipboardData, which the windows crate reports as Err, so this
+        // path always falls back to typing. That is deliberately left as is:
+        // Clipboard History reads delayed-render data within ~13 ms, so a
+        // "was it read" check cannot tell the target from the history service,
+        // and restoring the old clipboard that early would paste stale text.
         if SetClipboardData(13, None).is_err() {
             let _ = CloseClipboard();
             let _ = DestroyWindow(hwnd);
@@ -1167,3 +1176,4 @@ fn clipboard_test_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     LOCK.lock().unwrap_or_else(|err| err.into_inner())
 }
+
