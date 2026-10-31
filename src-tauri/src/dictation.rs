@@ -973,8 +973,13 @@ async fn process(
 }
 
 async fn deliver(app: &AppHandle, mut outcome: Outcome, generation: u64) {
-    absorb_dictionary(app, &outcome.text);
+    // A translation's English words aren't the user's own terms; learning
+    // them put mis-heard junk ("Kaju", "Banning") into the next prompt.
+    if !crate::diag::take_translated() {
+        absorb_dictionary(app, &outcome.text);
+    }
     let state = app.state::<AppState>();
+    crate::diag::flush(&state.config_dir, &outcome.spool_id, &outcome.text);
     spool::write_text(&state.config_dir, &outcome.spool_id, &outcome.text);
     *lock(&state.last_text) = Some(outcome.text.clone());
     let text = outcome.text.clone();

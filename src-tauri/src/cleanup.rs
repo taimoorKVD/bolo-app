@@ -11,6 +11,7 @@ use zeroize::Zeroize;
 /// Fast Groq instruct model. `llama-3.1-8b-instant` was removed for the
 /// developer tier on 16 Aug 2026 and now returns 404.
 pub const CLEANUP_MODEL: &str = "openai/gpt-oss-20b";
+const TRANSLATE_MODEL: &str = "openai/gpt-oss-120b";
 
 /// Tried in order when the preferred model is missing. The saved setting is
 /// first; these follow so a 404 does not fail the paste.
@@ -20,6 +21,7 @@ pub const CLEANUP_MODELS: &[&str] = &[
     "qwen/qwen3.6-27b",
 ];
 const CLEANUP_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(3000);
+const TRANSLATE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(9000);
 
 fn model_order(preferred: &str) -> Vec<String> {
     let mut out = Vec::new();
@@ -342,9 +344,14 @@ pub async fn translate_preserving(
     if original.is_empty() {
         return skipped(String::new(), "empty");
     }
-    let system = "Translate this transcript into English. Preserve the meaning exactly. Do not add, drop, explain, or summarize. Keep names, numbers, and words that are already English unchanged. If the speech mixes Urdu and English, or Roman Urdu, translate only the parts that are not English. Return only the English text, with no preamble and no quotes.";
+    let system = "You translate a speech-to-text transcript of someone dictating in Urdu (often mixed with English words, sometimes Roman Urdu) into the natural English they meant. The transcript comes from automatic speech recognition and may contain mis-heard words; use the surrounding context to recover the intended word (for example a word that sounds like a tech term). Keep English words the speaker used, especially technical and product words (animation, background, box, responsive, robot, website, app), as they are. Translate faithfully and completely: every point the speaker made, in the same order, as clear first-person English. Do not summarize, add ideas, answer questions, or explain. Return only the English text, with no preamble and no quotes.";
     let max_tokens = (original.chars().count() as u32 / 2 + 96).clamp(64, 400);
-    let models = model_order(model);
+    // Urdu meaning needs the bigger model; the small one translated word by word.
+    let mut models = model_order(model);
+    if let Some(pos) = models.iter().position(|m| m == TRANSLATE_MODEL) {
+        let big = models.remove(pos);
+        models.insert(0, big);
+    }
     let mut missed = Vec::new();
     for model_id in &models {
         match post_chat(client, api_key, model_id, system, original, max_tokens, using_builtin).await {
@@ -560,7 +567,7 @@ async fn post_chat(
     }
     let response = match client
         .post("https://api.groq.com/openai/v1/chat/completions")
-        .timeout(CLEANUP_TIMEOUT)
+        .timeout(if system.starts_with("You translate") { TRANSLATE_TIMEOUT } else { CLEANUP_TIMEOUT })
         .bearer_auth(api_key)
         .json(&body)
         .send()

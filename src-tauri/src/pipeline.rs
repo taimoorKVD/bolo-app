@@ -354,7 +354,10 @@ pub(crate) async fn speech_with_groq(
     using_builtin: bool,
 ) -> anyhow::Result<Recognized> {
     let mut got = speech_with_groq_raw(client, api_key, audio, model, language, output, prompt, cleanup_model, using_builtin).await?;
+    crate::diag::note(format!("route path={} language={} text={}", got.path, got.language, got.text));
+    crate::diag::set_translated(got.path.contains("translate") || got.path.contains("mixed"));
     if transcribe::repetitive(&got.text) {
+        crate::diag::note("loop detected in final text, collapsing");
         got.text = transcribe::collapse_repeats(&got.text);
         got.path = format!("{}-collapsed", got.path);
     }
@@ -387,7 +390,9 @@ async fn speech_with_groq_raw(
     let model = effective_model(model, language);
     let urdu_set = transcribe::normalize_language(language).as_deref() == Some("ur");
     let first_prompt = if urdu_set { Some(transcribe::URDU_PROMPT.to_string()) } else { prompt.map(str::to_string) };
+    crate::diag::note(format!("whisper#1 model={model} lang={language} prompt={:?}", first_prompt));
     let mut spoken = transcribe::transcribe(client, api_key, audio.clone(), model, language, first_prompt, using_builtin).await?;
+    crate::diag::note(format!("whisper#1 detected={} text={}", spoken.language, spoken.text));
     if unlikely_language(language, &spoken.language) {
         // Short or accented English is sometimes detected as Spanish, Welsh,
         // etc., which then got translated and came out garbled. Bolo users
@@ -396,7 +401,9 @@ async fn speech_with_groq_raw(
         // Urdu speaker can't use. Pin Urdu for that case, English otherwise.
         let pin = if hindi_like(&spoken.language, &spoken.text) { "ur" } else { "en" };
         let pin_prompt = if pin == "ur" { Some(transcribe::URDU_PROMPT.to_string()) } else { prompt.map(str::to_string) };
+        crate::diag::note(format!("repin lang={pin} prompt={:?}", pin_prompt));
         if let Ok(pinned) = transcribe::transcribe(client, api_key, audio.clone(), model, pin, pin_prompt, using_builtin).await {
+            crate::diag::note(format!("repin text={}", pinned.text));
             if !pinned.text.trim().is_empty() {
                 let tries = spoken.tries.saturating_add(pinned.tries);
                 spoken = pinned;
@@ -408,7 +415,9 @@ async fn speech_with_groq_raw(
     if urdu_needs_clean_pass(language, &spoken.language, &spoken.text) {
         // Auto-detect heard Urdu but the English prompt leaked English
         // look-alike words in. Transcribe again as Urdu with an Urdu prompt.
+        crate::diag::note("urdu clean pass (auto heard Urdu with Latin words)");
         if let Ok(pinned) = transcribe::transcribe(client, api_key, audio.clone(), model, "ur", Some(transcribe::URDU_PROMPT.to_string()), using_builtin).await {
+            crate::diag::note(format!("urdu clean pass text={}", pinned.text));
             if !pinned.text.trim().is_empty() {
                 let tries = spoken.tries.saturating_add(pinned.tries);
                 spoken = pinned;
@@ -443,7 +452,9 @@ async fn speech_with_groq_raw(
             })
         }
         SpeechRoute::Mixed => {
+            crate::diag::note(format!("llm translate input={}", spoken.text));
             let outcome = cleanup::translate_preserving(client, api_key, &spoken.text, cleanup_model, using_builtin).await;
+            crate::diag::note(format!("llm translate used={} why={} loop={} output={}", outcome.used_model, outcome.why, transcribe::repetitive(&outcome.text), outcome.text));
             if outcome.used_model && !transcribe::repetitive(&outcome.text) {
                 return Ok(Recognized {
                     text: outcome.text,

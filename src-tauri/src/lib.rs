@@ -4,6 +4,7 @@ mod chunk;
 mod cleanup;
 mod context;
 mod credentials;
+mod diag;
 mod dictation;
 mod health;
 mod hotkey;
