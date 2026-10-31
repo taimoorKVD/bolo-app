@@ -224,9 +224,8 @@ pub fn validate_settings(settings: &Settings) -> Result<(), String> {
     if settings.paste_hotkey == settings.hotkey {
         return Err("The paste-again shortcut must differ from the dictation shortcut.".into());
     }
-    match offline::normalize_model(&settings.offline_model) {
-        "off" | "base.en" | "small.en" => {}
-        _ => return Err("Choose base.en, small.en, or off for the on-device model.".into()),
+    if !offline::is_known_model(&settings.offline_model) {
+        return Err("Choose base.en, small.en, or off for the on-device model.".into());
     }
     match settings.output.as_str() {
         "english" | "same" => {}

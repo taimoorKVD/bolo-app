@@ -136,6 +136,28 @@ pub fn collect(mut flights: Vec<Flight>) -> Vec<Product> {
         .collect()
 }
 
+pub const PARTIAL_NOTE: &str = "Part of this take didn't transcribe. The rest was inserted, and the full recording is kept.";
+
+/// Like `stitch_products`, but a failed piece no longer throws away the pieces
+/// that did transcribe. Returns the text plus a note when something was lost.
+pub fn stitch_partial(products: &[Product]) -> Result<(String, Option<String>), String> {
+    match stitch_products(products) {
+        Ok(text) => Ok((text, None)),
+        Err(error) => {
+            let parts: Vec<&str> = products
+                .iter()
+                .filter(|p| p.error.is_none() && has_words(&p.text))
+                .map(|p| p.text.as_str())
+                .collect();
+            if parts.is_empty() {
+                Err(error)
+            } else {
+                Ok((crate::chunk::stitch(parts), Some(PARTIAL_NOTE.to_string())))
+            }
+        }
+    }
+}
+
 pub fn stitch_products(products: &[Product]) -> Result<String, String> {
     let mut failure = None;
     let mut parts = Vec::new();

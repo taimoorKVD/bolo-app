@@ -21,6 +21,15 @@ pub fn normalize_model(value: &str) -> &'static str {
     }
 }
 
+/// True only for values Bolo actually offers, so a bad save is refused
+/// instead of being silently turned into base.en.
+pub fn is_known_model(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "off" | "none" | "groq" | "small" | "small.en" | "ggml-small.en" | "base" | "base.en" | "ggml-base.en"
+    )
+}
+
 pub fn model_label(model: &str) -> &'static str {
     match normalize_model(model) {
         "off" => "Off",

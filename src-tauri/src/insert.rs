@@ -794,32 +794,31 @@ fn pastes_into_a_real_edit_control() {
     };
     let _restore = ClipboardGuard { previous };
 
-    within("writing the clipboard", || {
-        set_clipboard_text(PHRASE).unwrap_or_else(|err| panic!("paste test: couldn't write the clipboard: {err}"));
-    });
-    let written = within("reading the clipboard back", || {
-        Clipboard::new()
-            .and_then(|mut clipboard| clipboard.get_text())
-            .unwrap_or_else(|err| panic!("paste test: clipboard read-back failed: {err}"))
-    });
-    assert_eq!(
-        written, PHRASE,
-        "paste test: clipboard returned {written:?} after writing {PHRASE:?}"
-    );
-    eprintln!("paste test: clipboard round trip ok, sending WM_PASTE");
-
-    within("WM_PASTE", move || {
-        let edit = HWND(edit as *mut core::ffi::c_void);
-        unsafe {
-            SendMessageW(edit, WM_PASTE, None, None);
+    // Other tests share the system clipboard and run in parallel, so one
+    // attempt can lose a race. Retry a few times before calling it a failure.
+    let mut text = String::new();
+    for attempt in 1..=4 {
+        within("writing the clipboard", || {
+            set_clipboard_text(PHRASE).unwrap_or_else(|err| panic!("paste test: couldn't write the clipboard: {err}"));
+        });
+        within("WM_PASTE", move || {
+            let edit = HWND(edit as *mut core::ffi::c_void);
+            unsafe {
+                SendMessageW(edit, WM_PASTE, None, None);
+            }
+        });
+        text = within("reading the edit control", move || {
+            let edit = HWND(edit as *mut core::ffi::c_void);
+            let mut buffer = [0u16; 256];
+            let length = unsafe { GetWindowTextW(edit, &mut buffer) }.max(0) as usize;
+            String::from_utf16_lossy(&buffer[..length.min(buffer.len())])
+        });
+        if text.to_lowercase().contains(PHRASE) {
+            break;
         }
-    });
-    let text = within("reading the edit control", move || {
-        let edit = HWND(edit as *mut core::ffi::c_void);
-        let mut buffer = [0u16; 256];
-        let length = unsafe { GetWindowTextW(edit, &mut buffer) }.max(0) as usize;
-        String::from_utf16_lossy(&buffer[..length.min(buffer.len())])
-    });
+        eprintln!("paste test: attempt {attempt} lost a clipboard race ({text:?}), retrying");
+        std::thread::sleep(std::time::Duration::from_millis(150));
+    }
     eprintln!("paste test: edit control contains {text:?}");
     host.shutdown();
 

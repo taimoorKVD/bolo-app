@@ -467,3 +467,28 @@ fn paste_hotkey_equal_to_dictation_hotkey_is_rejected() {
     s.paste_hotkey = s.hotkey.clone();
     assert!(crate::store::validate_settings(&s).is_err());
 }
+
+#[test]
+fn a_failed_chunk_keeps_the_chunks_that_worked() {
+    let (text, note) = crate::pipeline::stitch_partial(&[
+        product("ship the notes", "Groq", None),
+        product("", "Groq", Some("boom")),
+        product("before Thursday", "Groq", None),
+    ])
+    .unwrap();
+    assert!(text.contains("ship the notes") && text.contains("before Thursday"));
+    assert_eq!(note.as_deref(), Some(crate::pipeline::PARTIAL_NOTE));
+    assert!(crate::pipeline::stitch_partial(&[product("", "Groq", Some("boom"))]).is_err());
+    assert_eq!(crate::pipeline::stitch_partial(&[product("hi there", "Groq", None)]).unwrap(), ("hi there".to_string(), None));
+}
+
+#[test]
+fn unknown_on_device_model_is_refused_on_save() {
+    let mut s = Settings::default();
+    s.offline_model = "huge".into();
+    assert!(crate::store::validate_settings(&s).is_err());
+    for ok in ["off", "base.en", "small.en"] {
+        s.offline_model = ok.into();
+        assert!(crate::store::validate_settings(&s).is_ok(), "{ok}");
+    }
+}

@@ -887,8 +887,8 @@ async fn process(
     let (speech_language, speech_path) = speech_meta(&products);
     staged.speech_language = speech_language;
     staged.speech_path = speech_path;
-    let stitched = match pipeline::stitch_products(&products) {
-        Ok(text) => text,
+    let (stitched, partial_note) = match pipeline::stitch_partial(&products) {
+        Ok(pair) => pair,
         Err(message) => {
             let hint = products.iter().all(|product| product.silence || product.error.is_none())
                 && products.iter().any(|product| product.silence);
@@ -926,7 +926,7 @@ async fn process(
             return Ok(Outcome {
                 text: stitched,
                 cleaned: false,
-                note: None,
+                note: partial_note,
                 duration_ms: clock.held_ms,
                 model: settings.model.clone(),
                 staged,
@@ -963,7 +963,7 @@ async fn process(
     Ok(Outcome {
         text,
         cleaned: cleaned.used_model,
-        note: cleaned.note,
+        note: partial_note.or(cleaned.note),
         duration_ms: clock.held_ms,
         model,
         staged,
@@ -1009,7 +1009,8 @@ async fn deliver(app: &AppHandle, mut outcome: Outcome, generation: u64) {
     // as Typed, including when the field can't be read back.
     let word = insert::status_word(inserted.method, inserted.verified);
     let verified_paste = word == "Inserted";
-    if verified_paste {
+    let partial = outcome.note.as_deref() == Some(pipeline::PARTIAL_NOTE);
+    if verified_paste && !partial {
         spool::remove(&state.config_dir, &outcome.spool_id);
     }
     log_stages(app, &outcome.staged, release_ms);
@@ -1024,7 +1025,13 @@ async fn deliver(app: &AppHandle, mut outcome: Outcome, generation: u64) {
                 InsertMethod::Clipboard => "clipboard",
                 InsertMethod::Typed => "typed",
             },
-            inserted.verified,
+            match (inserted.method, inserted.verified) {
+                (_, true) => "true",
+                // Typing into an app that can't be read back (browsers, Electron)
+                // is not a failure; it just can't be confirmed.
+                (InsertMethod::Typed, false) => "unconfirmed",
+                (InsertMethod::Clipboard, false) => "changed",
+            },
             outcome.engine.as_deref().unwrap_or("none")
         ),
     );
