@@ -767,6 +767,7 @@ fn focus_target(hwnd: windows::Win32::Foundation::HWND) {
 #[cfg(all(test, windows))]
 #[test]
 fn pastes_into_a_real_edit_control() {
+    let _clipboard = clipboard_test_lock();
     use windows::Win32::Foundation::HWND;
     use windows::Win32::UI::WindowsAndMessaging::{GetWindowTextW, SendMessageW, WM_PASTE};
 
@@ -833,6 +834,7 @@ fn pastes_into_a_real_edit_control() {
 #[cfg(all(test, windows))]
 #[test]
 fn consecutive_takes_both_land_in_the_edit_control() {
+    let _clipboard = clipboard_test_lock();
     use windows::Win32::Foundation::HWND;
     use windows::Win32::UI::WindowsAndMessaging::{SendMessageW, WM_PASTE};
 
@@ -1128,6 +1130,7 @@ mod delay_tests {
 
     #[test]
     fn clipboard_paste_does_not_sleep_through_the_take() {
+    let _clipboard = clipboard_test_lock();
     assert!(CLIPBOARD_PUBLISH_DELAY <= Duration::from_millis(15));
     assert!(PASTE_SETTLE_DELAY <= Duration::from_millis(40));
     assert_eq!(CLIPBOARD_READ_WAIT, Duration::from_millis(500));
@@ -1154,4 +1157,13 @@ unsafe extern "system" fn paste_wnd_proc(
 ) -> windows::Win32::Foundation::LRESULT {
     use windows::Win32::UI::WindowsAndMessaging::DefWindowProcW;
     unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+}
+
+/// The clipboard and the delayed-render owner are process-wide. Tests that
+/// use them must not overlap, or Windows can be handed a freed clipboard
+/// handle (seen as 0xC0000374 heap corruption in parallel `cargo test`).
+#[cfg(all(test, windows))]
+fn clipboard_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|err| err.into_inner())
 }
