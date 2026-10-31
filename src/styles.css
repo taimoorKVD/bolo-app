@@ -309,10 +309,6 @@ body.view-overlay #app {
   background: transparent;
   pointer-events: none;
   border-radius: 22px;
-  /* Some clips (Robot's propeller) are cropped at the top of the source
-     frame. Fade the top edge so it reads as soft, not a hard box cut. */
-  -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 14%, #000 100%);
-  mask-image: linear-gradient(to bottom, transparent 0, #000 14%, #000 100%);
 }
 .listener-note {
   margin: 0;
