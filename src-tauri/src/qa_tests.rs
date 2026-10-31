@@ -389,6 +389,7 @@ fn cleanup_never_accepts_added_words() {
 #[test]
 fn learning_adds_at_most_three_names_per_take() {
     let mut dict = Vec::new();
+    learn_terms("Met Priya Rahul Ahmed Fatima today", &mut dict);
     let added = learn_terms("Met Priya Rahul Ahmed Fatima today", &mut dict);
     assert_eq!(added.len(), 3);
 }

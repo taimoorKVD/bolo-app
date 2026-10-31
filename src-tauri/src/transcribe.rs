@@ -122,7 +122,7 @@ pub fn whisper_prompt(words: &[String]) -> Option<String> {
 /// (instructions, English terms, recent English takes), which pulled Urdu
 /// speech into English look-alike words ("behtari" -> "battery"). Urdu takes
 /// get an Urdu-script prompt instead.
-pub(crate) const URDU_PROMPT: &str = "یہ اردو میں بولی گئی بات ہے۔";
+pub(crate) const URDU_PROMPT: &str = "یہ اردو میں بولی گئی بات ہے۔ بہتری، بہتر، ایپلیکیشن، اینیمیشن، بیک گراؤنڈ، ویب سائٹ، ڈیزائن۔";
 
 /// Dictionary terms plus the last couple of local transcripts, capped at 800 characters.
 pub fn whisper_prompt_with(words: &[String], recent: &[String]) -> Option<String> {

@@ -415,7 +415,7 @@ async fn speech_with_groq_raw(
     if urdu_needs_clean_pass(language, &spoken.language, &spoken.text) {
         // Auto-detect heard Urdu but the English prompt leaked English
         // look-alike words in. Transcribe again as Urdu with an Urdu prompt.
-        crate::diag::note("urdu clean pass (auto heard Urdu with Latin words)");
+        crate::diag::note("urdu clean pass (auto heard Urdu; redo with the Urdu prompt)");
         if let Ok(pinned) = transcribe::transcribe(client, api_key, audio.clone(), model, "ur", Some(transcribe::URDU_PROMPT.to_string()), using_builtin).await {
             crate::diag::note(format!("urdu clean pass text={}", pinned.text));
             if !pinned.text.trim().is_empty() {
@@ -494,10 +494,11 @@ async fn speech_with_groq_raw(
 
 /// Auto language, Whisper heard Urdu, and the text has Latin words in it,
 /// so the English prompt may have bent Urdu words into English ones.
-pub(crate) fn urdu_needs_clean_pass(setting: &str, detected: &str, text: &str) -> bool {
-    transcribe::normalize_language(setting).is_none()
-        && transcribe::language_code(detected) == "ur"
-        && transcribe::has_latin(text)
+pub(crate) fn urdu_needs_clean_pass(setting: &str, detected: &str, _text: &str) -> bool {
+    // diag.log showed the English-prompt pass spelling بہتری as بیٹری
+    // ("battery") even in pure Urdu script, so any Urdu heard on auto gets
+    // the Urdu-prompt pass, not only takes with Latin words.
+    transcribe::normalize_language(setting).is_none() && transcribe::language_code(detected) == "ur"
 }
 
 /// Auto language and Whisper picked something other than English or Urdu.
@@ -556,7 +557,7 @@ mod tests {
     #[test]
     fn urdu_with_english_words_on_auto_gets_a_clean_urdu_pass() {
         assert!(urdu_needs_clean_pass("auto", "urdu", "کیا کوئی battery باقی ہے"));
-        assert!(!urdu_needs_clean_pass("auto", "urdu", "کیا کوئی بہتری باقی ہے"));
+        assert!(urdu_needs_clean_pass("auto", "urdu", "کیا کوئی بہتری باقی ہے"));
         assert!(!urdu_needs_clean_pass("auto", "english", "is there any betterment left"));
         assert!(!urdu_needs_clean_pass("ur", "urdu", "کیا کوئی battery باقی ہے"));
         assert!(!transcribe::URDU_PROMPT.chars().any(|c| c.is_ascii_alphabetic()));

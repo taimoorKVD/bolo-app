@@ -666,6 +666,7 @@ fn enqueue(app: &AppHandle, audios: Vec<FinishedAudio>) {
     let settings = lock(&state.settings).clone();
     let recent: Vec<String> = lock(&state.history)
         .iter()
+        .filter(|entry| !crate::diag::was_translation(&entry.text))
         .take(2)
         .map(|entry| entry.text.clone())
         .collect();
@@ -975,7 +976,9 @@ async fn process(
 async fn deliver(app: &AppHandle, mut outcome: Outcome, generation: u64) {
     // A translation's English words aren't the user's own terms; learning
     // them put mis-heard junk ("Kaju", "Banning") into the next prompt.
-    if !crate::diag::take_translated() {
+    if crate::diag::take_translated() {
+        crate::diag::remember_translation(&outcome.text);
+    } else {
         absorb_dictionary(app, &outcome.text);
     }
     let state = app.state::<AppState>();

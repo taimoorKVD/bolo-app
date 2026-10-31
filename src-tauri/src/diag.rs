@@ -12,6 +12,22 @@ const MARK: &str = "=== take ";
 
 static NOTES: Mutex<Vec<String>> = Mutex::new(Vec::new());
 static TRANSLATED: AtomicBool = AtomicBool::new(false);
+static TRANSLATED_TEXTS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Remember a pasted translation so it isn't fed back to Whisper as
+/// "recent text" (an English mis-translation then biased the next Urdu take).
+pub fn remember_translation(text: &str) {
+    if let Ok(mut list) = TRANSLATED_TEXTS.lock() {
+        list.push(text.trim().to_string());
+        if list.len() > 10 {
+            list.remove(0);
+        }
+    }
+}
+
+pub fn was_translation(text: &str) -> bool {
+    TRANSLATED_TEXTS.lock().map(|list| list.iter().any(|t| t == text.trim())).unwrap_or(false)
+}
 
 pub fn note(line: impl Into<String>) {
     if !ENABLED {
