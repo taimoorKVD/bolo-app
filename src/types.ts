@@ -25,6 +25,15 @@ export type Settings = {
   verbatim: boolean;
   /** Groq chat model for cleanup and mixed-language translation. */
   cleanupModel: string;
+  /** Overlay character id. `classic` is the plush listener. */
+  character: string;
+  /** Sound pack id, `match` (follow the character) or `off`. */
+  soundPack: string;
+  /** 0..1 */
+  soundVolume: number;
+  smartMood: boolean;
+  smartTimeOfDay: boolean;
+  smartHoliday: boolean;
 };
 
 export type ApiKeyStatus = {
@@ -87,3 +96,12 @@ export type DictationEvent = {
   level: number;
   engine?: string | null;
 };
+
+export interface AudioHealth {
+  micLevel: number | null;
+  micMuted: boolean;
+  micQuiet: boolean;
+  outputLevel: number | null;
+  outputMuted: boolean;
+  outputQuiet: boolean;
+}

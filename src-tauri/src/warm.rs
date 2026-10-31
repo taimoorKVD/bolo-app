@@ -106,6 +106,23 @@ impl LiveTake {
     }
 }
 
+/// Probe every input in the background and move off a silent one before the
+/// user's next take, instead of failing that take first.
+fn spawn_probe(watch: Arc<Watch>, delay_ms: u64) {
+    let _ = std::thread::Builder::new().name("bolo-probe".into()).spawn(move || {
+        std::thread::sleep(Duration::from_millis(delay_ms));
+        let found = crate::audio::probe_inputs();
+        let silent: Vec<&str> = found.iter().filter(|(_, peak)| *peak < 0.0005).map(|(n, _)| n.as_str()).collect();
+        if let Some(dir) = &watch.config_dir {
+            crate::logbuf::log_line(dir, "info", &format!("mic probe inputs={} silent={}", found.len(), silent.len()));
+        }
+        let active = watch.active_name.lock().map(|n| n.clone()).unwrap_or_default();
+        if !active.is_empty() && silent.iter().any(|n| crate::audio::normalize_mic_name(n) == crate::audio::normalize_mic_name(&active)) {
+            watch.force_reopen.store(true, Ordering::Relaxed);
+        }
+    });
+}
+
 pub struct WarmMic {
     cmd: Sender<Cmd>,
     watch: Arc<Watch>,
@@ -129,6 +146,7 @@ impl WarmMic {
         // Ask the thread to record this preference even if spawn raced.
         // The same name does not reopen the stream.
         let _ = cmd_tx.send(Cmd::Retarget(preference));
+        spawn_probe(Arc::clone(&watch), 1500);
         Self { cmd: cmd_tx, watch, level, live }
     }
 
@@ -146,6 +164,11 @@ impl WarmMic {
         } else {
             (rms * 4.5).clamp(0.0, 1.0)
         }
+    }
+
+    /// Name of the microphone the warm stream is using now (may be empty).
+    pub fn active_name(&self) -> String {
+        self.watch.active_name.lock().map(|n| n.clone()).unwrap_or_default()
     }
 
     /// Reopen the capture stream even if it looks healthy (resume, device reset).
@@ -392,7 +415,11 @@ fn handle_cmd(cmd: Cmd, state: &Arc<Mutex<Capture>>, watch: &Watch, next_id: &mu
             }
         }
         Cmd::End { id, reply } => {
-            let _ = reply.send(disarm_take(state, id));
+            let result = disarm_take(state, id);
+            if let Ok(finished) = &result {
+                check_silent_device(finished, watch);
+            }
+            let _ = reply.send(result);
         }
     }
 }
@@ -502,6 +529,35 @@ enum NameCheck {
     Same,
     Differ,
     Unknown,
+}
+
+/// On "Automatic", a take of pure digital silence means the default input is
+/// dead (typically an empty headset jack). Remember it and reopen on the next
+/// device so the following take works. Any signal clears the mark.
+fn check_silent_device(finished: &FinishedAudio, watch: &Watch) {
+    let frames = finished.interleaved.len() / finished.channels.max(1) as usize;
+    if finished.sample_rate == 0 || frames < (finished.sample_rate as usize) * 6 / 10 {
+        return;
+    }
+    let name = watch.active_name.lock().unwrap_or_else(|err| err.into_inner()).clone();
+    if name.is_empty() {
+        return;
+    }
+    let peak = audio::peak_level(&finished.interleaved);
+    let auto = watch
+        .preference
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .as_deref()
+        .map_or(true, |pref| pref.trim().is_empty());
+    if peak < 0.0005 {
+        if auto && audio::mark_silent_mic(&name) {
+            log_warm(watch, &format!("mic silent peak={peak:.6} device=\"{name}\"; switching to another microphone"));
+            watch.force_reopen.store(true, Ordering::Relaxed);
+        }
+    } else {
+        audio::clear_silent_mic(&name);
+    }
 }
 
 fn device_names_differ(host: &cpal::Host, preference: &Option<String>, active_name: &str) -> NameCheck {
@@ -763,6 +819,8 @@ mod default_device {
             // eRender is 0. Capture and "all" are the default microphone changing.
             if flow.0 != 0 {
                 self.watch.default_event.store(true, Ordering::Relaxed);
+                crate::audio::clear_silent_mics();
+                crate::warm::spawn_probe(Arc::clone(&self.watch), 600);
             }
             Ok(())
         }

@@ -207,6 +207,39 @@ pub struct Transcript {
 /// A second Whisper call is worth it when the first result is empty or the
 /// model itself is unsure. Temperature stays 0; the retry drops the prompt so
 /// the request is not identical.
+/// "Please try again in 3.2s" / "in 850ms" from a Groq 429 message.
+pub fn retry_after_ms(message: &str) -> Option<u64> {
+    let at = message.find("try again in ")? + "try again in ".len();
+    let rest = &message[at..];
+    let num: String = rest.chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
+    let value: f64 = num.parse().ok()?;
+    let unit = &rest[num.len()..];
+    if unit.starts_with("ms") {
+        Some(value as u64)
+    } else if unit.starts_with('s') {
+        Some((value * 1000.0) as u64)
+    } else if unit.starts_with('m') {
+        Some((value * 60_000.0) as u64)
+    } else {
+        None
+    }
+}
+
+/// Phrases Whisper invents on silence or noise.
+pub fn stock_phrase(text: &str) -> bool {
+    let t: String = text
+        .to_lowercase()
+        .chars()
+        .filter(|c| c.is_alphanumeric() || c.is_whitespace())
+        .collect();
+    let t = t.split_whitespace().collect::<Vec<_>>().join(" ");
+    matches!(
+        t.as_str(),
+        "thank you" | "thanks" | "thank you very much" | "thanks for watching" | "thank you for watching"
+            | "you" | "bye" | "bye bye" | "please subscribe" | "subtitles by the amaraorg community" | "شکریہ"
+    )
+}
+
 pub fn should_retry(text: &str, avg_logprob: Option<f32>, no_speech_prob: Option<f32>) -> bool {
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -230,6 +263,11 @@ pub async fn transcribe(
 ) -> anyhow::Result<Transcript> {
     let model = normalize_model(model).context("unknown Whisper model")?;
     let first = request_audio(client, api_key, audio.clone(), TRANSCRIPTIONS, model, language, prompt.as_deref(), using_builtin).await?;
+    let mut first = first;
+    if stock_phrase(&first.text) && first.no_speech_prob.unwrap_or(0.0) > 0.25 {
+        // "Thank you." / "Thanks for watching." on a take that is mostly noise.
+        first.text.clear();
+    }
     if !should_retry(&first.text, first.avg_logprob, first.no_speech_prob) {
         return Ok(Transcript {
             text: first.text,
@@ -339,6 +377,23 @@ async fn request_audio(
     loop {
         match request_audio_once(client, api_key, audio.clone(), endpoint, model, language, prompt, using_builtin).await {
             Ok(parsed) => return Ok(parsed),
+            Err(failure) if failure.kind == FailKind::RateLimit && attempt < 3 => {
+                // Free Groq keys allow ~20 requests a minute. Groq says how long
+                // to wait; a few seconds is better than dropping the take.
+                match retry_after_ms(&failure.message) {
+                    Some(ms) if ms <= 8_000 => {
+                        std::thread::sleep(Duration::from_millis(ms + 150));
+                        attempt += 1;
+                    }
+                    _ => match retry_plan(failure.kind, attempt.min(1)) {
+                        RetryPlan::Backoff { ms } => {
+                            std::thread::sleep(Duration::from_millis(ms));
+                            attempt += 1;
+                        }
+                        RetryPlan::Stop { .. } => return Err(anyhow::Error::from(failure)),
+                    },
+                }
+            }
             Err(failure) => match retry_plan(failure.kind, attempt) {
                 RetryPlan::Backoff { ms } => {
                     std::thread::sleep(Duration::from_millis(ms));
@@ -625,6 +680,21 @@ struct VerboseSegment {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retry_after_is_parsed() {
+        assert_eq!(retry_after_ms("Please try again in 3s. Need more"), Some(3000));
+        assert_eq!(retry_after_ms("try again in 1.5s"), Some(1500));
+        assert_eq!(retry_after_ms("try again in 640ms"), Some(640));
+        assert_eq!(retry_after_ms("nope"), None);
+    }
+
+    #[test]
+    fn stock_phrases_are_recognized() {
+        assert!(stock_phrase(" Thank you. "));
+        assert!(stock_phrase("Thanks for watching!"));
+        assert!(!stock_phrase("Thank you for the report."));
+    }
 
     #[test]
     fn prompt_includes_terms_and_truncates() {

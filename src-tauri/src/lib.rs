@@ -8,6 +8,7 @@ mod dictation;
 mod health;
 mod hotkey;
 mod insert;
+mod levels;
 mod listener;
 mod logbuf;
 mod micwatch;
@@ -23,6 +24,8 @@ mod warm;
 
 #[cfg(test)]
 mod live_tests;
+#[cfg(test)]
+mod harness;
 
 use crate::credentials::ApiKeyStatus;
 use crate::dictation::AppState;
@@ -68,6 +71,9 @@ pub fn run() {
             dismiss_error,
             get_mic_status,
             mic_level,
+            audio_health,
+            fix_mic_level,
+            fix_output_volume,
             copy_text,
             open_groq_keys,
             smoke_finished,
@@ -460,8 +466,50 @@ fn clear_api_key() -> Result<(), String> {
 }
 
 #[tauri::command]
-fn list_microphones() -> Result<Vec<audio::MicInfo>, String> {
-    audio::list_microphones().map_err(|err| err.to_string())
+async fn list_microphones() -> Result<Vec<audio::MicInfo>, String> {
+    // Device enumeration can take >1 s; keep it off the main thread so other
+    // IPC calls (and window painting) are not queued behind it.
+    tauri::async_runtime::spawn_blocking(audio::list_microphones)
+        .await
+        .map_err(|err| err.to_string())?
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn audio_health(state: tauri::State<'_, AppState>) -> Result<levels::AudioHealth, String> {
+    let name = state.warm.active_name();
+    tauri::async_runtime::spawn_blocking(move || levels::health(Some(name.as_str()).filter(|n| !n.is_empty())))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn fix_mic_level(state: tauri::State<'_, AppState>) -> Result<levels::AudioHealth, String> {
+    let name = state.warm.active_name();
+    let warm_name = name.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let name = Some(warm_name.as_str()).filter(|n| !n.is_empty());
+        levels::fix_mic(name)?;
+        Ok::<_, String>(levels::health(name))
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    if !name.is_empty() {
+        audio::clear_silent_mic(&name);
+    }
+    state.warm.force_reopen();
+    logbuf::log_line(&state.config_dir, "info", "mic level raised by user (Fix it)");
+    result
+}
+
+#[tauri::command]
+async fn fix_output_volume() -> Result<levels::AudioHealth, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        levels::fix_output()?;
+        Ok::<_, String>(levels::health(None))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]

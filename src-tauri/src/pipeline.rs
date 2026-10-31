@@ -227,12 +227,12 @@ fn transcribe_one(index: usize, audio: FinishedAudio, env: &JobEnv) -> Product {
     product
 }
 
-struct Recognized {
-    text: String,
-    tries: u8,
-    engine: String,
-    language: String,
-    path: String,
+pub(crate) struct Recognized {
+    pub(crate) text: String,
+    pub(crate) tries: u8,
+    pub(crate) engine: String,
+    pub(crate) language: String,
+    pub(crate) path: String,
 }
 
 async fn recognize(bytes: Vec<u8>, env: &JobEnv) -> Result<Recognized, String> {
@@ -302,7 +302,19 @@ async fn recognize(bytes: Vec<u8>, env: &JobEnv) -> Result<Recognized, String> {
     }
 }
 
-async fn speech_with_groq(
+/// Turbo turns Urdu into Hindi script or broken Roman Urdu. The full model got
+/// every Urdu test right (CER 0.10 vs 0.50) at similar speed, so use it
+/// whenever Urdu is possible. English-only users keep Turbo.
+pub(crate) fn effective_model<'a>(model: &'a str, language: &str) -> &'a str {
+    let code = transcribe::normalize_language(language).unwrap_or_default();
+    if model == transcribe::WHISPER_TURBO && code != "en" {
+        transcribe::WHISPER_LARGE
+    } else {
+        model
+    }
+}
+
+pub(crate) async fn speech_with_groq(
     client: &reqwest::Client,
     api_key: &str,
     audio: Vec<u8>,
@@ -324,7 +336,24 @@ async fn speech_with_groq(
             path: "translate".into(),
         });
     }
-    let spoken = transcribe::transcribe(client, api_key, audio.clone(), model, language, prompt.map(str::to_string), using_builtin).await?;
+    let model = effective_model(model, language);
+    let mut spoken = transcribe::transcribe(client, api_key, audio.clone(), model, language, prompt.map(str::to_string), using_builtin).await?;
+    if unlikely_language(language, &spoken.language) {
+        // Short or accented English is sometimes detected as Spanish, Welsh,
+        // etc., which then got translated and came out garbled. Bolo users
+        // speak English and Urdu, so pin English and transcribe again.
+        // Urdu is often detected as Hindi and written in Devanagari, which an
+        // Urdu speaker can't use. Pin Urdu for that case, English otherwise.
+        let pin = if hindi_like(&spoken.language, &spoken.text) { "ur" } else { "en" };
+        if let Ok(pinned) = transcribe::transcribe(client, api_key, audio.clone(), model, pin, prompt.map(str::to_string), using_builtin).await {
+            if !pinned.text.trim().is_empty() {
+                let tries = spoken.tries.saturating_add(pinned.tries);
+                spoken = pinned;
+                spoken.tries = tries;
+                spoken.language = pin.into();
+            }
+        }
+    }
     let detected = spoken.language.clone();
     let route = transcribe::speech_route(output, language, &detected, &spoken.text);
     match route {
@@ -377,6 +406,19 @@ async fn speech_with_groq(
     }
 }
 
+/// Auto language and Whisper picked something other than English or Urdu.
+pub(crate) fn unlikely_language(setting: &str, detected: &str) -> bool {
+    if transcribe::normalize_language(setting).is_some() {
+        return false;
+    }
+    let code = transcribe::language_code(detected);
+    !(code.is_empty() || code == "en" || code == "ur")
+}
+
+fn hindi_like(detected: &str, text: &str) -> bool {
+    transcribe::language_code(detected) == "hi" || text.chars().any(|c| ('\u{0900}'..='\u{097F}').contains(&c))
+}
+
 fn source_language(setting: &str, detected: &str) -> String {
     let detected = transcribe::language_code(detected);
     if !detected.is_empty() {
@@ -403,6 +445,15 @@ fn should_fallback(err: &anyhow::Error) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn urdu_capable_takes_use_the_full_model() {
+        use crate::transcribe::{WHISPER_LARGE, WHISPER_TURBO};
+        assert_eq!(super::effective_model(WHISPER_TURBO, "auto"), WHISPER_LARGE);
+        assert_eq!(super::effective_model(WHISPER_TURBO, "ur"), WHISPER_LARGE);
+        assert_eq!(super::effective_model(WHISPER_TURBO, "en"), WHISPER_TURBO);
+        assert_eq!(super::effective_model(WHISPER_LARGE, "en"), WHISPER_LARGE);
+    }
+
     use super::*;
 
     fn product(_index: usize, text: &str, engine: &str, error: Option<&str>) -> Product {

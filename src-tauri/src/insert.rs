@@ -126,12 +126,35 @@ fn paste_via_clipboard(text: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn read_previous_text() -> Option<String> {
+    for _ in 0..10 {
+        match Clipboard::new() {
+            Ok(mut clipboard) => match clipboard.get_text() {
+                Ok(text) => return Some(text),
+                Err(arboard::Error::ContentNotAvailable) => return None,
+                Err(_) => {}
+            },
+            Err(_) => {}
+        }
+        std::thread::sleep(std::time::Duration::from_millis(30));
+    }
+    None
+}
+
 fn restore_text(clipboard: &mut Clipboard, previous: Option<String>) {
-    let restored = if let Some(previous) = previous {
-        clipboard.set_text(previous).is_ok()
-    } else {
-        clipboard.clear().is_ok()
-    };
+    // Another app (Notepad, clipboard history) can hold the clipboard for a
+    // moment right after a paste, so one failed attempt left it empty.
+    let mut restored = false;
+    for _ in 0..10 {
+        restored = match &previous {
+            Some(previous) => clipboard.set_text(previous.clone()).is_ok(),
+            None => clipboard.clear().is_ok(),
+        };
+        if restored {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(30));
+    }
     if !restored {
         eprintln!("couldn't restore the previous clipboard contents");
     }
@@ -290,7 +313,7 @@ fn insert_into_edit(
         }
         return Err(anyhow!("the text did not appear in the text field"));
     }
-    let previous = Clipboard::new().ok().and_then(|mut clipboard| clipboard.get_text().ok());
+    let previous = read_previous_text();
     if let Err(err) = set_clipboard_text(text) {
         replace_selection(hwnd, text);
         let after = window_text(hwnd);
@@ -316,6 +339,14 @@ fn insert_into_edit(
         return Ok(Insertion {
             method: InsertMethod::Clipboard,
             verified: true,
+        });
+    }
+    if after != before {
+        // The field changed, so the paste went in; it just can't be matched
+        // exactly (line endings, autocorrect). Typing again would duplicate it.
+        return Ok(Insertion {
+            method: InsertMethod::Clipboard,
+            verified: false,
         });
     }
     replace_selection(hwnd, text);
@@ -355,10 +386,30 @@ fn replace_selection(hwnd: windows::Win32::Foundation::HWND, text: &str) {
 
 #[cfg(windows)]
 fn window_text(hwnd: windows::Win32::Foundation::HWND) -> String {
-    use windows::Win32::UI::WindowsAndMessaging::GetWindowTextW;
-    let mut buffer = vec![0u16; 32_768];
-    let length = unsafe { GetWindowTextW(hwnd, &mut buffer) }.max(0) as usize;
-    String::from_utf16_lossy(&buffer[..length.min(buffer.len())])
+    // GetWindowTextW only returns the caption for another process's window,
+    // so a paste into Notepad always looked like it failed and Bolo typed the
+    // text a second time. WM_GETTEXT is marshalled across processes.
+    use windows::Win32::Foundation::{LPARAM, WPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{SendMessageTimeoutW, SMTO_ABORTIFHUNG, WM_GETTEXT, WM_GETTEXTLENGTH};
+    let mut length = 0usize;
+    unsafe {
+        let _ = SendMessageTimeoutW(hwnd, WM_GETTEXTLENGTH, WPARAM(0), LPARAM(0), SMTO_ABORTIFHUNG, 300, Some(&mut length));
+    }
+    let length = length.min(4_000_000);
+    let mut buffer = vec![0u16; length + 1];
+    let mut copied = 0usize;
+    unsafe {
+        let _ = SendMessageTimeoutW(
+            hwnd,
+            WM_GETTEXT,
+            WPARAM(buffer.len()),
+            LPARAM(buffer.as_mut_ptr() as isize),
+            SMTO_ABORTIFHUNG,
+            300,
+            Some(&mut copied),
+        );
+    }
+    String::from_utf16_lossy(&buffer[..copied.min(length)])
 }
 
 #[cfg(windows)]
@@ -477,7 +528,7 @@ fn clipboard_paste_verified(text: &str) -> anyhow::Result<()> {
     if clipboard_is_image() {
         return Err(anyhow!("clipboard holds an image"));
     }
-    let previous = Clipboard::new().ok().and_then(|mut clipboard| clipboard.get_text().ok());
+    let previous = read_previous_text();
     // Own the clipboard with delayed rendering. The target's paste calls
     // GetClipboardData, which asks us to render. If that never arrives, the
     // paste did not land and the caller types instead.
@@ -943,7 +994,9 @@ impl EditHost {
                 lpszClassName: PCWSTR(class_name.as_ptr()),
                 ..Default::default()
             };
-            if RegisterClassW(&class) == 0 {
+            if RegisterClassW(&class) == 0
+                && windows::Win32::Foundation::GetLastError() != windows::Win32::Foundation::ERROR_CLASS_ALREADY_EXISTS
+            {
                 let _ = ready_tx.send(Err(format!(
                     "RegisterClassW failed: {}",
                     windows::core::Error::from_win32()

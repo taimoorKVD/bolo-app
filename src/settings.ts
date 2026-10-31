@@ -1,4 +1,16 @@
 import { api, onDictation, onListenerStatus, onMicStatus } from "./api";
+import {
+  CHARACTERS,
+  DEFAULT_CHARACTER,
+  activeCharacter,
+  GROUPS,
+  SOUND_PACKS,
+  clipUrls,
+  findCharacter,
+  resolvePack,
+  soundUrl,
+  type CharacterGroup,
+} from "./characters";
 import lockupUrl from "./brand-lockup.svg";
 import { formatDuration, formatHotkey, formatWhen, modelLabel } from "./format";
 import { listenerNotice, visibleMessage } from "./notices";
@@ -44,27 +56,41 @@ const LANGUAGES: Array<[string, string]> = [
 ];
 
 type SectionId =
-  | "general"
-  | "hotkey"
-  | "microphone"
-  | "language"
+  | "home"
+  | "shortcut"
+  | "character"
+  | "languages"
+  | "history"
+  | "advanced"
+  | "key"
+  | "engine"
   | "cleanup"
   | "dictionary"
-  | "history"
   | "privacy"
-  | "about";
+  | "paste"
+  | "diagnostics";
 
+/** Main pages, with an icon and a title. Advanced sits apart at the bottom. */
 const NAV: Array<[SectionId, string, string]> = [
-  ["general", "General", "Account"],
-  ["hotkey", "Hotkey", "Push to talk"],
-  ["microphone", "Microphone", "Input"],
-  ["language", "Language", "Accuracy"],
-  ["cleanup", "Cleanup", "Style"],
-  ["dictionary", "Dictionary", "Names"],
-  ["history", "History", "On this PC"],
-  ["privacy", "Privacy", "Local only"],
-  ["about", "About", "Bolo"],
+  ["home", "⌂", "Home"],
+  ["shortcut", "⌨", "Shortcut"],
+  ["character", "☺", "Character & sounds"],
+  ["languages", "◍", "Languages"],
+  ["history", "↺", "History"],
 ];
+
+/** Rows on the Advanced page. Each opens its own page. */
+const ADVANCED: Array<[SectionId, string, string]> = [
+  ["key", "Your own service key", "Use your own key instead of the built-in one"],
+  ["engine", "Speech quality and offline mode", "Faster or more accurate, and what happens without internet"],
+  ["cleanup", "Text clean-up style", "How much Bolo tidies your words"],
+  ["dictionary", "My words list", "Names and words Bolo should spell right"],
+  ["privacy", "Privacy", "What stays on this PC"],
+  ["paste", "How text is pasted", "Paste the last take again"],
+  ["diagnostics", "Help and diagnostics", "Version, status, and a report you can copy"],
+];
+
+const FEATURED = ["classic", "c02", "c04", "c07", "c06"];
 
 function normalizeSettings(settings: Settings): Settings {
   return {
@@ -75,6 +101,15 @@ function normalizeSettings(settings: Settings): Settings {
     output: settings.output === "same" ? "same" : "english",
     verbatim: settings.verbatim === true,
     cleanupModel: settings.cleanupModel?.trim() || "openai/gpt-oss-20b",
+    character: findCharacter(settings.character).id,
+    soundPack: SOUND_PACKS.some(([id]) => id === settings.soundPack) ? settings.soundPack : "match",
+    soundVolume:
+      typeof settings.soundVolume === "number" && Number.isFinite(settings.soundVolume)
+        ? Math.max(0, Math.min(1, settings.soundVolume))
+        : 0.6,
+    smartMood: settings.smartMood === true,
+    smartTimeOfDay: settings.smartTimeOfDay === true,
+    smartHoliday: settings.smartHoliday === true,
   };
 }
 
@@ -100,16 +135,23 @@ export type SettingsLoad =
   | { ok: false; error: string };
 
 export async function mountSettings(root: HTMLElement): Promise<SettingsLoad> {
-  root.replaceChildren(loadingShell());
+  const splash = loadingShell();
+  const splashAt = performance.now();
+  root.replaceChildren(splash);
+  // Microphone enumeration can take a second on Windows; don't hold the
+  // whole window on it. The list fills in once it arrives.
+  const micsPromise = api.listMicrophones().catch(() => [] as MicInfo[]);
   try {
-    const [settings, keyStatus, mics, history, info] = await Promise.all([
+    const [settings, keyStatus, history, info] = await Promise.all([
       api.getSettings(),
       api.apiKeyStatus(),
-      api.listMicrophones().catch(() => [] as MicInfo[]),
       api.getHistory(),
       api.getAppInfo(),
     ]);
-    render(root, {
+    const quick = await Promise.race([micsPromise, new Promise<null>((r) => setTimeout(() => r(null), 120))]);
+    const mics = quick ?? [];
+    await leaveSplash(splash, splashAt);
+    render(root, (currentDraft = {
       settings: normalizeSettings(settings),
       keyStatus,
       mics,
@@ -127,8 +169,15 @@ export async function mountSettings(root: HTMLElement): Promise<SettingsLoad> {
       live: null,
       lastEngine: "Groq",
       lastError: info.lastError,
-      section: "general",
-    });
+      section: "home",
+    }));
+    root.firstElementChild?.classList.add("app-enter");
+    if (quick === null) {
+      const draft = currentDraft;
+      void micsPromise.then((devices) => {
+        if (draft && currentDraft === draft) applyDevices(draft, devices);
+      });
+    }
     return { ok: true, detail: JSON.stringify(settings) };
   } catch (error) {
     const message = messageOf(error);
@@ -139,33 +188,37 @@ export async function mountSettings(root: HTMLElement): Promise<SettingsLoad> {
 
 function render(root: HTMLElement, draft: Draft): void {
   root.replaceChildren();
-  const shell = el("div", "shell");
+  const shell = el("div", "shell v2");
   const nav = buildNav(draft);
   const main = el("main", "stage");
   const form = document.createElement("form");
   form.className = "sheet";
-  form.addEventListener("submit", (event) => {
-    event.preventDefault();
-    void save(draft, form);
-  });
+  form.addEventListener("submit", (event) => event.preventDefault());
 
+  const status = el("p", "save-status", "");
+  status.dataset.saveStatus = "true";
+  status.setAttribute("aria-live", "polite");
   const alert = alertBanner(draft);
   form.append(
     ...(alert ? [alert] : []),
     liveBanner(draft),
     listenerBanner(draft),
-    generalPanel(draft),
+    homePanel(draft),
     hotkeyPanel(draft),
     micPanel(draft),
+    characterPanel(draft),
     languagePanel(draft),
+    historyPanel(draft),
+    advancedPanel(draft),
+    keyPanel(draft),
+    enginePanel(draft),
     cleanupPanel(draft),
     dictionaryPanel(draft),
-    historyPanel(draft),
     privacyPanel(draft),
-    aboutPanel(draft),
-    saveBar(draft),
+    pastePanel(draft),
+    diagnosticsPanel(draft),
   );
-  main.append(form);
+  main.append(status, form);
   shell.append(nav, main);
   root.append(shell);
   showSection(form, draft.section);
@@ -181,9 +234,8 @@ function render(root: HTMLElement, draft: Draft): void {
     const banner = form.querySelector<HTMLElement>("[data-live]");
     if (banner) banner.replaceWith(liveBanner(draft));
     placeAlert(form, draft);
-    const test = document.getElementById("test-record") as HTMLButtonElement | null;
-    if (test) {
-      test.textContent = event.phase === "recording" ? "Stop test" : "Record a test";
+    for (const test of document.querySelectorAll<HTMLButtonElement>("[data-try]")) {
+      test.textContent = event.phase === "recording" ? "Stop" : test.dataset.try ?? "Try it";
       test.disabled = event.phase === "transcribing" || event.phase === "inserting";
     }
     if (event.phase === "done" || event.phase === "idle") void refreshHistory(draft);
@@ -199,66 +251,54 @@ function showSection(form: HTMLElement, id: SectionId): void {
   for (const panel of form.querySelectorAll<HTMLElement>("[data-panel]")) {
     panel.hidden = panel.dataset.panel !== id;
   }
+  const navId = ADVANCED.some(([sub]) => sub === id) ? "advanced" : id;
   for (const button of document.querySelectorAll<HTMLButtonElement>("[data-nav]")) {
-    const on = button.dataset.nav === id;
+    const on = button.dataset.nav === navId;
     button.classList.toggle("is-on", on);
     if (on) button.setAttribute("aria-current", "page");
     else button.removeAttribute("aria-current");
   }
+  // Only the visible character clips play.
+  for (const video of form.querySelectorAll<HTMLVideoElement>("video")) {
+    const visible = !video.closest<HTMLElement>("[data-panel]")?.hidden;
+    if (visible) void video.play().catch(() => {});
+    else video.pause();
+  }
+  document.querySelector(".stage")?.scrollTo({ top: 0 });
+}
+
+function go(draft: Draft, id: SectionId): void {
+  draft.section = id;
+  const form = document.querySelector<HTMLElement>(".sheet");
+  if (form) showSection(form, id);
 }
 
 function buildNav(draft: Draft): HTMLElement {
   const rail = el("aside", "rail");
   const brand = el("div", "brand");
-  brand.append(
-    el("p", "eyebrow", "Dictation"),
-    logoHeading(),
-    el("p", "lede", "Hold a key anywhere in Windows. Speak. Let go. The words land at the cursor."),
-  );
+  brand.append(logoHeading());
   const menu = el("nav", "sidenav");
   menu.setAttribute("aria-label", "Settings");
-  for (const [id, title, hint] of NAV) {
+  const item = (id: SectionId, icon: string, title: string) => {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "nav-item";
     button.dataset.nav = id;
-    button.append(el("span", "nav-title", title), el("span", "nav-hint", hint));
-    button.addEventListener("click", () => {
-      draft.section = id;
-      const form = document.querySelector<HTMLElement>(".sheet");
-      if (form) showSection(form, id);
-    });
-    menu.append(button);
-  }
-  const pills = el("div", "pills");
-  pills.append(
-    pill("key", "Key", keyPill(draft.keyStatus).value, keyPill(draft.keyStatus).tone),
-    pill("hotkey", "Hotkey", formatHotkey(draft.settings.hotkey), "neutral"),
-    pill("mic", "Mic", micSummary(draft).value, "neutral"),
-    pill("engine", "Engine", draft.lastEngine, "good"),
-  );
-  rail.append(brand, menu, pills);
-  if (draft.info.platform !== "windows") {
-    rail.append(
-      el(
-        "p",
-        "platform-note",
-        "This session is not Windows. The global hook, Credential Manager, and paste path run on Windows.",
-      ),
-    );
-  }
-  rail.append(el("p", "version", `Version ${draft.info.version}`));
+    const ic = el("span", "nav-icon", icon);
+    ic.setAttribute("aria-hidden", "true");
+    button.append(ic, el("span", "nav-title", title));
+    button.addEventListener("click", () => go(draft, id));
+    return button;
+  };
+  for (const [id, icon, title] of NAV) menu.append(item(id, icon, title));
+  const advanced = item("advanced", "⚙", "Advanced");
+  advanced.classList.add("nav-advanced");
+  rail.append(brand, menu, el("div", "rail-spacer"), advanced);
   return rail;
 }
 
-function pill(name: string, label: string, value: string, tone: string): HTMLElement {
-  const node = el("div", `status-pill tone-${tone}`);
-  node.dataset.pill = name;
-  node.append(el("span", "pill-k", label), el("span", "pill-v", value));
-  return node;
-}
-
 function refreshPills(draft: Draft): void {
+  refreshHome(draft);
   const key = document.querySelector<HTMLElement>('[data-pill="key"]');
   const hotkey = document.querySelector<HTMLElement>('[data-pill="hotkey"]');
   const mic = document.querySelector<HTMLElement>('[data-pill="mic"]');
@@ -290,6 +330,7 @@ async function watchListener(draft: Draft, form: HTMLElement): Promise<void> {
   const apply = (running: boolean, error: string | null) => {
     draft.info.listenerRunning = running;
     draft.info.listenerError = visibleMessage(error);
+    refreshHome(draft);
     const current = form.querySelector<HTMLElement>("[data-listener]");
     const next = listenerBanner(draft);
     if (current) current.replaceWith(next);
@@ -368,11 +409,11 @@ function listenerBanner(draft: Draft): HTMLElement {
   return banner;
 }
 
-function generalPanel(draft: Draft): HTMLElement {
+function keyPanel(draft: Draft): HTMLElement {
   const panel = panelEl(
-    "general",
-    "Account",
-    "Your own Groq key stays in Windows Credential Manager. It is never written into the settings file.",
+    "key",
+    "Your own service key",
+    "Bolo works without this. If you have your own Groq key, paste it here. It stays in Windows Credential Manager and is never written into the settings file.",
   );
   const ownLabel = el("p", "own-key-label", "Use my own Groq API key");
   ownLabel.dataset.ownKeyLabel = "true";
@@ -437,30 +478,22 @@ function generalPanel(draft: Draft): HTMLElement {
     ownLabel,
     row,
     link,
-    toggle(
-      "Launch at startup",
-      "Bolo starts in the tray for this Windows user. The settings window stays closed until you open it.",
-      draft.settings.launchAtStartup,
-      (checked) => {
-        draft.settings.launchAtStartup = checked;
-        markDirty(draft);
-      },
-    ),
   );
   return panel;
 }
 
 function hotkeyPanel(draft: Draft): HTMLElement {
   const panel = panelEl(
-    "hotkey",
-    "Push to talk",
-    "Hold the chord to record. Release it to transcribe and paste. Double-tap to leave the mic open, then tap once to stop. The default is Ctrl + Win.",
+    "shortcut",
+    "Your shortcut",
+    "Hold these keys and talk. Let go, and your words appear. Tap twice quickly to keep listening without holding, then tap once to stop.",
   );
   const display = el("div", "hotkey-display");
   const kbd = el("kbd", "hotkey-kbd", formatHotkey(draft.settings.hotkey));
-  const change = button("Change", "ghost");
+  const change = button("Change shortcut", "ghost");
   const reset = button("Reset", "text");
   display.append(kbd, change, reset);
+  panel.classList.add("shortcut-card");
   const presets = el("div", "presets");
   const presetHotkeys: Array<[string, Hotkey]> = [
     ["Ctrl + Win", { ctrl: true, alt: false, shift: false, win: true, key: null }],
@@ -481,7 +514,7 @@ function hotkeyPanel(draft: Draft): HTMLElement {
   const hint = el(
     "p",
     "field-note",
-    "Pick a preset, or click Change and press a chord. Escape cancels. Win-key chords are presets because Windows may not deliver the Win key to this window.",
+    "Pick one of these, or click Change shortcut and press the keys you want. Press Esc to cancel.",
   );
   change.addEventListener("click", () => startCapture(draft, kbd, hint, change));
   reset.addEventListener("click", () => {
@@ -490,12 +523,23 @@ function hotkeyPanel(draft: Draft): HTMLElement {
     markDirty(draft);
     refreshPills(draft);
   });
-  const test = button(draft.live?.phase === "recording" ? "Stop test" : "Record a test", "ghost");
-  test.id = "test-record";
-  test.addEventListener("click", () => {
-    (document.activeElement as HTMLElement | null)?.blur();
-    void api.toggleTestRecording();
-  });
+  const test = tryButton(draft, "Try it", "ghost");
+  panel.append(
+    display,
+    presets,
+    hint,
+    test,
+    el("p", "field-note", "Try it starts listening. Press it again to stop, and the words go into whatever app is in front."),
+  );
+  return panel;
+}
+
+function pastePanel(draft: Draft): HTMLElement {
+  const panel = panelEl(
+    "paste",
+    "How text is pasted",
+    "Bolo pastes your words at the cursor. If a paste didn't land, or after Bolo restarts, this shortcut pastes the last take again.",
+  );
   const pasteLabel = el("label", "stack");
   pasteLabel.append(el("span", "label", "Paste the last take again"));
   const pasteRow = el("div", "hotkey-display");
@@ -525,19 +569,18 @@ function hotkeyPanel(draft: Draft): HTMLElement {
       "Press this when a take didn't land, or after Bolo starts again. The audio stays on this PC until a paste is confirmed.",
     ),
   );
-  panel.append(
-    display,
-    presets,
-    hint,
-    test,
-    el(
-      "p",
-      "field-note",
-      "Record a test uses the selected microphone and pastes into whichever app is focused when you stop. The first press starts listening.",
-    ),
-    pasteLabel,
-  );
+  panel.append(pasteLabel);
   return panel;
+}
+
+function tryButton(draft: Draft, label: string, kind: "primary" | "ghost"): HTMLButtonElement {
+  const test = button(draft.live?.phase === "recording" ? "Stop" : label, kind);
+  test.dataset.try = label;
+  test.addEventListener("click", () => {
+    (document.activeElement as HTMLElement | null)?.blur();
+    void api.toggleTestRecording();
+  });
+  return test;
 }
 
 function startCapture(
@@ -563,7 +606,7 @@ function startCapture(
       draft.settings.hotkey = hotkey;
       markDirty(draft);
       refreshPills(draft);
-      hint.textContent = "Saved locally. Click Save settings to keep it.";
+      hint.textContent = "Done. Your new shortcut is saved.";
       hint.className = "field-note";
     } else if (error) {
       hint.textContent = error;
@@ -622,10 +665,11 @@ function startCapture(
 
 function micPanel(draft: Draft): HTMLElement {
   const panel = panelEl(
-    "microphone",
+    "shortcut",
     "Microphone",
-    "System default follows whichever microphone Windows is using. Pick one to prefer it. If you unplug it, Bolo uses the default and switches back when it returns.",
+    "The mic Bolo listens to. Leave it on Automatic to follow Windows.",
   );
+  panel.dataset.micPanel = "true";
   const meter = el("div", "meter");
   meter.setAttribute("role", "meter");
   meter.setAttribute("aria-label", "Microphone level");
@@ -659,12 +703,48 @@ function micPanel(draft: Draft): HTMLElement {
       }
     })();
   });
-  panel.append(meter, el("p", "field-note", "Live level from the microphone that is open now."), select, refresh, note);
+  const health = el("div", "audio-fix");
+  health.hidden = true;
+  panel.append(meter, el("p", "field-note", "Talk and watch the bar move. If it stays still, pick another mic."), health, select, refresh, note);
+  void paintMicFix(health);
   return panel;
 }
 
+function showFix(slot: HTMLElement, message: string, label: string, fix: () => Promise<string>): void {
+  const text = el("p", "audio-fix-text", message);
+  const action = button(label, "primary");
+  action.addEventListener("click", () => {
+    action.disabled = true;
+    void (async () => {
+      try {
+        const done = await fix();
+        slot.replaceChildren(el("p", "audio-fix-text ok", done));
+        window.setTimeout(() => (slot.hidden = true), 2600);
+      } catch (error) {
+        action.disabled = false;
+        text.textContent = messageOf(error);
+      }
+    })();
+  });
+  slot.replaceChildren(text, action);
+  slot.hidden = false;
+}
+
+async function paintMicFix(slot: HTMLElement): Promise<void> {
+  try {
+    const health = await api.audioHealth();
+    if (!health.micQuiet) return;
+    showFix(slot, "Your microphone is turned down too low, so Bolo can't hear you.", "Fix it", async () => {
+      await api.fixMicLevel();
+      return "Fixed. Your microphone is ready.";
+    });
+  } catch {
+    /* best effort */
+  }
+}
+
 async function paintMeter(): Promise<void> {
-  const panel = document.querySelector<HTMLElement>('[data-panel="microphone"]');
+  const panel = document.querySelector<HTMLElement>("[data-mic-panel]");
   const fill = document.querySelector<HTMLElement>("[data-meter-fill]");
   if (!panel || panel.hidden || !fill) return;
   try {
@@ -682,7 +762,7 @@ function fillMicOptions(select: HTMLSelectElement, draft: Draft): void {
   select.replaceChildren();
   const auto = document.createElement("option");
   auto.value = "";
-  auto.textContent = "System default (auto)";
+  auto.textContent = "Automatic (same as Windows)";
   select.append(auto);
   for (const mic of draft.mics) {
     const option = document.createElement("option");
@@ -752,8 +832,67 @@ function micSummary(draft: Draft): { value: string; note: string } {
 
 function languagePanel(draft: Draft): HTMLElement {
   const panel = panelEl(
-    "language",
-    "Language and accuracy",
+    "languages",
+    "Languages",
+    "Tell Bolo what you speak and how you want your words written.",
+  );
+  const langLabel = el("label", "stack");
+  langLabel.append(el("span", "label", "I speak"));
+  const lang = document.createElement("select");
+  lang.setAttribute("aria-label", "Language");
+  for (const [code, name] of LANGUAGES) {
+    const option = document.createElement("option");
+    option.value = code;
+    option.textContent = name;
+    lang.append(option);
+  }
+  if (![...lang.options].some((option) => option.value === draft.settings.language)) {
+    const extra = document.createElement("option");
+    extra.value = draft.settings.language;
+    extra.textContent = draft.settings.language;
+    lang.append(extra);
+  }
+  lang.value = draft.settings.language;
+  lang.addEventListener("change", () => {
+    draft.settings.language = lang.value;
+    markDirty(draft);
+  });
+  langLabel.append(lang);
+  const outputLabel = el("label", "stack");
+  outputLabel.append(el("span", "label", "Write my words in"));
+  const output = document.createElement("select");
+  output.setAttribute("aria-label", "Output");
+  const outputChoices: Array<["english" | "same", string]> = [
+    ["english", "English"],
+    ["same", "The language I spoke"],
+  ];
+  for (const [value, name] of outputChoices) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = name;
+    output.append(option);
+  }
+  output.value = draft.settings.output === "same" ? "same" : "english";
+  output.addEventListener("change", () => {
+    draft.settings.output = output.value === "same" ? "same" : "english";
+    markDirty(draft);
+  });
+  outputLabel.append(
+    output,
+    el(
+      "p",
+      "field-note",
+      "English is the default. If you speak Urdu or Roman Urdu, Bolo writes it in English. Pick the other option to keep your own language.",
+    ),
+  );
+  panel.append(langLabel, outputLabel);
+  return panel;
+}
+
+function enginePanel(draft: Draft): HTMLElement {
+  const panel = panelEl(
+    "engine",
+    "Speech quality and offline mode",
     "Whisper runs on Groq at temperature 0. A low-confidence or empty result is tried once more without the prompt. The dictionary and your two most recent transcripts seed that prompt.",
   );
   const models: Array<{ id: WhisperModel; title: string; body: string }> = [
@@ -786,55 +925,6 @@ function languagePanel(draft: Draft): HTMLElement {
     label.append(input, text);
     grid.append(label);
   }
-  const langLabel = el("label", "stack");
-  langLabel.append(el("span", "label", "Language"));
-  const lang = document.createElement("select");
-  lang.setAttribute("aria-label", "Language");
-  for (const [code, name] of LANGUAGES) {
-    const option = document.createElement("option");
-    option.value = code;
-    option.textContent = name;
-    lang.append(option);
-  }
-  if (![...lang.options].some((option) => option.value === draft.settings.language)) {
-    const extra = document.createElement("option");
-    extra.value = draft.settings.language;
-    extra.textContent = draft.settings.language;
-    lang.append(extra);
-  }
-  lang.value = draft.settings.language;
-  lang.addEventListener("change", () => {
-    draft.settings.language = lang.value;
-    markDirty(draft);
-  });
-  langLabel.append(lang);
-  const outputLabel = el("label", "stack");
-  outputLabel.append(el("span", "label", "Output"));
-  const output = document.createElement("select");
-  output.setAttribute("aria-label", "Output");
-  const outputChoices: Array<["english" | "same", string]> = [
-    ["english", "English (translate)"],
-    ["same", "Same as spoken"],
-  ];
-  for (const [value, name] of outputChoices) {
-    const option = document.createElement("option");
-    option.value = value;
-    option.textContent = name;
-    output.append(option);
-  }
-  output.value = draft.settings.output === "same" ? "same" : "english";
-  output.addEventListener("change", () => {
-    draft.settings.output = output.value === "same" ? "same" : "english";
-    markDirty(draft);
-  });
-  outputLabel.append(
-    output,
-    el(
-      "p",
-      "field-note",
-      "English (translate) is the default. Urdu, Roman Urdu, and any other language come back in English. Same as spoken leaves the transcript in the language you used.",
-    ),
-  );
   const offlineLabel = el("label", "stack");
   offlineLabel.append(el("span", "label", "On-device model"));
   const offline = document.createElement("select");
@@ -867,7 +957,7 @@ function languagePanel(draft: Draft): HTMLElement {
       "If Groq is rate limiting, down, or unreachable, Bolo transcribes this take on the PC with whisper.cpp and tries Groq again on the next one. The model downloads the first time it's needed.",
     ),
   );
-  panel.append(grid, langLabel, outputLabel, offlineLabel);
+  panel.append(grid, offlineLabel);
   return panel;
 }
 
@@ -878,7 +968,7 @@ function cleanupPanel(draft: Draft): HTMLElement {
     "Groq punctuates and applies spoken corrections such as “scratch that”, “new line”, and “period”. It does not add or drop what you said. Chat stays casual. Mail and documents stay formal. Code editors skip the rewrite. Verbatim pastes the transcript unchanged. If the selected model is gone, the next one in the list is tried.",
   );
   panel.append(
-    toggle(
+    switchRow(
       "Verbatim",
       "Paste exactly what was said. Cleanup will not add, drop, or rephrase a word, including um and uh.",
       draft.settings.verbatim,
@@ -887,7 +977,7 @@ function cleanupPanel(draft: Draft): HTMLElement {
         markDirty(draft);
       },
     ),
-    toggle(
+    switchRow(
       "Clean up with Groq",
       "On for a new install. A settings file that already saved this off stays off until you turn it on.",
       draft.settings.cleanupEnabled,
@@ -954,11 +1044,298 @@ function dictionaryPanel(draft: Draft): HTMLElement {
   return panel;
 }
 
+function characterPanel(draft: Draft): HTMLElement {
+  const panel = panelEl(
+    "character",
+    "Character & sounds",
+    "Pick who listens while you talk.",
+  );
+  panel.classList.add("character-panel");
+  const s = draft.settings;
+
+  // Live preview of the selected character.
+  const preview = el("div", "char-preview");
+  const video = document.createElement("video");
+  video.className = "char-preview-clip";
+  video.muted = true;
+  video.loop = true;
+  video.autoplay = true;
+  video.playsInline = true;
+  video.setAttribute("aria-hidden", "true");
+  const previewName = el("strong", "char-preview-name");
+  const poseRow = el("div", "char-pose-row");
+  let previewPose: "listen" | "write" = "listen";
+  const paintPreview = () => {
+    const urls = clipUrls(s.character);
+    const src = previewPose === "listen" ? urls.listen : urls.write;
+    if (!sameSrc(video, src)) video.src = src;
+    video.playbackRate = 1;
+    void video.play().catch(() => {});
+    previewName.textContent = findCharacter(s.character).name;
+    for (const b of poseRow.querySelectorAll<HTMLButtonElement>("button")) {
+      b.classList.toggle("is-on", b.dataset.pose === previewPose);
+    }
+  };
+  for (const [pose, label] of [["listen", "While you talk"], ["write", "While it types"]] as const) {
+    const b = button(label, "ghost");
+    b.dataset.pose = pose;
+    b.addEventListener("click", () => {
+      previewPose = pose;
+      paintPreview();
+    });
+    poseRow.append(b);
+  }
+  const previewCopy = el("div", "char-preview-copy");
+  previewCopy.append(el("span", "eyebrow", "Preview"), previewName, poseRow);
+  preview.append(video, previewCopy);
+
+  // Featured row.
+  const featured = el("div", "char-featured");
+  const paintFeatured = () => {
+    featured.replaceChildren();
+    const ids = FEATURED.includes(s.character) ? FEATURED : [...FEATURED.slice(0, 4), s.character];
+    for (const id of ids) {
+      const c = findCharacter(id);
+      const card = document.createElement("button");
+      card.type = "button";
+      card.className = "char-feature";
+      card.dataset.character = c.id;
+      card.classList.toggle("is-on", c.id === s.character);
+      card.setAttribute("aria-pressed", String(c.id === s.character));
+      card.append(loopVideo(clipUrls(c.id).listen, "char-feature-clip"), el("span", "char-card-name", c.name));
+      card.addEventListener("click", () => pickCharacter(c.id));
+      featured.append(card);
+    }
+    if (!(panel.hidden ?? true)) {
+      for (const v of featured.querySelectorAll("video")) void v.play().catch(() => {});
+    }
+  };
+  const seeAll = button(`See all ${CHARACTERS.length} characters →`, "text");
+  seeAll.classList.add("see-all");
+  const all = el("div", "char-all");
+  all.hidden = true;
+  seeAll.addEventListener("click", () => {
+    all.hidden = !all.hidden;
+    seeAll.textContent = all.hidden ? `See all ${CHARACTERS.length} characters →` : "Show fewer";
+  });
+  const pickCharacter = (id: string) => {
+    s.character = id;
+    markDirty(draft);
+    paintFeatured();
+    paintGrid();
+    paintPreview();
+    paintPackHint();
+    refreshHome(draft);
+  };
+
+  // Tabs and cards.
+  const tabs = el("div", "char-tabs");
+  tabs.setAttribute("role", "tablist");
+  const grid = el("div", "char-grid");
+  let group: CharacterGroup = findCharacter(s.character).group;
+  const paintGrid = () => {
+    grid.replaceChildren();
+    for (const b of tabs.querySelectorAll<HTMLButtonElement>("button")) {
+      const on = b.dataset.group === group;
+      b.classList.toggle("is-on", on);
+      b.setAttribute("aria-selected", String(on));
+    }
+    for (const c of CHARACTERS.filter((item) => item.group === group)) {
+      const card = document.createElement("button");
+      card.type = "button";
+      card.className = "char-card";
+      card.dataset.character = c.id;
+      card.classList.toggle("is-on", c.id === s.character);
+      card.setAttribute("aria-pressed", String(c.id === s.character));
+      const img = document.createElement("img");
+      img.src = clipUrls(c.id).thumb;
+      img.alt = "";
+      img.loading = "lazy";
+      card.append(img, el("span", "char-card-name", c.name));
+      if (c.id === DEFAULT_CHARACTER) card.append(el("span", "char-badge", "Default"));
+      card.addEventListener("click", () => pickCharacter(c.id));
+      grid.append(card);
+    }
+  };
+  for (const [id, label] of GROUPS) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "char-tab";
+    b.dataset.group = id;
+    b.setAttribute("role", "tab");
+    b.textContent = label;
+    b.addEventListener("click", () => {
+      group = id;
+      paintGrid();
+    });
+    tabs.append(b);
+  }
+
+  // Smart toggles.
+  const smart = el("div", "char-smart");
+  smart.append(el("h3", "char-sub", "Smart switching"));
+  smart.append(
+    switchRow(
+      "Time of day",
+      "From 9 pm to 6 am, Night Owl Mode listens instead.",
+      s.smartTimeOfDay,
+      (on) => {
+        s.smartTimeOfDay = on;
+        markDirty(draft);
+      },
+    ),
+    switchRow(
+      "Holiday",
+      "On Eid, the Eid skin takes over for three days.",
+      s.smartHoliday,
+      (on) => {
+        s.smartHoliday = on;
+        markDirty(draft);
+      },
+    ),
+  );
+  const mood = switchRow("Mood mirror · coming soon", "The character will react to your tone of voice.", false, () => {});
+  mood.classList.add("is-soon");
+  const moodInput = mood.querySelector("input");
+  if (moodInput) moodInput.disabled = true;
+  smart.append(mood);
+
+  // Sounds.
+  const sounds = el("div", "card rows sounds-card");
+  const soundHead = el("div", "row-head");
+  const headCopy = el("span", "switch-copy");
+  headCopy.append(el("strong", "", "Sounds"), el("span", "", "A soft sound when Bolo starts and finishes"));
+  const select = document.createElement("select");
+  select.setAttribute("aria-label", "Sound pack");
+  for (const [id, name] of SOUND_PACKS) {
+    if (id === "off") continue;
+    const option = document.createElement("option");
+    option.value = id;
+    option.textContent = id === "match" ? "Match my character" : name;
+    select.append(option);
+  }
+  const lastPack = () => window.localStorage.getItem("bolo.lastPack") || "match";
+  select.value = s.soundPack === "off" ? lastPack() : s.soundPack;
+  let previewAudio: HTMLAudioElement | null = null;
+  const playCue = (cue: "start" | "done" | "dismiss") => {
+    const pack = resolvePack(select.value, s.character);
+    const url = soundUrl(pack, cue);
+    if (!url) return;
+    previewAudio?.pause();
+    previewAudio = new Audio(url);
+    previewAudio.volume = s.soundVolume;
+    void previewAudio.play().catch(() => {});
+  };
+  const play = button("▶ Play", "ghost");
+  play.setAttribute("aria-label", "Play the start and finish sounds");
+  const speakerFix = el("div", "audio-fix");
+  speakerFix.hidden = true;
+  const playBoth = () => {
+    playCue("start");
+    window.setTimeout(() => playCue("done"), 900);
+  };
+  play.addEventListener("click", () => {
+    playBoth();
+    void (async () => {
+      try {
+        const health = await api.audioHealth();
+        if (!health.outputQuiet) {
+          speakerFix.hidden = true;
+          return;
+        }
+        showFix(speakerFix, "Your speakers are muted or turned all the way down, so you can't hear Bolo.", "Turn sound up", async () => {
+          await api.fixOutputVolume();
+          playBoth();
+          return "Sound is on.";
+        });
+      } catch {
+        /* volume check is best effort */
+      }
+    })();
+  });
+  const pickRow = el("div", "row-controls");
+  pickRow.append(select, play);
+  queueMicrotask(() => pickRow.after(speakerFix));
+  soundHead.append(headCopy, pickRow);
+  const packHint = el("p", "field-note");
+  const paintPackHint = () => {
+    const resolved = resolvePack(select.value, s.character);
+    const name = SOUND_PACKS.find(([id]) => id === resolved)?.[1] ?? "";
+    packHint.textContent = select.value === "match" ? `Now: ${name}.` : SOUND_PACKS.find(([id]) => id === select.value)?.[2] ?? "";
+  };
+  select.addEventListener("change", () => {
+    window.localStorage.setItem("bolo.lastPack", select.value);
+    if (s.soundPack !== "off") {
+      s.soundPack = select.value;
+      markDirty(draft);
+    }
+    paintPackHint();
+  });
+
+  const cueList = el("div", "cue-list");
+  for (const [cue, title] of [
+    ["start", "Start"],
+    ["done", "Finish"],
+    ["dismiss", "Cancel"],
+  ] as const) {
+    const b = button(`▶ ${title}`, "text");
+    b.classList.add("cue-play");
+    b.setAttribute("aria-label", `Play the ${title.toLowerCase()} sound`);
+    b.addEventListener("click", () => playCue(cue));
+    cueList.append(b);
+  }
+
+  const volume = document.createElement("label");
+  volume.className = "volume-field";
+  const volumeValue = el("span", "volume-value", `${Math.round(s.soundVolume * 100)}%`);
+  const range = document.createElement("input");
+  range.type = "range";
+  range.min = "0";
+  range.max = "100";
+  range.step = "5";
+  range.value = String(Math.round(s.soundVolume * 100));
+  range.setAttribute("aria-label", "Sound volume");
+  range.addEventListener("input", () => {
+    s.soundVolume = Number(range.value) / 100;
+    volumeValue.textContent = `${range.value}%`;
+    markDirty(draft);
+  });
+  volume.append(el("span", "volume-label", "Volume"), range, volumeValue);
+  const detail = el("div", "sound-detail");
+  detail.append(packHint, cueList, volume);
+  const paintSoundsOn = () => {
+    const on = s.soundPack !== "off";
+    select.disabled = !on;
+    play.disabled = !on;
+    detail.hidden = !on;
+  };
+  const onSwitch = switchRow("Play sounds", "", s.soundPack !== "off", (on) => {
+    if (on) s.soundPack = select.value || lastPack();
+    else {
+      window.localStorage.setItem("bolo.lastPack", select.value);
+      s.soundPack = "off";
+    }
+    markDirty(draft);
+    paintSoundsOn();
+  });
+  sounds.append(soundHead, onSwitch, detail);
+  paintSoundsOn();
+
+  smart.classList.add("card", "rows");
+  all.append(tabs, grid);
+  panel.append(preview, featured, seeAll, all, sounds, smart);
+  paintFeatured();
+  paintGrid();
+  paintPreview();
+  paintPackHint();
+  return panel;
+}
+
 function historyPanel(draft: Draft): HTMLElement {
   const panel = panelEl(
     "history",
     "History",
-    "The last 50 transcripts, newest first, stored only on this PC. History keeps the words. A take's audio stays only until the paste is confirmed.",
+    "The last 50 things you said, newest first. They stay on this PC only.",
   );
   const list = el("div", "history-list");
   list.dataset.history = "true";
@@ -978,7 +1355,7 @@ function privacyPanel(draft: Draft): HTMLElement {
   const list = el("div", "history-list");
   list.dataset.historyPrivacy = "true";
   panel.append(
-    toggle(
+    switchRow(
       "Keep history on this PC",
       "On by default. Turn this off to stop saving new transcripts. Transcripts already saved stay until you clear them.",
       draft.settings.historyEnabled,
@@ -1012,10 +1389,10 @@ async function clearHistory(draft: Draft, list: HTMLElement, host: HTMLElement):
   }
 }
 
-function aboutPanel(draft: Draft): HTMLElement {
+function diagnosticsPanel(draft: Draft): HTMLElement {
   const panel = panelEl(
-    "about",
-    "About Bolo",
+    "diagnostics",
+    "Help and diagnostics",
     "Push-to-talk dictation for Windows. Hold the hotkey, speak, and the transcript is pasted at the cursor.",
   );
   const facts = el("dl", "facts");
@@ -1024,9 +1401,33 @@ function aboutPanel(draft: Draft): HTMLElement {
     fact("Transcription", "Groq Whisper, temperature 0"),
     fact("Cleanup", "Groq openai/gpt-oss-20b"),
     fact("Audio", "16 kHz mono FLAC, WAV if encoding fails"),
-    fact("Carryover", "Settings and the Groq key from Cadence (com.cadence.dictation) are copied forward."),
+    fact("Shortcut listener", draft.info.listenerRunning ? "Running" : "Not running"),
+    fact("Last problem", visibleMessage(draft.lastError) ?? "None"),
+    fact("Log file", "%APPDATA%\\com.bolo.dictation\\bolo.log"),
   );
-  panel.append(facts);
+  const copy = button("Copy a report", "ghost");
+  const note = el("p", "field-note", "Copies version, status, and settings (never your key) so you can paste them into a message.");
+  copy.addEventListener("click", () => {
+    const report = [
+      `Bolo ${draft.info.version} on ${draft.info.platform}`,
+      `Listener: ${draft.info.listenerRunning ? "running" : "not running"} ${draft.info.listenerError ?? ""}`.trim(),
+      `Last error: ${draft.lastError ?? "none"}`,
+      `Key: ${keyPill(draft.keyStatus).value}`,
+      `Mic: ${micSummary(draft).value}`,
+      `Settings: ${JSON.stringify({ ...draft.settings, dictionary: draft.settings.dictionary.length })}`,
+    ].join("\n");
+    void api
+      .copyText(report)
+      .then(() => {
+        note.textContent = "Report copied.";
+        note.className = "field-note good";
+      })
+      .catch((error) => {
+        note.textContent = messageOf(error);
+        note.className = "field-note bad";
+      });
+  });
+  panel.append(facts, tryButton(draft, "Record a test", "ghost"), copy, note);
   return panel;
 }
 
@@ -1103,60 +1504,55 @@ async function refreshHistory(draft: Draft): Promise<void> {
   }
 }
 
-async function save(draft: Draft, form: HTMLFormElement): Promise<void> {
-  const status = form.querySelector<HTMLElement>("[data-save-status]");
-  const buttonEl = form.querySelector<HTMLButtonElement>("button[type=submit]");
-  if (buttonEl) {
-    buttonEl.disabled = true;
-    buttonEl.textContent = "Saving…";
-  }
+let saveTimer = 0;
+let saveChain: Promise<void> = Promise.resolve();
+
+async function save(draft: Draft): Promise<void> {
+  const status = document.querySelector<HTMLElement>("[data-save-status]");
   try {
-    const keyInput = form.querySelector<HTMLInputElement>("[data-api-key]");
-    if (keyInput && keyInput.value.trim()) {
-      draft.keyStatus = await api.setApiKey(keyInput.value);
-      keyInput.value = "";
-      syncKeyControls(draft);
-    }
     await api.saveSettings(draft.settings);
     draft.dirty = false;
-    const saved = await api.getSettings();
-    draft.settings = normalizeSettings(saved);
+    const saved = normalizeSettings(await api.getSettings());
+    // Keep edits made while this save was in flight.
+    // Update in place: panels keep a reference to this object.
+    if (!draft.dirty) Object.assign(draft.settings, saved);
+    void announceSettings();
     if (status) {
-      status.textContent = "Settings saved.";
-      status.className = "save-status good";
+      status.textContent = "Saved";
+      status.className = "save-status good is-shown";
+      window.setTimeout(() => status.classList.remove("is-shown"), 1600);
     }
     refreshPills(draft);
   } catch (error) {
     if (status) {
       status.textContent = messageOf(error);
-      status.className = "save-status bad";
-    }
-  } finally {
-    if (buttonEl) {
-      buttonEl.disabled = false;
-      buttonEl.textContent = "Save settings";
+      status.className = "save-status bad is-shown";
     }
   }
 }
 
-function saveBar(draft: Draft): HTMLElement {
-  const bar = el("div", "savebar");
-  const status = el("p", `save-status ${draft.statusTone}`, draft.status);
-  status.dataset.saveStatus = "true";
-  const save = button(draft.saving ? "Saving…" : "Save settings", "primary");
-  save.type = "submit";
-  save.disabled = draft.saving;
-  bar.append(status, save);
-  return bar;
+/** Compare against the attribute: `.src` is absolute, Vite URLs are not. */
+function sameSrc(video: HTMLVideoElement, src: string): boolean {
+  return video.getAttribute("src") === src;
+}
+
+/** Tell the overlay right away so the next take uses the new character and sounds. */
+async function announceSettings(): Promise<void> {
+  if (!("__TAURI_INTERNALS__" in window)) return;
+  try {
+    const { emit } = await import("@tauri-apps/api/event");
+    await emit("bolo-settings-changed");
+  } catch {
+    // The overlay also re-reads settings at the start of each take.
+  }
 }
 
 function markDirty(draft: Draft): void {
   draft.dirty = true;
-  const status = document.querySelector<HTMLElement>("[data-save-status]");
-  if (status && !status.classList.contains("bad")) {
-    status.textContent = "Unsaved changes";
-    status.className = "save-status";
-  }
+  window.clearTimeout(saveTimer);
+  saveTimer = window.setTimeout(() => {
+    saveChain = saveChain.then(() => save(draft));
+  }, 450);
 }
 
 function keyPill(status: ApiKeyStatus): { value: string; tone: string } {
@@ -1187,7 +1583,7 @@ function keyNote(status: ApiKeyStatus): string {
   if (status.configured) {
     const stored = `Key ${status.hint ?? ""} is in the OS credential store.`;
     if (status.builtin) return `${stored} Bolo is using it instead of the built-in key.`;
-    return `${stored} A key saved by Cadence is copied forward.`;
+    return stored;
   }
   if (status.builtin) return "Using Bolo built-in key";
   return "Paste a key from console.groq.com. Nothing is sent until you dictate.";
@@ -1197,23 +1593,21 @@ function panelEl(id: SectionId, title: string, body: string): HTMLElement {
   const section = el("section", "card");
   section.dataset.panel = id;
   const head = el("div", "card-head");
+  if (ADVANCED.some(([sub]) => sub === id)) {
+    const back = button("‹ Advanced", "text");
+    back.classList.add("back-link");
+    back.addEventListener("click", () => {
+      const draft = currentDraft;
+      if (draft) go(draft, "advanced");
+    });
+    section.append(back);
+  }
   head.append(el("h2", "", title));
   section.append(head, el("p", "card-body", body));
   return section;
 }
 
-function toggle(title: string, body: string, checked: boolean, onChange: (value: boolean) => void): HTMLElement {
-  const label = document.createElement("label");
-  label.className = "toggle";
-  const input = document.createElement("input");
-  input.type = "checkbox";
-  input.checked = checked;
-  input.addEventListener("change", () => onChange(input.checked));
-  const text = el("span", "toggle-copy");
-  text.append(el("strong", "", title), el("span", "", body));
-  label.append(input, text);
-  return label;
-}
+let currentDraft: Draft | null = null;
 
 function el(tag: string, className?: string, text?: string): HTMLElement {
   const node = document.createElement(tag);
@@ -1240,12 +1634,128 @@ function logoHeading(): HTMLElement {
   return heading;
 }
 
+function switchRow(title: string, body: string, checked: boolean, onChange: (value: boolean) => void): HTMLElement {
+  const label = document.createElement("label");
+  label.className = "switch-row";
+  const text = el("span", "switch-copy");
+  text.append(el("strong", "", title));
+  if (body) text.append(el("span", "", body));
+  const input = document.createElement("input");
+  input.type = "checkbox";
+  input.className = "switch";
+  input.setAttribute("role", "switch");
+  input.checked = checked;
+  input.addEventListener("change", () => onChange(input.checked));
+  label.append(text, input);
+  return label;
+}
+
+function loopVideo(src: string, className: string): HTMLVideoElement {
+  const video = document.createElement("video");
+  video.className = className;
+  video.src = src;
+  video.muted = true;
+  video.loop = true;
+  video.autoplay = true;
+  video.playsInline = true;
+  video.setAttribute("aria-hidden", "true");
+  return video;
+}
+
+function homePanel(draft: Draft): HTMLElement {
+  const panel = el("section", "home");
+  panel.dataset.panel = "home";
+  const head = el("div", "page-head");
+  head.append(el("h2", "", "Bolo is ready"), el("p", "card-body", "Talk anywhere on your PC. Bolo types it for you."));
+  const hero = el("div", "card hero");
+  const video = loopVideo(clipUrls(activeCharacter(draft.settings)).listen, "hero-clip");
+  video.dataset.homeClip = "true";
+  const copy = el("div", "hero-copy");
+  const ok = el("p", "ready-dot");
+  ok.dataset.homeStatus = "true";
+  ok.textContent = draft.info.listenerRunning ? "Listening for your shortcut" : "Starting up…";
+  const line = el("p", "hero-line");
+  const keys = el("span", "hero-keys", formatHotkey(draft.settings.hotkey));
+  keys.dataset.homeKeys = "true";
+  line.append("Hold ", keys, " and talk");
+  copy.append(ok, line, tryButton(draft, "Try it now", "primary"));
+  hero.append(video, copy);
+  const startup = el("div", "card rows");
+  startup.append(
+    switchRow("Start Bolo when my PC turns on", "", draft.settings.launchAtStartup, (on) => {
+      draft.settings.launchAtStartup = on;
+      markDirty(draft);
+    }),
+  );
+  panel.append(head, hero, startup);
+  return panel;
+}
+
+function refreshHome(draft: Draft): void {
+  const clip = document.querySelector<HTMLVideoElement>("[data-home-clip]");
+  const src = clipUrls(activeCharacter(draft.settings)).listen;
+  if (clip && !sameSrc(clip, src)) clip.src = src;
+  const keys = document.querySelector<HTMLElement>("[data-home-keys]");
+  if (keys) keys.textContent = formatHotkey(draft.settings.hotkey);
+  const status = document.querySelector<HTMLElement>("[data-home-status]");
+  if (status) {
+    status.textContent = draft.info.listenerRunning ? "Listening for your shortcut" : "The shortcut isn't working right now";
+    status.classList.toggle("is-off", !draft.info.listenerRunning);
+  }
+}
+
+function advancedPanel(draft: Draft): HTMLElement {
+  const panel = el("section", "advanced");
+  panel.dataset.panel = "advanced";
+  const head = el("div", "page-head");
+  head.append(el("h2", "", "Advanced"), el("p", "card-body", "You don't need to change anything here. Bolo works fine as it is."));
+  const rows = el("div", "card rows");
+  for (const [id, title, body] of ADVANCED) {
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "link-row";
+    const text = el("span", "switch-copy");
+    text.append(el("strong", "", title), el("span", "", body));
+    row.append(text, el("span", "chev", "›"));
+    row.addEventListener("click", () => go(draft, id));
+    rows.append(row);
+  }
+  panel.append(head, rows);
+  return panel;
+}
+
 function loadingShell(): HTMLElement {
-  const shell = el("div", "shell loading-shell");
-  shell.append(el("p", "eyebrow", "Dictation"), logoHeading());
-  shell.append(el("p", "lede", "Loading your settings…"));
+  const shell = el("div", "splash");
   shell.setAttribute("role", "status");
+  shell.setAttribute("aria-live", "polite");
+  const inner = el("div", "splash-inner");
+  const mark = el("div", "splash-mark");
+  const img = document.createElement("img");
+  img.className = "splash-logo";
+  img.src = lockupUrl;
+  img.alt = "Bolo";
+  mark.append(img);
+  const waves = el("div", "splash-waves");
+  waves.setAttribute("aria-hidden", "true");
+  for (let i = 0; i < 5; i += 1) {
+    const bar = el("span", "");
+    bar.style.setProperty("--i", String(i));
+    waves.append(bar);
+  }
+  const progress = el("div", "splash-bar");
+  progress.setAttribute("aria-hidden", "true");
+  progress.append(el("span", ""));
+  inner.append(el("p", "eyebrow splash-eyebrow", "Dictation"), mark, waves, el("p", "splash-text", "Loading your settings…"), progress);
+  shell.append(inner);
   return shell;
+}
+
+/** Fade the splash out, only if it became visible (it fades in after 150 ms). */
+function leaveSplash(splash: HTMLElement, since: number): Promise<void> {
+  const shown = performance.now() - since > 160;
+  if (!shown || matchMedia("(prefers-reduced-motion: reduce)").matches) return Promise.resolve();
+  splash.classList.add("leaving");
+  return new Promise((resolve) => setTimeout(resolve, 180));
 }
 
 function errorShell(message: string, retry: () => void): HTMLElement {

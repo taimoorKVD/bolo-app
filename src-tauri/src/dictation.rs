@@ -903,7 +903,11 @@ async fn process(
         let only_silence = products.iter().all(|product| product.error.is_none());
         return Err(TakeError {
             message: if only_silence {
-                silence_hint(clock.hint_held_ms, clock.short_press).into()
+                if !clock.short_press && crate::levels::health(None).mic_quiet {
+                    "Your microphone is turned down too low. Open Bolo and press \"Fix it\".".into()
+                } else {
+                    silence_hint(clock.hint_held_ms, clock.short_press).into()
+                }
             } else {
                 "Nothing to insert.".into()
             },

@@ -6,6 +6,7 @@ import type {
   ListenerStatus,
   MicInfo,
   MicStatus,
+  AudioHealth,
   Settings,
 } from "./types";
 
@@ -61,6 +62,9 @@ export const api = {
   listMicrophones: () => call<MicInfo[]>("list_microphones"),
   getMicStatus: () => call<MicStatus>("get_mic_status"),
   micLevel: () => call<number>("mic_level"),
+  audioHealth: () => call<AudioHealth>("audio_health"),
+  fixMicLevel: () => call<AudioHealth>("fix_mic_level"),
+  fixOutputVolume: () => call<AudioHealth>("fix_output_volume"),
   dismissError: () => call<void>("dismiss_error"),
   getHistory: () => call<HistoryEntry[]>("get_history"),
   deleteHistoryEntry: (id: string) => call<void>("delete_history_entry", { id }),

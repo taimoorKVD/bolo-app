@@ -346,6 +346,10 @@ fn delete_target(target: &str) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    /// The Credential Manager tests share one real entry; running them in
+    /// parallel let one restore the other's probe key over the user's key.
+    static CRED_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     use super::*;
 
     #[test]
@@ -405,7 +409,9 @@ mod tests {
     /// local self-test does not wipe the user's Groq key.
     #[cfg(windows)]
     #[test]
+    #[ignore = "touches the real Groq key in Credential Manager"]
     fn windows_credential_round_trip_restores_the_previous_key() {
+        let _serial = CRED_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let previous = load_api_key().expect("read current key");
         struct Restore(Option<String>);
         impl Drop for Restore {
@@ -450,7 +456,9 @@ mod tests {
     /// target, without deleting the original entry.
     #[cfg(windows)]
     #[test]
+    #[ignore = "touches the real Groq key in Credential Manager"]
     fn windows_copies_a_cadence_credential_forward() {
+        let _serial = CRED_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let previous = load_api_key().expect("read current key");
         struct Restore(Option<String>);
         impl Drop for Restore {
