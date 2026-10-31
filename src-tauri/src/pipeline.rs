@@ -365,7 +365,9 @@ pub(crate) async fn speech_with_groq(
         });
     }
     let model = effective_model(model, language);
-    let mut spoken = transcribe::transcribe(client, api_key, audio.clone(), model, language, prompt.map(str::to_string), using_builtin).await?;
+    let urdu_set = transcribe::normalize_language(language).as_deref() == Some("ur");
+    let first_prompt = if urdu_set { Some(transcribe::URDU_PROMPT.to_string()) } else { prompt.map(str::to_string) };
+    let mut spoken = transcribe::transcribe(client, api_key, audio.clone(), model, language, first_prompt, using_builtin).await?;
     if unlikely_language(language, &spoken.language) {
         // Short or accented English is sometimes detected as Spanish, Welsh,
         // etc., which then got translated and came out garbled. Bolo users
@@ -373,12 +375,25 @@ pub(crate) async fn speech_with_groq(
         // Urdu is often detected as Hindi and written in Devanagari, which an
         // Urdu speaker can't use. Pin Urdu for that case, English otherwise.
         let pin = if hindi_like(&spoken.language, &spoken.text) { "ur" } else { "en" };
-        if let Ok(pinned) = transcribe::transcribe(client, api_key, audio.clone(), model, pin, prompt.map(str::to_string), using_builtin).await {
+        let pin_prompt = if pin == "ur" { Some(transcribe::URDU_PROMPT.to_string()) } else { prompt.map(str::to_string) };
+        if let Ok(pinned) = transcribe::transcribe(client, api_key, audio.clone(), model, pin, pin_prompt, using_builtin).await {
             if !pinned.text.trim().is_empty() {
                 let tries = spoken.tries.saturating_add(pinned.tries);
                 spoken = pinned;
                 spoken.tries = tries;
                 spoken.language = pin.into();
+            }
+        }
+    }
+    if urdu_needs_clean_pass(language, &spoken.language, &spoken.text) {
+        // Auto-detect heard Urdu but the English prompt leaked English
+        // look-alike words in. Transcribe again as Urdu with an Urdu prompt.
+        if let Ok(pinned) = transcribe::transcribe(client, api_key, audio.clone(), model, "ur", Some(transcribe::URDU_PROMPT.to_string()), using_builtin).await {
+            if !pinned.text.trim().is_empty() {
+                let tries = spoken.tries.saturating_add(pinned.tries);
+                spoken = pinned;
+                spoken.tries = tries;
+                spoken.language = "ur".into();
             }
         }
     }
@@ -434,6 +449,14 @@ pub(crate) async fn speech_with_groq(
     }
 }
 
+/// Auto language, Whisper heard Urdu, and the text has Latin words in it,
+/// so the English prompt may have bent Urdu words into English ones.
+pub(crate) fn urdu_needs_clean_pass(setting: &str, detected: &str, text: &str) -> bool {
+    transcribe::normalize_language(setting).is_none()
+        && transcribe::language_code(detected) == "ur"
+        && transcribe::has_latin(text)
+}
+
 /// Auto language and Whisper picked something other than English or Urdu.
 pub(crate) fn unlikely_language(setting: &str, detected: &str) -> bool {
     if transcribe::normalize_language(setting).is_some() {
@@ -473,6 +496,15 @@ fn should_fallback(err: &anyhow::Error) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn urdu_with_english_words_on_auto_gets_a_clean_urdu_pass() {
+        assert!(urdu_needs_clean_pass("auto", "urdu", "کیا کوئی battery باقی ہے"));
+        assert!(!urdu_needs_clean_pass("auto", "urdu", "کیا کوئی بہتری باقی ہے"));
+        assert!(!urdu_needs_clean_pass("auto", "english", "is there any betterment left"));
+        assert!(!urdu_needs_clean_pass("ur", "urdu", "کیا کوئی battery باقی ہے"));
+        assert!(!transcribe::URDU_PROMPT.chars().any(|c| c.is_ascii_alphabetic()));
+    }
     #[test]
     fn urdu_capable_takes_use_the_full_model() {
         use crate::transcribe::{WHISPER_LARGE, WHISPER_TURBO};

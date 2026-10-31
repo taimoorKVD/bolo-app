@@ -118,6 +118,12 @@ pub fn whisper_prompt(words: &[String]) -> Option<String> {
     whisper_prompt_with(words, &[])
 }
 
+/// Whisper follows the prompt's language. The normal prompt is English
+/// (instructions, English terms, recent English takes), which pulled Urdu
+/// speech into English look-alike words ("behtari" -> "battery"). Urdu takes
+/// get an Urdu-script prompt instead.
+pub(crate) const URDU_PROMPT: &str = "یہ اردو میں بولی گئی بات ہے۔";
+
 /// Dictionary terms plus the last couple of local transcripts, capped at 800 characters.
 pub fn whisper_prompt_with(words: &[String], recent: &[String]) -> Option<String> {
     let terms: Vec<&str> = words
@@ -665,7 +671,7 @@ fn mixed_urdu(text: &str) -> bool {
     has_arabic(text) && has_latin(text)
 }
 
-fn has_latin(text: &str) -> bool {
+pub(crate) fn has_latin(text: &str) -> bool {
     text.chars().any(|c| c.is_ascii_alphabetic())
 }
 
