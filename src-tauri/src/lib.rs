@@ -6,12 +6,14 @@ mod context;
 mod credentials;
 mod diag;
 mod dictation;
+mod fixlast;
 mod health;
 mod hotkey;
 mod insert;
 mod levels;
 mod listener;
 mod logbuf;
+mod memory;
 mod micwatch;
 mod offline;
 mod pipeline;
@@ -78,6 +80,19 @@ pub fn run() {
             fix_mic_level,
             fix_output_volume,
             copy_text,
+            fixlast::get_memory,
+            fixlast::forget_word,
+            fixlast::add_word,
+            fixlast::forget_fix,
+            fixlast::forget_style,
+            fixlast::set_keep_learning,
+            fixlast::forget_everything,
+            fixlast::fix_target,
+            fixlast::take_fix_request,
+            fixlast::fix_requested,
+            fixlast::overlay_fix,
+            fixlast::fix_relisten,
+            fixlast::fix_with_text,
             open_groq_keys,
             smoke_finished,
             updater::check_for_update,
@@ -113,6 +128,7 @@ pub fn run() {
             }
             let settings = store::load_settings(&dir);
             let history = store::load_history(&dir);
+            memory::init(&dir);
             let state = AppState::new(settings.clone(), history, dir.clone());
             let listener = state.listener.clone();
             if !app.manage(state) {
@@ -302,14 +318,16 @@ fn park_offscreen<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) {
 
 fn setup_tray(app: &tauri::AppHandle, hotkey: &hotkey::Hotkey) -> tauri::Result<()> {
     let settings_item = MenuItem::with_id(app, "settings", "Settings", true, None::<&str>)?;
+    let fix_item = MenuItem::with_id(app, "fix_last", "Fix last dictation", true, None::<&str>)?;
     let quit_item = MenuItem::with_id(app, "quit", "Quit Bolo", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&settings_item, &quit_item])?;
+    let menu = Menu::with_items(app, &[&fix_item, &settings_item, &quit_item])?;
     let mut builder = TrayIconBuilder::with_id("bolo")
         .menu(&menu)
         .tooltip(format!("Bolo — hold {}", display(hotkey)))
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {
             "settings" => show_settings(app),
+            "fix_last" => fixlast::open_fix(app, None),
             "quit" => app.exit(0),
             _ => {}
         })

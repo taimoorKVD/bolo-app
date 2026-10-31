@@ -526,7 +526,7 @@ async fn request_cleanup(
         format!(
             "Punctuate a dictation transcript. Return only those words.\n{}\nDo not add words. Do not drop words, except standalone um or uh, and except the words a spoken correction replaces (scratch that, no wait, I mean). Do not paraphrase, explain, or wrap the result in quotes.",
             style_line(tone)
-        )
+        ) + &style_samples_line()
     };
     let user = transcript.trim();
     let max_tokens = (transcript.chars().count() as u32 / 2 + if plain { 96 } else { 48 }).clamp(48, 320);
@@ -879,6 +879,18 @@ static PENDING: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new()
 /// plain capitalized names only after they show up mid-sentence in two takes.
 /// Common English words and sentence-start words are never learned.
 pub fn learn_terms(text: &str, dictionary: &mut Vec<String>) -> Vec<String> {
+    let mut pending = PENDING.lock().unwrap_or_else(|e| e.into_inner());
+    learn_terms_with(text, dictionary, &mut pending, &[])
+}
+
+/// `learn_terms` with the pending list passed in, so it can be saved to
+/// memory.json and survive a restart. `blocked` words are never learned.
+pub fn learn_terms_with(
+    text: &str,
+    dictionary: &mut Vec<String>,
+    pending: &mut Vec<String>,
+    blocked: &[String],
+) -> Vec<String> {
     let mut added = Vec::new();
     let mut after_stop = true;
     for word in text.split_whitespace() {
@@ -894,11 +906,13 @@ pub fn learn_terms(text: &str, dictionary: &mut Vec<String>) -> Vec<String> {
         if !learnable(bare) {
             continue;
         }
+        if blocked.iter().any(|term| term.eq_ignore_ascii_case(bare)) {
+            continue;
+        }
         if dictionary.iter().any(|term| term.eq_ignore_ascii_case(bare)) {
             continue;
         }
         if !tech_shaped(bare) {
-            let mut pending = PENDING.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(pos) = pending.iter().position(|w| w.eq_ignore_ascii_case(bare)) {
                 pending.remove(pos);
             } else {
@@ -913,6 +927,25 @@ pub fn learn_terms(text: &str, dictionary: &mut Vec<String>) -> Vec<String> {
         added.push(bare.to_string());
     }
     added
+}
+
+/// A few of the user's own recent sentences, from memory.json.
+static STYLE: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+pub fn set_style(samples: Vec<String>) {
+    *STYLE.lock().unwrap_or_else(|e| e.into_inner()) = samples;
+}
+
+fn style_samples_line() -> String {
+    let samples = STYLE.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    if samples.is_empty() {
+        return String::new();
+    }
+    let joined: Vec<String> = samples.iter().take(3).map(|s| format!("\"{s}\"")).collect();
+    format!(
+        "\nFor reference only, this speaker usually writes like: {}. Match their spelling of names and their punctuation habits. Never copy words from these examples.",
+        joined.join(" ")
+    )
 }
 
 /// Internal capitals (GitHub), digits (Win11), or an acronym (AWS).

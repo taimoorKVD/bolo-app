@@ -268,14 +268,14 @@ fn history_is_newest_first_capped_and_long_text_is_cut() {
     for i in 0..60 {
         push_history(
             &mut entries,
-            HistoryEntry { id: new_history_id(), text: format!("take {i}"), created_unix_ms: i, model: WHISPER_TURBO.into(), cleaned: true, duration_ms: 100 },
+            HistoryEntry { id: new_history_id(), text: format!("take {i}"), created_unix_ms: i, model: WHISPER_TURBO.into(), cleaned: true, duration_ms: 100 , audio_id: None},
         );
     }
     assert_eq!(entries.len(), 50);
     assert_eq!(entries[0].text, "take 59");
     push_history(
         &mut entries,
-        HistoryEntry { id: new_history_id(), text: "a".repeat(25_000), created_unix_ms: 0, model: String::new(), cleaned: false, duration_ms: 0 },
+        HistoryEntry { id: new_history_id(), text: "a".repeat(25_000), created_unix_ms: 0, model: String::new(), cleaned: false, duration_ms: 0 , audio_id: None},
     );
     assert_eq!(entries[0].text.chars().count(), 20_001);
     let ids: std::collections::HashSet<_> = entries.iter().map(|e| e.id.clone()).collect();
@@ -285,7 +285,7 @@ fn history_is_newest_first_capped_and_long_text_is_cut() {
 #[test]
 fn history_round_trips_on_disk_and_survives_corruption() {
     let dir = tmp("history");
-    let entry = HistoryEntry { id: new_history_id(), text: "میں ٹھیک ہوں".into(), created_unix_ms: 1, model: WHISPER_LARGE.into(), cleaned: false, duration_ms: 900 };
+    let entry = HistoryEntry { id: new_history_id(), text: "میں ٹھیک ہوں".into(), created_unix_ms: 1, model: WHISPER_LARGE.into(), cleaned: false, duration_ms: 900 , audio_id: None};
     save_history(&dir, &[entry.clone()]).unwrap();
     assert_eq!(load_history(&dir), vec![entry]);
     std::fs::write(dir.join("history.json"), b"[{").unwrap();

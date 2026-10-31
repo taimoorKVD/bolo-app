@@ -92,6 +92,70 @@ pub fn insert_text(text: &str) -> anyhow::Result<Insertion> {
     }
 }
 
+/// The window the last insert went to, as a raw handle, for Fix last.
+pub fn current_target() -> Option<isize> {
+    #[cfg(windows)]
+    {
+        return last_target().map(|hwnd| hwnd.0 as isize);
+    }
+    #[cfg(not(windows))]
+    None
+}
+
+/// Go back to `target`, undo once when `undo` (that takes the earlier paste
+/// out), then insert `text` there. Used by Fix last.
+pub fn replace_in(target: isize, text: &str, undo: bool) -> anyhow::Result<Insertion> {
+    #[cfg(windows)]
+    {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, IsWindow};
+        let hwnd = HWND(target as *mut core::ffi::c_void);
+        if !unsafe { IsWindow(Some(hwnd)) }.as_bool() {
+            return Err(anyhow!("that window is closed"));
+        }
+        release_stuck_modifiers();
+        for _ in 0..3 {
+            focus_target(hwnd);
+            thread::sleep(Duration::from_millis(90));
+            if unsafe { GetForegroundWindow() } == hwnd {
+                break;
+            }
+        }
+        if unsafe { GetForegroundWindow() } != hwnd {
+            return Err(anyhow!("couldn't go back to that window"));
+        }
+        remember_target(hwnd);
+        if undo {
+            send_ctrl_z()?;
+            thread::sleep(Duration::from_millis(120));
+        }
+        return insert_text(text);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (target, undo);
+        insert_text(text)
+    }
+}
+
+#[cfg(windows)]
+fn send_ctrl_z() -> anyhow::Result<()> {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VK_CONTROL, VK_Z,
+    };
+    let inputs = [
+        key_input(VK_CONTROL, KEYBD_EVENT_FLAGS(0)),
+        key_input(VK_Z, KEYBD_EVENT_FLAGS(0)),
+        key_input(VK_Z, KEYEVENTF_KEYUP),
+        key_input(VK_CONTROL, KEYEVENTF_KEYUP),
+    ];
+    let sent = unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
+    if sent != inputs.len() as u32 {
+        return Err(anyhow!("Ctrl+Z simulation was incomplete"));
+    }
+    Ok(())
+}
+
 /// Remember the app the user was typing in, before the tally is shown.
 pub fn note_foreground() {
     #[cfg(windows)]
