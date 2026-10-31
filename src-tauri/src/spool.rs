@@ -46,6 +46,31 @@ pub fn remove(config: &Path, id: &str) {
     let _ = fs::remove_dir_all(root(config).join(id));
 }
 
+/// Keep only the newest `keep` takes (plus `current`). Typed inserts can't
+/// be confirmed, so without this every take's audio stayed on disk forever.
+pub fn prune(config: &Path, current: &str, keep: usize) {
+    let Ok(entries) = fs::read_dir(root(config)) else {
+        return;
+    };
+    let mut dirs: Vec<(SystemTime, PathBuf, String)> = entries
+        .flatten()
+        .filter(|entry| entry.path().is_dir())
+        .map(|entry| {
+            let stamp = entry
+                .metadata()
+                .and_then(|meta| meta.modified())
+                .unwrap_or(SystemTime::UNIX_EPOCH);
+            (stamp, entry.path(), entry.file_name().to_string_lossy().to_string())
+        })
+        .collect();
+    dirs.sort_by(|a, b| b.0.cmp(&a.0));
+    for (_, path, id) in dirs.into_iter().skip(keep) {
+        if id != current {
+            let _ = fs::remove_dir_all(path);
+        }
+    }
+}
+
 /// Newest spool that still has text or audio. Pasted takes are deleted.
 pub fn latest(config: &Path) -> Option<Recovered> {
     let entries = fs::read_dir(root(config)).ok()?;
@@ -115,6 +140,22 @@ mod tests {
         assert_eq!(recovered.audio.len(), 1);
         remove(&dir, "take-a");
         assert!(latest(&dir).is_none());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn prune_keeps_only_the_newest_takes() {
+        let dir = std::env::temp_dir().join(format!("bolo-prune-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        for n in 0..6 {
+            write_text(&dir, &format!("take-{n}"), "x");
+            std::thread::sleep(std::time::Duration::from_millis(30));
+        }
+        prune(&dir, "take-0", 3);
+        let mut left: Vec<String> = fs::read_dir(root(&dir)).unwrap().flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect();
+        left.sort();
+        assert_eq!(left, vec!["take-0", "take-3", "take-4", "take-5"]);
+        assert_eq!(latest(&dir).unwrap().id, "take-5");
         let _ = fs::remove_dir_all(&dir);
     }
 }

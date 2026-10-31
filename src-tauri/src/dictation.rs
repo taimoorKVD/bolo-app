@@ -1013,6 +1013,8 @@ async fn deliver(app: &AppHandle, mut outcome: Outcome, generation: u64) {
     if verified_paste && !partial {
         spool::remove(&state.config_dir, &outcome.spool_id);
     }
+    // Paste-again only ever uses the newest take, so a few is plenty.
+    spool::prune(&state.config_dir, &outcome.spool_id, 3);
     log_stages(app, &outcome.staged, release_ms);
     log_line(
         &state.config_dir,
