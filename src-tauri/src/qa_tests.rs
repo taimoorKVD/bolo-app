@@ -224,13 +224,16 @@ fn assets() -> PathBuf {
 
 #[test]
 fn every_selectable_character_has_its_listen_and_write_clips() {
-    assert!(assets().join("listen.webm").is_file() && assets().join("write.webm").is_file(), "classic");
+    for clip in ["listen.webm", "write.webm", "hide.webm", "thumb.png"] {
+        assert!(assets().join("characters").join("classic").join(clip).is_file(), "classic {clip}");
+    }
     for n in 2..=28 {
         let id = format!("c{n:02}");
         let mut s = Settings::default();
         s.character = id.clone();
         assert_eq!(prepare_settings(s).character, id, "{id} must be accepted");
-        for clip in ["listen.webm", "write.webm"] {
+        // Every character is re-made without a background: three clips and a still.
+        for clip in ["listen.webm", "write.webm", "hide.webm", "thumb.png"] {
             let path = assets().join("characters").join(&id).join(clip);
             let len = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
             assert!(len > 1024, "{} missing or empty", path.display());
