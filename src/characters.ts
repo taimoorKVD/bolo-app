@@ -2,11 +2,9 @@
 // Character and sound pack catalog shared by the overlay and Settings.
 import type { Settings } from "./types";
 
-const listenDefault = new URL("./assets/listen.webm", import.meta.url).href;
-const writeDefault = new URL("./assets/write.webm", import.meta.url).href;
 const dismissDefault = new URL("./assets/dismiss.wav", import.meta.url).href;
 
-const clipFiles = import.meta.glob("./assets/characters/*/*.{webm,jpg}", {
+const clipFiles = import.meta.glob("./assets/characters/*/*.{webm,png,jpg}", {
   eager: true,
   query: "?url",
   import: "default",
@@ -40,7 +38,11 @@ export type Character = {
 
 /** Characters re-made without a background. Add an id here when its clips land in
  * assets/characters/<id>/{listen,write,hide}.webm; the rest keep the boxed style. */
-const ALPHA_CHARACTERS = new Set(["classic", "c07"]);
+const ALPHA_CHARACTERS = new Set([
+  "classic", "c02", "c03", "c04", "c05", "c06", "c07", "c08", "c09", "c10",
+  "c11", "c12", "c13", "c14", "c15", "c16", "c17", "c18", "c19", "c20",
+  "c21", "c22", "c23", "c24", "c25", "c26", "c27", "c28",
+]);
 
 export const DEFAULT_CHARACTER = "classic";
 export const DEFAULT_PACK = "match";
@@ -111,15 +113,18 @@ export type ClipUrls = { listen: string; write: string; thumb: string; hide: str
 
 export function clipUrls(id: string): ClipUrls {
   const dir = `./assets/characters/${id === DEFAULT_CHARACTER ? "classic" : id}`;
-  const thumb = clipFiles[`${dir}/thumb.jpg`] ?? "";
+  const thumb = clipFiles[`${dir}/thumb.png`] ?? clipFiles[`${dir}/thumb.jpg`] ?? "";
   const listen = clipFiles[`${dir}/listen.webm`];
   const write = clipFiles[`${dir}/write.webm`];
   const hide = clipFiles[`${dir}/hide.webm`];
   if (findCharacter(id).alpha && listen && write && hide) {
     return { listen, write, hide, thumb, alpha: true };
   }
-  if (id === DEFAULT_CHARACTER || !listen || !write) {
-    return { listen: listenDefault, write: writeDefault, hide: "", thumb, alpha: false };
+  if (!listen || !write) {
+    // Missing files: fall back to the classic plush rather than nothing.
+    return id === DEFAULT_CHARACTER
+      ? { listen: "", write: "", hide: "", thumb, alpha: false }
+      : { ...clipUrls(DEFAULT_CHARACTER), thumb };
   }
   return { listen, write, hide: "", thumb, alpha: false };
 }

@@ -462,7 +462,7 @@ body.view-overlay.browser-preview .demo-row button {
 }
 .char-card:hover { border-color: rgba(198, 161, 90, 0.45); transform: translateY(-1px); }
 .char-card.is-on { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
-.char-card img { width: 100%; aspect-ratio: 24 / 17; object-fit: cover; border-radius: 9px; display: block; }
+.char-card img { width: 100%; aspect-ratio: 24 / 17; object-fit: contain; border-radius: 9px; display: block; background: radial-gradient(circle at 50% 60%, rgba(198, 161, 90, 0.10), rgba(255, 255, 255, 0.02) 70%); }
 .char-card-name { font-size: 12.5px; line-height: 1.25; }
 .char-badge {
   position: absolute; top: 10px; left: 10px; font-size: 10px; padding: 1px 7px; border-radius: 999px;
