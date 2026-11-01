@@ -323,6 +323,14 @@ body.view-overlay #app {
   line-height: 1.35;
 }
 .listener[data-pose="error"] .clip-listen { animation: worry 0.45s ease; }
+/* Re-made characters: real transparency, no box, sized to the 640x560 clip. */
+.listener.alpha .clip {
+  width: 171px;
+  height: 150px;
+  border-radius: 0;
+  box-shadow: none;
+  filter: none;
+}
 .listener.is-leaving .clip { animation: dismiss 0.62s cubic-bezier(.22,.7,.2,1) forwards; }
 
 .demo-row { display: none; }

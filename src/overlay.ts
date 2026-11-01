@@ -22,14 +22,19 @@ export function mountOverlay(root: HTMLElement): void {
   const initial = clipUrls(DEFAULT_CHARACTER);
   const listen = clip("clip-listen", initial.listen);
   const write = clip("clip-write", initial.write);
+  const hide = clip("clip-hide", initial.hide);
+  hide.loop = false;
+  hide.autoplay = false;
+  stage.classList.toggle("alpha", initial.alpha);
   const note = el("p", "listener-note");
   note.hidden = true;
   const fixCard = buildFixCard();
-  stage.append(listen, write, note, fixCard);
+  stage.append(listen, write, hide, note, fixCard);
   root.append(stage);
 
   const cues = new CuePlayer();
   let characterId = DEFAULT_CHARACTER;
+  let alpha = initial.alpha;
   let prefs: Partial<Settings> = {};
   let pose: Pose = "hidden";
   let pendingRefresh = false;
@@ -40,6 +45,10 @@ export function mountOverlay(root: HTMLElement): void {
     const urls = clipUrls(id);
     listen.src = urls.listen;
     write.src = urls.write;
+    alpha = urls.alpha;
+    if (urls.hide) hide.src = urls.hide;
+    else hide.removeAttribute("src");
+    stage.classList.toggle("alpha", alpha);
     syncClips(pose, listen, write);
   };
   const applyPrefs = (settings: Partial<Settings>) => {
@@ -78,9 +87,26 @@ export function mountOverlay(root: HTMLElement): void {
       if (next === "leave") {
         // Start the sound before the hide motion so it is not late.
         cues.play("dismiss");
-        stage.classList.add("is-leaving");
+        if (alpha) {
+          // Re-made characters bring their own hide animation.
+          listen.hidden = true;
+          write.hidden = true;
+          listen.pause();
+          write.pause();
+          hide.hidden = false;
+          try {
+            hide.currentTime = 0;
+          } catch {
+            // Not seekable yet; it still plays from the start.
+          }
+          void hide.play().catch(() => {});
+        } else {
+          stage.classList.add("is-leaving");
+        }
       } else {
         stage.classList.remove("is-leaving");
+        hide.hidden = true;
+        hide.pause();
         for (const node of [listen, write]) {
           node.style.animation = "none";
           void node.offsetWidth;

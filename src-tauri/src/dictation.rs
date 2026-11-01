@@ -171,6 +171,8 @@ struct Outcome {
     staged: Staged,
     spool_id: String,
     engine: Option<String>,
+    /// Why Bolo doubts this take; the overlay offers Fix last only then.
+    unsure: Option<&'static str>,
 }
 
 struct TakeError {
@@ -927,7 +929,12 @@ async fn process(
             // The transcript already exists. Keep it so paste-again can use it
             // even when cleanup cannot reach Groq.
             let _ = err;
+            let unsure = crate::unsure::reason(&crate::unsure::Signals {
+                cleanup_wanted: settings.cleanup_enabled && !settings.verbatim,
+                ..take_signals(&products, partial_note.is_some(), &stitched)
+            });
             return Ok(Outcome {
+                unsure,
                 text: stitched,
                 cleaned: false,
                 note: partial_note,
@@ -964,7 +971,14 @@ async fn process(
             staged,
         });
     }
+    let unsure = crate::unsure::reason(&crate::unsure::Signals {
+        cleanup_wanted: settings.cleanup_enabled && !settings.verbatim,
+        cleanup_why: staged.cleanup_why.clone(),
+        pasted: text.clone(),
+        ..take_signals(&products, partial_note.is_some(), &stitched)
+    });
     Ok(Outcome {
+        unsure,
         text,
         cleaned: cleaned.used_model,
         note: partial_note.or(cleaned.note),
@@ -1080,10 +1094,20 @@ async fn deliver(app: &AppHandle, mut outcome: Outcome, generation: u64) {
             engine: outcome.engine.clone(),
         },
     );
-    schedule_fix_offer(app.clone(), generation);
+    if let Some(why) = outcome.unsure {
+        crate::logbuf::log_line(&state.config_dir, "info", &format!("unsure take ({why}); offering Fix last"));
+        schedule_fix_offer(app.clone(), generation);
+    }
 }
 
 /// After the done pose, offer "Fix last" in the overlay for a few seconds.
+/// Esc pressed while the Fix last card was showing.
+pub(crate) fn dismiss_fix_card(app: &AppHandle) {
+    if idle_generation(app).is_some() {
+        show_phase(app, "idle", None);
+    }
+}
+
 fn schedule_fix_offer(app: AppHandle, generation: u64) {
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(DISMISS_MS));
@@ -1215,6 +1239,18 @@ fn stage_line(staged: &Staged, release_ms: u64) -> String {
         staged.overlay_ms, first_sample, language, path
     ));
     line
+}
+
+fn take_signals(products: &[Product], partial: bool, raw: &str) -> crate::unsure::Signals {
+    crate::unsure::Signals {
+        paths: products.iter().map(|p| p.speech_path.clone()).filter(|p| !p.is_empty()).collect(),
+        engines: products.iter().filter(|p| !p.silence).map(|p| p.engine.clone()).collect(),
+        partial,
+        cleanup_wanted: false,
+        cleanup_why: String::new(),
+        raw: raw.to_string(),
+        pasted: raw.to_string(),
+    }
 }
 
 fn speech_meta(products: &[Product]) -> (String, String) {
@@ -1353,6 +1389,7 @@ fn mark_idle(app: &AppHandle) {
 }
 
 fn publish(app: &AppHandle, event: &DictationEvent) {
+    crate::listener::FIX_CARD_ESC.store(event.phase == "fix", std::sync::atomic::Ordering::SeqCst);
     let _ = app.emit("dictation-state", event);
     let Some(overlay) = app.get_webview_window("overlay") else {
         return;

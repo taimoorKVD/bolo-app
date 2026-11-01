@@ -208,6 +208,16 @@ pub struct Transcript {
     pub tries: u8,
     /// ISO-ish code from verbose_json (`en`, `ur`), or empty when the body omitted it.
     pub language: String,
+    /// Whisper's own confidence was low (avg_logprob / no_speech_prob).
+    pub doubtful: bool,
+}
+
+/// Milder than `should_retry`: worth offering Fix last, not worth a second call.
+pub fn doubtful(text: &str, avg_logprob: Option<f32>, no_speech_prob: Option<f32>) -> bool {
+    if text.trim().is_empty() {
+        return false;
+    }
+    avg_logprob.is_some_and(|value| value < -0.7) || no_speech_prob.is_some_and(|value| value > 0.5)
 }
 
 /// A second Whisper call is worth it when the first result is empty or the
@@ -286,25 +296,31 @@ pub async fn transcribe(
         first.text.clear();
     }
     if !should_retry(&first.text, first.avg_logprob, first.no_speech_prob) {
+        let doubt = doubtful(&first.text, first.avg_logprob, first.no_speech_prob);
         return Ok(Transcript {
             text: first.text,
             tries: 1,
             language: first.language,
+            doubtful: doubt,
         });
     }
     match request_audio(client, api_key, audio, TRANSCRIPTIONS, model, language, None, using_builtin).await {
         Ok(second) => {
             let chosen = prefer_attempt(first, second);
+            let doubt = doubtful(&chosen.text, chosen.avg_logprob, chosen.no_speech_prob);
             Ok(Transcript {
                 text: chosen.text,
                 tries: 2,
                 language: chosen.language,
+                doubtful: doubt,
             })
         }
         Err(_) if !first.text.trim().is_empty() => Ok(Transcript {
             text: first.text,
             tries: 2,
             language: first.language,
+            // The first try already looked bad enough to retry.
+            doubtful: true,
         }),
         Err(err) => Err(err),
     }
@@ -320,10 +336,12 @@ pub async fn translate_audio(
 ) -> anyhow::Result<Transcript> {
     let first = request_audio(client, api_key, audio.clone(), TRANSLATIONS, WHISPER_LARGE, "", prompt, using_builtin).await?;
     if !first.text.trim().is_empty() && !repetitive(&first.text) {
+        let doubt = doubtful(&first.text, first.avg_logprob, first.no_speech_prob);
         return Ok(Transcript {
             text: first.text,
             tries: 1,
             language: first.language,
+            doubtful: doubt,
         });
     }
     let second = request_audio(client, api_key, audio, TRANSLATIONS, WHISPER_LARGE, "", None, using_builtin).await?;
@@ -332,10 +350,12 @@ pub async fn translate_audio(
     } else {
         second.language
     };
+    let doubt = doubtful(&second.text, second.avg_logprob, second.no_speech_prob);
     Ok(Transcript {
         text: second.text,
         tries: 2,
         language,
+        doubtful: doubt,
     })
 }
 

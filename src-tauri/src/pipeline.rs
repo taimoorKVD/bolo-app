@@ -255,6 +255,15 @@ fn transcribe_one(index: usize, audio: FinishedAudio, env: &JobEnv) -> Product {
     product
 }
 
+/// Signals from one Groq recognition that feed the "unsure" decision.
+#[derive(Default)]
+pub(crate) struct SpeechFlags {
+    /// A second pass (Urdu prompt or pinned language) replaced the first text.
+    pub(crate) repass: bool,
+    /// Whisper reported low confidence.
+    pub(crate) doubtful: bool,
+}
+
 pub(crate) struct Recognized {
     pub(crate) text: String,
     pub(crate) tries: u8,
@@ -353,7 +362,14 @@ pub(crate) async fn speech_with_groq(
     cleanup_model: &str,
     using_builtin: bool,
 ) -> anyhow::Result<Recognized> {
-    let mut got = speech_with_groq_raw(client, api_key, audio, model, language, output, prompt, cleanup_model, using_builtin).await?;
+    let mut flags = SpeechFlags::default();
+    let mut got = speech_with_groq_raw(client, api_key, audio, model, language, output, prompt, cleanup_model, using_builtin, &mut flags).await?;
+    if flags.repass {
+        got.path.push_str("-repass");
+    }
+    if flags.doubtful {
+        got.path.push_str("-lowconf");
+    }
     crate::diag::note(format!("route path={} language={} text={}", got.path, got.language, got.text));
     crate::diag::set_translated(got.path.contains("translate") || got.path.contains("mixed"));
     if transcribe::repetitive(&got.text) {
@@ -375,9 +391,11 @@ async fn speech_with_groq_raw(
     prompt: Option<&str>,
     cleanup_model: &str,
     using_builtin: bool,
+    flags: &mut SpeechFlags,
 ) -> anyhow::Result<Recognized> {
     if transcribe::direct_translate(output, language) {
         let translated = transcribe::translate_audio(client, api_key, audio, prompt, using_builtin).await?;
+        flags.doubtful |= translated.doubtful;
         let code = transcribe::normalize_language(language).unwrap_or_else(|| "unknown".into());
         return Ok(Recognized {
             text: translated.text,
@@ -409,6 +427,7 @@ async fn speech_with_groq_raw(
                 spoken = pinned;
                 spoken.tries = tries;
                 spoken.language = pin.into();
+                flags.repass = true;
             }
         }
     }
@@ -423,9 +442,11 @@ async fn speech_with_groq_raw(
                 spoken = pinned;
                 spoken.tries = tries;
                 spoken.language = "ur".into();
+                flags.repass = true;
             }
         }
     }
+    flags.doubtful |= spoken.doubtful;
     let detected = spoken.language.clone();
     let mut route = transcribe::speech_route(output, language, &detected, &spoken.text);
     // Whisper's audio translation loops and drops most of a long Urdu take.
@@ -443,6 +464,7 @@ async fn speech_with_groq_raw(
         }),
         SpeechRoute::Translate => {
             let translated = transcribe::translate_audio(client, api_key, audio, prompt, using_builtin).await?;
+            flags.doubtful |= translated.doubtful;
             Ok(Recognized {
                 text: translated.text,
                 tries: spoken.tries.saturating_add(translated.tries),

@@ -7,6 +7,7 @@ mod credentials;
 mod diag;
 mod dictation;
 mod fixlast;
+mod unsure;
 mod health;
 mod hotkey;
 mod insert;
@@ -184,6 +185,7 @@ pub fn run() {
                         match event {
                             InputEvent::Dictation(edge) => dictation::hotkey(&handle, edge),
                             InputEvent::PasteAgain => dictation::paste_last(&handle),
+                            InputEvent::EscapeFixCard => dictation::dismiss_fix_card(&handle),
                         }
                     }
                 })

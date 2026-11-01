@@ -33,6 +33,18 @@ type StatusHook = Arc<dyn Fn(ListenerStatus) + Send + Sync>;
 pub enum InputEvent {
     Dictation(HotkeyEdge),
     PasteAgain,
+    /// Esc while the Fix last card is on screen. The key still reaches the app.
+    EscapeFixCard,
+}
+
+/// True only while the overlay shows the Fix last card. Esc is watched then
+/// and never swallowed, so other apps get it as usual.
+pub static FIX_CARD_ESC: AtomicBool = AtomicBool::new(false);
+const VK_ESCAPE_CODE: u16 = 0x1B;
+
+/// One-shot: Esc pressed while the card is visible.
+pub(crate) fn escape_hits_fix_card(vk: u16, is_down: bool) -> bool {
+    is_down && vk == VK_ESCAPE_CODE && FIX_CARD_ESC.swap(false, Ordering::SeqCst)
 }
 
 #[derive(Clone)]
@@ -197,6 +209,9 @@ fn run_platform(control: ListenerControl, tx: Sender<InputEvent>) -> Result<(), 
             let Some(shared) = guard.as_mut() else {
                 return unsafe { CallNextHookEx(None, code, wparam, lparam) };
             };
+            if escape_hits_fix_card(vk, is_down) {
+                let _ = shared.tx.send(InputEvent::EscapeFixCard);
+            }
             on_key(shared, vk, is_down)
         };
         if swallow {

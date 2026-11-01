@@ -29,7 +29,18 @@ export type SoundPackId =
   | "off";
 export type SoundCue = "start" | "done" | "dismiss";
 
-export type Character = { id: string; name: string; group: CharacterGroup; pack: SoundPackId };
+/** `alpha`: clips have a real transparent background (VP9 alpha) and a hide clip. */
+export type Character = {
+  id: string;
+  name: string;
+  group: CharacterGroup;
+  pack: SoundPackId;
+  alpha: boolean;
+};
+
+/** Characters re-made without a background. Add an id here when its clips land in
+ * assets/characters/<id>/{listen,write,hide}.webm; the rest keep the boxed style. */
+const ALPHA_CHARACTERS = new Set(["classic", "c07"]);
 
 export const DEFAULT_CHARACTER = "classic";
 export const DEFAULT_PACK = "match";
@@ -70,6 +81,7 @@ export const CHARACTERS: Character[] = RAW.map(([n, name, group, pack]) => ({
   name,
   group,
   pack,
+  alpha: ALPHA_CHARACTERS.has(n === 1 ? DEFAULT_CHARACTER : `c${String(n).padStart(2, "0")}`),
 }));
 
 export const GROUPS: Array<[CharacterGroup, string]> = [
@@ -95,13 +107,21 @@ export function findCharacter(id: string | undefined | null): Character {
   return CHARACTERS.find((c) => c.id === id) ?? CHARACTERS[0]!;
 }
 
-export function clipUrls(id: string): { listen: string; write: string; thumb: string } {
-  const thumb = clipFiles[`./assets/characters/${id === DEFAULT_CHARACTER ? "classic" : id}/thumb.jpg`] ?? "";
-  if (id === DEFAULT_CHARACTER) return { listen: listenDefault, write: writeDefault, thumb };
-  const listen = clipFiles[`./assets/characters/${id}/listen.webm`];
-  const write = clipFiles[`./assets/characters/${id}/write.webm`];
-  if (!listen || !write) return { listen: listenDefault, write: writeDefault, thumb };
-  return { listen, write, thumb };
+export type ClipUrls = { listen: string; write: string; thumb: string; hide: string; alpha: boolean };
+
+export function clipUrls(id: string): ClipUrls {
+  const dir = `./assets/characters/${id === DEFAULT_CHARACTER ? "classic" : id}`;
+  const thumb = clipFiles[`${dir}/thumb.jpg`] ?? "";
+  const listen = clipFiles[`${dir}/listen.webm`];
+  const write = clipFiles[`${dir}/write.webm`];
+  const hide = clipFiles[`${dir}/hide.webm`];
+  if (findCharacter(id).alpha && listen && write && hide) {
+    return { listen, write, hide, thumb, alpha: true };
+  }
+  if (id === DEFAULT_CHARACTER || !listen || !write) {
+    return { listen: listenDefault, write: writeDefault, hide: "", thumb, alpha: false };
+  }
+  return { listen, write, hide: "", thumb, alpha: false };
 }
 
 export function resolvePack(pack: string | undefined, characterId: string): SoundPackId {
