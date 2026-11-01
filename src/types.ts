@@ -34,6 +34,8 @@ export type Settings = {
   smartMood: boolean;
   smartTimeOfDay: boolean;
   smartHoliday: boolean;
+  /** Learn names, fixes and style on this PC. */
+  keepLearning: boolean;
 };
 
 export type ApiKeyStatus = {
@@ -56,6 +58,8 @@ export type HistoryEntry = {
   model: string;
   cleaned: boolean;
   durationMs: number;
+  /** Spool id of the saved audio, when it is still kept. */
+  audioId?: string;
 };
 
 export type ListenerStatus = {
@@ -87,6 +91,7 @@ export type DictationPhase =
   | "inserting"
   | "done"
   | "typed"
+  | "fix"
   | "error";
 
 export type DictationEvent = {
@@ -105,3 +110,16 @@ export interface AudioHealth {
   outputMuted: boolean;
   outputQuiet: boolean;
 }
+
+export type Correction = { from: string; to: string; createdUnixMs: number };
+
+export type MemoryView = {
+  words: string[];
+  fixes: Correction[];
+  style: string[];
+  keepLearning: boolean;
+};
+
+export type FixTarget = { id: string; text: string; canRelisten: boolean; isLast: boolean };
+
+export type FixResult = { text: string; message: string; learned: string[] };

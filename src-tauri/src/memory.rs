@@ -1,0 +1,425 @@
+//! Personal memory, kept only on this PC in `memory.json`.
+//!
+//! Learned words live in `settings.dictionary` (as in 0.1.3, so older builds
+//! still read them). This file adds what 0.1.3 did not have: names seen once
+//! and waiting for a second take, words the user told Bolo to forget, the
+//! user's own fixes (a replacement map), and a few recent sentences used as a
+//! style reference. A missing or unreadable file starts empty.
+
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+
+pub const VERSION: u32 = 1;
+const MAX_CORRECTIONS: usize = 100;
+const MAX_STYLE: usize = 5;
+const MAX_PENDING: usize = 200;
+const MAX_BLOCKED: usize = 300;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Correction {
+    pub from: String,
+    pub to: String,
+    #[serde(default)]
+    pub created_unix_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Memory {
+    pub version: u32,
+    /// Plain names seen once mid-sentence; learned on the second take.
+    pub pending: Vec<String>,
+    /// Words the user forgot. They are never learned again automatically.
+    pub blocked: Vec<String>,
+    pub corrections: Vec<Correction>,
+    pub style: Vec<String>,
+}
+
+impl Default for Memory {
+    fn default() -> Self {
+        Self {
+            version: VERSION,
+            pending: Vec::new(),
+            blocked: Vec::new(),
+            corrections: Vec::new(),
+            style: Vec::new(),
+        }
+    }
+}
+
+pub fn path(config: &Path) -> PathBuf {
+    config.join("memory.json")
+}
+
+/// Missing file: defaults (the 0.1.3 upgrade path). Corrupt file: kept aside
+/// as `memory.bad.json` and replaced with defaults, never a crash.
+pub fn load(config: &Path) -> Memory {
+    let file = path(config);
+    let Ok(raw) = std::fs::read_to_string(&file) else {
+        return Memory::default();
+    };
+    match serde_json::from_str::<Memory>(&raw) {
+        Ok(memory) => migrate(memory),
+        Err(_) => {
+            let _ = std::fs::copy(&file, config.join("memory.bad.json"));
+            Memory::default()
+        }
+    }
+}
+
+fn migrate(mut memory: Memory) -> Memory {
+    if memory.version < VERSION {
+        memory.version = VERSION;
+    }
+    memory.corrections.retain(|c| !c.from.trim().is_empty() && !c.to.trim().is_empty());
+    memory.corrections.truncate(MAX_CORRECTIONS);
+    memory.style.truncate(MAX_STYLE);
+    memory.pending.truncate(MAX_PENDING);
+    memory
+}
+
+pub fn save(config: &Path, memory: &Memory) -> Result<(), String> {
+    crate::store::write_atomic(&path(config), memory).map_err(|e| e.to_string())
+}
+
+static STATE: Mutex<Option<(PathBuf, Memory)>> = Mutex::new(None);
+
+pub fn init(config: &Path) {
+    let memory = load(config);
+    crate::cleanup::set_style(memory.style.clone());
+    *STATE.lock().unwrap_or_else(|e| e.into_inner()) = Some((config.to_path_buf(), memory));
+}
+
+/// A copy of the current memory (defaults before `init`).
+pub fn snapshot() -> Memory {
+    STATE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .map(|(_, m)| m.clone())
+        .unwrap_or_default()
+}
+
+/// Change memory and save it. Returns the closure's result.
+pub fn update<T>(change: impl FnOnce(&mut Memory) -> T) -> T {
+    let mut guard = STATE.lock().unwrap_or_else(|e| e.into_inner());
+    match guard.as_mut() {
+        Some((dir, memory)) => {
+            let before = memory.clone();
+            let out = change(memory);
+            if memory.style != before.style {
+                crate::cleanup::set_style(memory.style.clone());
+            }
+            if *memory != before {
+                if let Err(err) = save(dir, memory) {
+                    crate::logbuf::log_line(dir, "error", &format!("memory save: {err}"));
+                }
+            }
+            out
+        }
+        None => {
+            let mut scratch = Memory::default();
+            change(&mut scratch)
+        }
+    }
+}
+
+/// Words the user's fixes taught, for the Whisper prompt.
+pub fn prompt_terms(memory: &Memory) -> Vec<String> {
+    let mut terms: Vec<String> = Vec::new();
+    for c in memory.corrections.iter() {
+        let to = c.to.trim();
+        if !to.is_empty() && to.chars().count() <= 40 && !terms.iter().any(|t| t.eq_ignore_ascii_case(to)) {
+            terms.push(to.to_string());
+        }
+    }
+    terms
+}
+
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '\'' || c == '_'
+}
+
+/// Replace each fix's `from` with its `to`, whole words only, ignoring case.
+pub fn apply_corrections(text: &str, corrections: &[Correction]) -> String {
+    let mut out = text.to_string();
+    // Longer phrases first so "my sequel" wins over "sequel".
+    let mut sorted: Vec<&Correction> = corrections.iter().collect();
+    sorted.sort_by_key(|c| std::cmp::Reverse(c.from.chars().count()));
+    for c in sorted {
+        let from = c.from.trim();
+        if from.is_empty() || from == c.to {
+            continue;
+        }
+        out = replace_words(&out, from, c.to.trim());
+    }
+    out
+}
+
+fn replace_words(text: &str, from: &str, to: &str) -> String {
+    let lower_text = text.to_lowercase();
+    let lower_from = from.to_lowercase();
+    // Lowercasing can change byte lengths outside ASCII; fall back to exact match then.
+    let (hay, needle) = if lower_text.len() == text.len() && lower_from.len() == from.len() {
+        (lower_text, lower_from)
+    } else {
+        (text.to_string(), from.to_string())
+    };
+    let mut out = String::with_capacity(text.len());
+    let mut cursor = 0;
+    let mut search = 0;
+    while let Some(found) = hay[search..].find(&needle) {
+        let start = search + found;
+        let end = start + needle.len();
+        let before_ok = text[..start].chars().next_back().is_none_or(|c| !is_word_char(c));
+        let after_ok = text[end..].chars().next().is_none_or(|c| !is_word_char(c));
+        if before_ok && after_ok {
+            out.push_str(&text[cursor..start]);
+            out.push_str(to);
+            cursor = end;
+            search = end;
+        } else {
+            search = start + text[start..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+        }
+        if search >= hay.len() {
+            break;
+        }
+    }
+    out.push_str(&text[cursor..]);
+    out
+}
+
+fn bare(word: &str) -> String {
+    word.trim_matches(|c: char| !is_word_char(c)).to_string()
+}
+
+/// Compare what Bolo wrote with what the user typed and return the changed
+/// span as one fix. Spans longer than five words are not useful as a
+/// replacement (the user rewrote the sentence), so they give nothing.
+pub fn diff_fix(old: &str, new: &str) -> Option<(String, String)> {
+    let a: Vec<String> = old.split_whitespace().map(bare).filter(|w| !w.is_empty()).collect();
+    let b: Vec<String> = new.split_whitespace().map(bare).filter(|w| !w.is_empty()).collect();
+    let mut pre = 0;
+    while pre < a.len() && pre < b.len() && a[pre] == b[pre] {
+        pre += 1;
+    }
+    let mut suf = 0;
+    while suf < a.len() - pre && suf < b.len() - pre && a[a.len() - 1 - suf] == b[b.len() - 1 - suf] {
+        suf += 1;
+    }
+    let from = &a[pre..a.len() - suf];
+    let to = &b[pre..b.len() - suf];
+    if from.is_empty() || to.is_empty() || from.len() > 5 || to.len() > 5 {
+        return None;
+    }
+    let from = from.join(" ");
+    let to = to.join(" ");
+    if from == to {
+        return None;
+    }
+    // A one-word fix of a very common word would rewrite every sentence.
+    if !from.contains(' ') && (from.chars().count() <= 3 || crate::cleanup::is_common_word(&from)) && !from.eq_ignore_ascii_case(&to) {
+        return None;
+    }
+    Some((from, to))
+}
+
+pub fn add_correction(memory: &mut Memory, from: &str, to: &str, now: u64) {
+    memory.corrections.retain(|c| !c.from.eq_ignore_ascii_case(from));
+    memory.corrections.insert(0, Correction { from: from.into(), to: to.into(), created_unix_ms: now });
+    memory.corrections.truncate(MAX_CORRECTIONS);
+}
+
+/// Keep a short recent sentence as a style sample.
+pub fn add_style(memory: &mut Memory, text: &str) {
+    let text = text.trim();
+    let words = text.split_whitespace().count();
+    if !(4..=40).contains(&words) || !text.is_ascii() {
+        return;
+    }
+    memory.style.retain(|s| s != text);
+    memory.style.insert(0, text.to_string());
+    memory.style.truncate(MAX_STYLE);
+}
+
+pub fn forget_word(memory: &mut Memory, dictionary: &mut Vec<String>, word: &str) {
+    dictionary.retain(|w| !w.eq_ignore_ascii_case(word));
+    memory.pending.retain(|w| !w.eq_ignore_ascii_case(word));
+    if !memory.blocked.iter().any(|w| w.eq_ignore_ascii_case(word)) {
+        memory.blocked.push(word.to_string());
+        if memory.blocked.len() > MAX_BLOCKED {
+            memory.blocked.remove(0);
+        }
+    }
+}
+
+pub fn forget_everything(memory: &mut Memory, dictionary: &mut Vec<String>) {
+    dictionary.clear();
+    *memory = Memory::default();
+}
+
+/// Learn names from a take, with the pending list kept across restarts.
+pub fn learn(memory: &mut Memory, text: &str, dictionary: &mut Vec<String>) -> Vec<String> {
+    let blocked = memory.blocked.clone();
+    let added = crate::cleanup::learn_terms_with(text, dictionary, &mut memory.pending, &blocked);
+    memory.pending.truncate(MAX_PENDING);
+    added
+}
+
+/// Words the user typed in a fix that should be spelled their way.
+pub fn learn_from_fix(memory: &mut Memory, to: &str, dictionary: &mut Vec<String>) -> Vec<String> {
+    let mut added = Vec::new();
+    for word in to.split_whitespace().map(bare) {
+        if word.chars().count() < 2 || word.chars().count() > 64 || dictionary.len() >= 200 {
+            continue;
+        }
+        let shaped = word.chars().any(|c| c.is_uppercase() || c.is_ascii_digit());
+        if !shaped || crate::cleanup::is_common_word(&word) {
+            continue;
+        }
+        if dictionary.iter().any(|w| w.eq_ignore_ascii_case(&word)) {
+            continue;
+        }
+        memory.blocked.retain(|w| !w.eq_ignore_ascii_case(&word));
+        dictionary.push(word.clone());
+        added.push(word);
+    }
+    added
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "bolo-memory-{name}-{}-{}",
+            std::process::id(),
+            crate::store::now_ms()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn missing_file_gives_defaults() {
+        let dir = temp("missing");
+        let memory = load(&dir);
+        assert_eq!(memory, Memory::default());
+        assert_eq!(memory.version, VERSION);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn corrupt_file_is_kept_aside_and_defaults_load() {
+        let dir = temp("corrupt");
+        std::fs::write(path(&dir), "{not json").unwrap();
+        assert_eq!(load(&dir), Memory::default());
+        assert!(dir.join("memory.bad.json").is_file());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_and_load_round_trip_and_old_version_upgrades() {
+        let dir = temp("round");
+        let mut memory = Memory::default();
+        add_correction(&mut memory, "sequel", "SQL", 5);
+        add_style(&mut memory, "Let's ship the build on Friday.");
+        memory.pending.push("Taimoor".into());
+        save(&dir, &memory).unwrap();
+        assert_eq!(load(&dir), memory);
+        std::fs::write(path(&dir), r#"{"version":0,"corrections":[{"from":"a b","to":"AB"},{"from":"","to":"x"}]}"#).unwrap();
+        let old = load(&dir);
+        assert_eq!(old.version, VERSION);
+        assert_eq!(old.corrections.len(), 1);
+        assert!(old.style.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn corrections_replace_whole_words_ignoring_case() {
+        let fixes = vec![
+            Correction { from: "sequel".into(), to: "SQL".into(), created_unix_ms: 0 },
+            Correction { from: "my sequel".into(), to: "MySQL".into(), created_unix_ms: 0 },
+            Correction { from: "kubernetes".into(), to: "Kubernetes".into(), created_unix_ms: 0 },
+        ];
+        assert_eq!(
+            apply_corrections("Move my sequel and the Sequel table to kubernetes.", &fixes),
+            "Move MySQL and the SQL table to Kubernetes."
+        );
+        assert_eq!(apply_corrections("sequels stay", &fixes), "sequels stay");
+        assert_eq!(apply_corrections("", &fixes), "");
+    }
+
+    #[test]
+    fn diff_finds_the_changed_words_only() {
+        assert_eq!(
+            diff_fix("Please ask tie more about it.", "Please ask Taimoor about it."),
+            Some(("tie more".into(), "Taimoor".into()))
+        );
+        assert_eq!(diff_fix("same words", "same words"), None);
+        assert_eq!(diff_fix("a b c d e f g h", "one two three four five six seven eight"), None);
+        assert_eq!(diff_fix("I saw the cat", "I saw a cat"), None);
+    }
+
+    #[test]
+    fn forget_blocks_relearning_and_fix_unblocks() {
+        let mut memory = Memory::default();
+        let mut dict = vec!["Kaju".to_string()];
+        forget_word(&mut memory, &mut dict, "kaju");
+        assert!(dict.is_empty());
+        let added = learn(&mut memory, "We met Kaju today. Then Kaju came again.", &mut dict);
+        assert!(added.is_empty(), "{added:?}");
+        let added = learn_from_fix(&mut memory, "Kaju", &mut dict);
+        assert_eq!(added, vec!["Kaju".to_string()]);
+        assert!(memory.blocked.is_empty());
+    }
+
+    #[test]
+    fn pending_names_survive_as_data_and_learn_on_second_take() {
+        let mut memory = Memory::default();
+        let mut dict = Vec::new();
+        assert!(learn(&mut memory, "I spoke with Zubair yesterday.", &mut dict).is_empty());
+        assert_eq!(memory.pending, vec!["Zubair".to_string()]);
+        // A restart: memory comes back from disk.
+        let json = serde_json::to_string(&memory).unwrap();
+        let mut memory: Memory = serde_json::from_str(&json).unwrap();
+        assert_eq!(learn(&mut memory, "Call Zubair again.", &mut dict), vec!["Zubair".to_string()]);
+    }
+
+    #[test]
+    fn style_keeps_a_few_recent_plain_sentences() {
+        let mut memory = Memory::default();
+        add_style(&mut memory, "ok");
+        add_style(&mut memory, "یہ اردو ہے اور لمبا جملہ ہے");
+        assert!(memory.style.is_empty());
+        for n in 0..8 {
+            add_style(&mut memory, &format!("This is sentence number {n} today."));
+        }
+        assert_eq!(memory.style.len(), MAX_STYLE);
+        assert!(memory.style[0].contains('7'));
+    }
+
+    #[test]
+    fn forget_everything_clears_all() {
+        let mut memory = Memory::default();
+        add_correction(&mut memory, "x y", "XY", 1);
+        add_style(&mut memory, "One two three four five.");
+        let mut dict = vec!["GitHub".to_string()];
+        forget_everything(&mut memory, &mut dict);
+        assert!(dict.is_empty());
+        assert_eq!(memory, Memory::default());
+    }
+
+    #[test]
+    fn prompt_terms_are_newest_first_and_unique() {
+        let mut memory = Memory::default();
+        add_correction(&mut memory, "a", "Alpha", 1);
+        add_correction(&mut memory, "b", "Beta", 2);
+        add_correction(&mut memory, "c", "alpha", 3);
+        assert_eq!(prompt_terms(&memory), vec!["alpha".to_string(), "Beta".to_string()]);
+    }
+}

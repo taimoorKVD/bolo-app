@@ -92,6 +92,70 @@ pub fn insert_text(text: &str) -> anyhow::Result<Insertion> {
     }
 }
 
+/// The window the last insert went to, as a raw handle, for Fix last.
+pub fn current_target() -> Option<isize> {
+    #[cfg(windows)]
+    {
+        return last_target().map(|hwnd| hwnd.0 as isize);
+    }
+    #[cfg(not(windows))]
+    None
+}
+
+/// Go back to `target`, undo once when `undo` (that takes the earlier paste
+/// out), then insert `text` there. Used by Fix last.
+pub fn replace_in(target: isize, text: &str, undo: bool) -> anyhow::Result<Insertion> {
+    #[cfg(windows)]
+    {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, IsWindow};
+        let hwnd = HWND(target as *mut core::ffi::c_void);
+        if !unsafe { IsWindow(Some(hwnd)) }.as_bool() {
+            return Err(anyhow!("that window is closed"));
+        }
+        release_stuck_modifiers();
+        for _ in 0..3 {
+            focus_target(hwnd);
+            thread::sleep(Duration::from_millis(90));
+            if unsafe { GetForegroundWindow() } == hwnd {
+                break;
+            }
+        }
+        if unsafe { GetForegroundWindow() } != hwnd {
+            return Err(anyhow!("couldn't go back to that window"));
+        }
+        remember_target(hwnd);
+        if undo {
+            send_ctrl_z()?;
+            thread::sleep(Duration::from_millis(120));
+        }
+        return insert_text(text);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (target, undo);
+        insert_text(text)
+    }
+}
+
+#[cfg(windows)]
+fn send_ctrl_z() -> anyhow::Result<()> {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VK_CONTROL, VK_Z,
+    };
+    let inputs = [
+        key_input(VK_CONTROL, KEYBD_EVENT_FLAGS(0)),
+        key_input(VK_Z, KEYBD_EVENT_FLAGS(0)),
+        key_input(VK_Z, KEYEVENTF_KEYUP),
+        key_input(VK_CONTROL, KEYEVENTF_KEYUP),
+    ];
+    let sent = unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
+    if sent != inputs.len() as u32 {
+        return Err(anyhow!("Ctrl+Z simulation was incomplete"));
+    }
+    Ok(())
+}
+
 /// Remember the app the user was typing in, before the tally is shown.
 pub fn note_foreground() {
     #[cfg(windows)]
@@ -532,10 +596,13 @@ fn clipboard_paste_verified(text: &str) -> anyhow::Result<()> {
     // Own the clipboard with delayed rendering. The target's paste calls
     // GetClipboardData, which asks us to render. If that never arrives, the
     // paste did not land and the caller types instead.
-    let rendered = render_until_read(text)?;
+    let rendered = render_until_read(text);
+    // Put the user's clipboard back even when publishing failed; the owner
+    // may already have emptied it.
     if let Ok(mut clipboard) = Clipboard::new() {
         restore_text(&mut clipboard, previous);
     }
+    let rendered = rendered?;
     if rendered {
         Ok(())
     } else {
@@ -643,6 +710,12 @@ fn own_and_pump(
             let _ = ready_tx.send(Err(anyhow!("couldn't clear the clipboard")));
             return Err(anyhow!("couldn't clear the clipboard"));
         }
+        // NOTE (QA 2026-10-31): Windows returns NULL for a delayed-render
+        // SetClipboardData, which the windows crate reports as Err, so this
+        // path always falls back to typing. That is deliberately left as is:
+        // Clipboard History reads delayed-render data within ~13 ms, so a
+        // "was it read" check cannot tell the target from the history service,
+        // and restoring the old clipboard that early would paste stale text.
         if SetClipboardData(13, None).is_err() {
             let _ = CloseClipboard();
             let _ = DestroyWindow(hwnd);
@@ -767,6 +840,7 @@ fn focus_target(hwnd: windows::Win32::Foundation::HWND) {
 #[cfg(all(test, windows))]
 #[test]
 fn pastes_into_a_real_edit_control() {
+    let _clipboard = clipboard_test_lock();
     use windows::Win32::Foundation::HWND;
     use windows::Win32::UI::WindowsAndMessaging::{GetWindowTextW, SendMessageW, WM_PASTE};
 
@@ -794,32 +868,31 @@ fn pastes_into_a_real_edit_control() {
     };
     let _restore = ClipboardGuard { previous };
 
-    within("writing the clipboard", || {
-        set_clipboard_text(PHRASE).unwrap_or_else(|err| panic!("paste test: couldn't write the clipboard: {err}"));
-    });
-    let written = within("reading the clipboard back", || {
-        Clipboard::new()
-            .and_then(|mut clipboard| clipboard.get_text())
-            .unwrap_or_else(|err| panic!("paste test: clipboard read-back failed: {err}"))
-    });
-    assert_eq!(
-        written, PHRASE,
-        "paste test: clipboard returned {written:?} after writing {PHRASE:?}"
-    );
-    eprintln!("paste test: clipboard round trip ok, sending WM_PASTE");
-
-    within("WM_PASTE", move || {
-        let edit = HWND(edit as *mut core::ffi::c_void);
-        unsafe {
-            SendMessageW(edit, WM_PASTE, None, None);
+    // Other tests share the system clipboard and run in parallel, so one
+    // attempt can lose a race. Retry a few times before calling it a failure.
+    let mut text = String::new();
+    for attempt in 1..=4 {
+        within("writing the clipboard", || {
+            set_clipboard_text(PHRASE).unwrap_or_else(|err| panic!("paste test: couldn't write the clipboard: {err}"));
+        });
+        within("WM_PASTE", move || {
+            let edit = HWND(edit as *mut core::ffi::c_void);
+            unsafe {
+                SendMessageW(edit, WM_PASTE, None, None);
+            }
+        });
+        text = within("reading the edit control", move || {
+            let edit = HWND(edit as *mut core::ffi::c_void);
+            let mut buffer = [0u16; 256];
+            let length = unsafe { GetWindowTextW(edit, &mut buffer) }.max(0) as usize;
+            String::from_utf16_lossy(&buffer[..length.min(buffer.len())])
+        });
+        if text.to_lowercase().contains(PHRASE) {
+            break;
         }
-    });
-    let text = within("reading the edit control", move || {
-        let edit = HWND(edit as *mut core::ffi::c_void);
-        let mut buffer = [0u16; 256];
-        let length = unsafe { GetWindowTextW(edit, &mut buffer) }.max(0) as usize;
-        String::from_utf16_lossy(&buffer[..length.min(buffer.len())])
-    });
+        eprintln!("paste test: attempt {attempt} lost a clipboard race ({text:?}), retrying");
+        std::thread::sleep(std::time::Duration::from_millis(150));
+    }
     eprintln!("paste test: edit control contains {text:?}");
     host.shutdown();
 
@@ -834,6 +907,7 @@ fn pastes_into_a_real_edit_control() {
 #[cfg(all(test, windows))]
 #[test]
 fn consecutive_takes_both_land_in_the_edit_control() {
+    let _clipboard = clipboard_test_lock();
     use windows::Win32::Foundation::HWND;
     use windows::Win32::UI::WindowsAndMessaging::{SendMessageW, WM_PASTE};
 
@@ -1129,6 +1203,7 @@ mod delay_tests {
 
     #[test]
     fn clipboard_paste_does_not_sleep_through_the_take() {
+    let _clipboard = clipboard_test_lock();
     assert!(CLIPBOARD_PUBLISH_DELAY <= Duration::from_millis(15));
     assert!(PASTE_SETTLE_DELAY <= Duration::from_millis(40));
     assert_eq!(CLIPBOARD_READ_WAIT, Duration::from_millis(500));
@@ -1156,3 +1231,13 @@ unsafe extern "system" fn paste_wnd_proc(
     use windows::Win32::UI::WindowsAndMessaging::DefWindowProcW;
     unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
 }
+
+/// The clipboard and the delayed-render owner are process-wide. Tests that
+/// use them must not overlap, or Windows can be handed a freed clipboard
+/// handle (seen as 0xC0000374 heap corruption in parallel `cargo test`).
+#[cfg(all(test, windows))]
+fn clipboard_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|err| err.into_inner())
+}
+

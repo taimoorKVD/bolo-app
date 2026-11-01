@@ -26,6 +26,9 @@ pub struct Settings {
     pub language: String,
     pub dictionary: Vec<String>,
     pub launch_at_startup: bool,
+    /// Personal memory: learn names and fixes. Missing in 0.1.3, so it is on.
+    #[serde(default = "history_on")]
+    pub keep_learning: bool,
     /// Local transcript history. Missing in older files, so it stays on.
     #[serde(default = "history_on")]
     pub history_enabled: bool,
@@ -151,6 +154,7 @@ impl Default for Settings {
             smart_mood: false,
             smart_time_of_day: false,
             smart_holiday: false,
+            keep_learning: true,
         }
     }
 }
@@ -164,6 +168,10 @@ pub struct HistoryEntry {
     pub model: String,
     pub cleaned: bool,
     pub duration_ms: u64,
+    /// Spool folder whose audio is still kept, so Fix last can listen again.
+    /// Missing in 0.1.3 history files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_id: Option<String>,
 }
 
 pub fn prepare_settings(mut settings: Settings) -> Settings {
@@ -221,9 +229,11 @@ pub fn validate_settings(settings: &Settings) -> Result<(), String> {
         }
     }
     validate_hotkey(&settings.paste_hotkey)?;
-    match offline::normalize_model(&settings.offline_model) {
-        "off" | "base.en" | "small.en" => {}
-        _ => return Err("Choose base.en, small.en, or off for the on-device model.".into()),
+    if settings.paste_hotkey == settings.hotkey {
+        return Err("The paste-again shortcut must differ from the dictation shortcut.".into());
+    }
+    if !offline::is_known_model(&settings.offline_model) {
+        return Err("Choose base.en, small.en, or off for the on-device model.".into());
     }
     match settings.output.as_str() {
         "english" | "same" => {}
@@ -268,7 +278,7 @@ pub fn normalize_settings(mut settings: Settings) -> Settings {
             settings.microphone = None;
         }
     }
-    if validate_hotkey(&settings.paste_hotkey).is_err() {
+    if validate_hotkey(&settings.paste_hotkey).is_err() || settings.paste_hotkey == settings.hotkey {
         settings.paste_hotkey = Hotkey::paste_again();
     }
     settings.offline_model = offline::normalize_model(&settings.offline_model).to_string();
@@ -399,7 +409,7 @@ fn history_path(dir: &Path) -> PathBuf {
     dir.join("history.json")
 }
 
-fn write_atomic<T: Serialize + ?Sized>(path: &Path, value: &T) -> anyhow::Result<()> {
+pub(crate) fn write_atomic<T: Serialize + ?Sized>(path: &Path, value: &T) -> anyhow::Result<()> {
     let bytes = serde_json::to_vec_pretty(value)?;
     let tmp = path.with_extension("json.tmp");
     {
@@ -455,7 +465,7 @@ mod tests {
                     created_unix_ms: i,
                     model: WHISPER_TURBO.into(),
                     cleaned: false,
-                    duration_ms: 10,
+                    duration_ms: 10, audio_id: None,
                 },
             );
         }
@@ -522,7 +532,7 @@ mod tests {
                 created_unix_ms: 1,
                 model: WHISPER_TURBO.into(),
                 cleaned: false,
-                duration_ms: 400,
+                duration_ms: 400, audio_id: None,
             },
         );
         save_history(&dir, &history).unwrap();
@@ -555,7 +565,7 @@ mod carryover {
                 created_unix_ms: 1,
                 model: WHISPER_TURBO.into(),
                 cleaned: false,
-                duration_ms: 10,
+                duration_ms: 10, audio_id: None,
             }],
         )
         .unwrap();
@@ -600,7 +610,7 @@ mod carryover {
                 created_unix_ms: 1,
                 model: WHISPER_TURBO.into(),
                 cleaned: false,
-                duration_ms: 10,
+                duration_ms: 10, audio_id: None,
             }],
         )
         .unwrap();
@@ -644,5 +654,69 @@ mod carryover {
         let s = prepare_settings(s);
         assert_eq!(s.character, "c07");
         assert_eq!(s.sound_pack, "robot");
+    }
+
+    #[test]
+    fn upgrade_from_0_1_3_keeps_settings_history_and_words() {
+        // settings.json and history.json exactly as 0.1.3 wrote them.
+        let dir = std::env::temp_dir().join(format!("bolo-upgrade-{}-{}", std::process::id(), now_ms()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let old = r#"{
+  "hotkey": {"ctrl": true, "alt": false, "shift": false, "win": true, "key": null},
+  "microphone": "Microphone (Realtek(R) Audio)",
+  "model": "whisper-large-v3",
+  "cleanupEnabled": false,
+  "language": "ur",
+  "dictionary": ["Taimoor", "GitHub", "Bolo"],
+  "launchAtStartup": false,
+  "historyEnabled": true,
+  "pasteHotkey": {"ctrl": true, "alt": true, "shift": false, "win": false, "key": "v"},
+  "offlineModel": "base.en",
+  "output": "same",
+  "verbatim": true,
+  "cleanupModel": "openai/gpt-oss-20b",
+  "character": "c04",
+  "soundPack": "wood",
+  "soundVolume": 0.3,
+  "smartMood": true,
+  "smartTimeOfDay": false,
+  "smartHoliday": true
+}"#;
+        fs::write(dir.join("settings.json"), old).unwrap();
+        fs::write(
+            dir.join("history.json"),
+            r#"[{"id":"h1","text":"pehli baat","createdUnixMs":5,"model":"whisper-large-v3","cleaned":false,"durationMs":900}]"#,
+        )
+        .unwrap();
+        let loaded = load_settings(&dir);
+        assert_eq!(loaded.dictionary, vec!["Taimoor".to_string(), "GitHub".into(), "Bolo".into()]);
+        assert_eq!(loaded.microphone.as_deref(), Some("Microphone (Realtek(R) Audio)"));
+        assert_eq!(loaded.model, "whisper-large-v3");
+        assert!(!loaded.cleanup_enabled);
+        assert_eq!(loaded.language, "ur");
+        assert!(!loaded.launch_at_startup);
+        assert!(loaded.paste_hotkey.alt);
+        assert_eq!(loaded.output, "same");
+        assert!(loaded.verbatim);
+        assert_eq!(loaded.character, "c04");
+        assert!((loaded.sound_volume - 0.3).abs() < 1e-9);
+        assert!(loaded.smart_mood && loaded.smart_holiday && !loaded.smart_time_of_day);
+        // New in this build, defaulted on.
+        assert!(loaded.keep_learning);
+        let history = load_history(&dir);
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].text, "pehli baat");
+        assert!(history[0].audio_id.is_none());
+        // No memory.json yet: empty memory, and the 0.1.3 words stay in settings.
+        assert_eq!(crate::memory::load(&dir), crate::memory::Memory::default());
+        // Saving again keeps every old field and adds the new one.
+        save_settings(&dir, &loaded).unwrap();
+        let again = load_settings(&dir);
+        assert_eq!(again, loaded);
+        let raw: serde_json::Value = serde_json::from_str(&fs::read_to_string(dir.join("settings.json")).unwrap()).unwrap();
+        assert_eq!(raw["keepLearning"], serde_json::json!(true));
+        assert_eq!(raw["character"], serde_json::json!("c04"));
+        let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -118,6 +118,12 @@ pub fn whisper_prompt(words: &[String]) -> Option<String> {
     whisper_prompt_with(words, &[])
 }
 
+/// Whisper follows the prompt's language. The normal prompt is English
+/// (instructions, English terms, recent English takes), which pulled Urdu
+/// speech into English look-alike words ("behtari" -> "battery"). Urdu takes
+/// get an Urdu-script prompt instead.
+pub(crate) const URDU_PROMPT: &str = "یہ اردو میں بولی گئی بات ہے۔ بہتری، بہتر، ایپلیکیشن، اینیمیشن، بیک گراؤنڈ، ویب سائٹ، ڈیزائن۔";
+
 /// Dictionary terms plus the last couple of local transcripts, capped at 800 characters.
 pub fn whisper_prompt_with(words: &[String], recent: &[String]) -> Option<String> {
     let terms: Vec<&str> = words
@@ -202,6 +208,16 @@ pub struct Transcript {
     pub tries: u8,
     /// ISO-ish code from verbose_json (`en`, `ur`), or empty when the body omitted it.
     pub language: String,
+    /// Whisper's own confidence was low (avg_logprob / no_speech_prob).
+    pub doubtful: bool,
+}
+
+/// Milder than `should_retry`: worth offering Fix last, not worth a second call.
+pub fn doubtful(text: &str, avg_logprob: Option<f32>, no_speech_prob: Option<f32>) -> bool {
+    if text.trim().is_empty() {
+        return false;
+    }
+    avg_logprob.is_some_and(|value| value < -0.7) || no_speech_prob.is_some_and(|value| value > 0.5)
 }
 
 /// A second Whisper call is worth it when the first result is empty or the
@@ -210,19 +226,30 @@ pub struct Transcript {
 /// "Please try again in 3.2s" / "in 850ms" from a Groq 429 message.
 pub fn retry_after_ms(message: &str) -> Option<u64> {
     let at = message.find("try again in ")? + "try again in ".len();
-    let rest = &message[at..];
-    let num: String = rest.chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
-    let value: f64 = num.parse().ok()?;
-    let unit = &rest[num.len()..];
-    if unit.starts_with("ms") {
-        Some(value as u64)
-    } else if unit.starts_with('s') {
-        Some((value * 1000.0) as u64)
-    } else if unit.starts_with('m') {
-        Some((value * 60_000.0) as u64)
-    } else {
-        None
+    // Groq writes compound waits such as "1m30s" or "7m12.5s".
+    let mut rest = &message[at..];
+    let mut total = 0f64;
+    let mut parsed = false;
+    loop {
+        let num: String = rest.chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
+        let Ok(value) = num.parse::<f64>() else { break };
+        let unit = &rest[num.len()..];
+        let (scale, len) = if unit.starts_with("ms") {
+            (1.0, 2)
+        } else if unit.starts_with('s') {
+            (1000.0, 1)
+        } else if unit.starts_with('m') {
+            (60_000.0, 1)
+        } else if unit.starts_with('h') {
+            (3_600_000.0, 1)
+        } else {
+            break;
+        };
+        total += value * scale;
+        parsed = true;
+        rest = &unit[len..];
     }
+    parsed.then_some(total as u64)
 }
 
 /// Phrases Whisper invents on silence or noise.
@@ -269,25 +296,31 @@ pub async fn transcribe(
         first.text.clear();
     }
     if !should_retry(&first.text, first.avg_logprob, first.no_speech_prob) {
+        let doubt = doubtful(&first.text, first.avg_logprob, first.no_speech_prob);
         return Ok(Transcript {
             text: first.text,
             tries: 1,
             language: first.language,
+            doubtful: doubt,
         });
     }
     match request_audio(client, api_key, audio, TRANSCRIPTIONS, model, language, None, using_builtin).await {
         Ok(second) => {
             let chosen = prefer_attempt(first, second);
+            let doubt = doubtful(&chosen.text, chosen.avg_logprob, chosen.no_speech_prob);
             Ok(Transcript {
                 text: chosen.text,
                 tries: 2,
                 language: chosen.language,
+                doubtful: doubt,
             })
         }
         Err(_) if !first.text.trim().is_empty() => Ok(Transcript {
             text: first.text,
             tries: 2,
             language: first.language,
+            // The first try already looked bad enough to retry.
+            doubtful: true,
         }),
         Err(err) => Err(err),
     }
@@ -302,11 +335,13 @@ pub async fn translate_audio(
     using_builtin: bool,
 ) -> anyhow::Result<Transcript> {
     let first = request_audio(client, api_key, audio.clone(), TRANSLATIONS, WHISPER_LARGE, "", prompt, using_builtin).await?;
-    if !first.text.trim().is_empty() {
+    if !first.text.trim().is_empty() && !repetitive(&first.text) {
+        let doubt = doubtful(&first.text, first.avg_logprob, first.no_speech_prob);
         return Ok(Transcript {
             text: first.text,
             tries: 1,
             language: first.language,
+            doubtful: doubt,
         });
     }
     let second = request_audio(client, api_key, audio, TRANSLATIONS, WHISPER_LARGE, "", None, using_builtin).await?;
@@ -315,10 +350,12 @@ pub async fn translate_audio(
     } else {
         second.language
     };
+    let doubt = doubtful(&second.text, second.avg_logprob, second.no_speech_prob);
     Ok(Transcript {
         text: second.text,
         tries: 2,
         language,
+        doubtful: doubt,
     })
 }
 
@@ -654,11 +691,11 @@ fn mixed_urdu(text: &str) -> bool {
     has_arabic(text) && has_latin(text)
 }
 
-fn has_latin(text: &str) -> bool {
+pub(crate) fn has_latin(text: &str) -> bool {
     text.chars().any(|c| c.is_ascii_alphabetic())
 }
 
-fn has_arabic(text: &str) -> bool {
+pub(crate) fn has_arabic(text: &str) -> bool {
     text.chars().any(|c| {
         matches!(
             c,
@@ -675,6 +712,58 @@ fn has_arabic(text: &str) -> bool {
 struct VerboseSegment {
     avg_logprob: Option<f32>,
     no_speech_prob: Option<f32>,
+}
+
+fn words(text: &str) -> Vec<String> {
+    text.split(|c: char| !c.is_alphanumeric() && c != '\'')
+        .filter(|w| !w.is_empty())
+        .map(|w| w.to_lowercase())
+        .collect()
+}
+
+/// Whisper's looping failure: one short phrase repeated over and over
+/// ("So is there any, yeah. So is there any, yeah. ..."), which hides the rest
+/// of the speech. True when one 2-6 word phrase appears 3+ times and covers at
+/// least half the words.
+pub(crate) fn repetitive(text: &str) -> bool {
+    let tokens = words(text);
+    if tokens.len() < 6 {
+        return false;
+    }
+    for n in 2..=6usize {
+        if tokens.len() < n * 3 {
+            break;
+        }
+        let mut counts: std::collections::HashMap<&[String], usize> = std::collections::HashMap::new();
+        for gram in tokens.windows(n) {
+            *counts.entry(gram).or_default() += 1;
+        }
+        if let Some(best) = counts.values().max() {
+            if *best >= 3 && best * n * 2 >= tokens.len() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Last resort: drop sentences that repeat the one before them.
+pub(crate) fn collapse_repeats(text: &str) -> String {
+    let mut out: Vec<&str> = Vec::new();
+    let mut last: Vec<String> = Vec::new();
+    for piece in text.split_inclusive(['.', '?', '!', '\u{06D4}', '\u{061F}']) {
+        let key = words(piece);
+        if key.is_empty() {
+            out.push(piece);
+            continue;
+        }
+        if !last.is_empty() && last.ends_with(&key) {
+            continue;
+        }
+        last = key;
+        out.push(piece);
+    }
+    out.concat().trim().to_string()
 }
 
 #[cfg(test)]

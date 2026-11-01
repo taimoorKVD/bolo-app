@@ -89,6 +89,8 @@ pub struct AppState {
     /// so stop cannot miss a chunk the meter already took.
     pump_gate: Mutex<()>,
     last_text: Mutex<Option<String>>,
+    /// The newest pasted take, for Fix last.
+    pub last_take: Mutex<Option<crate::fixlast::LastTake>>,
 }
 
 impl AppState {
@@ -122,6 +124,7 @@ impl AppState {
             jobs: Mutex::new(pipeline::Jobs::new()),
             pump_gate: Mutex::new(()),
             last_text: Mutex::new(None),
+            last_take: Mutex::new(None),
         }
     }
 }
@@ -168,6 +171,8 @@ struct Outcome {
     staged: Staged,
     spool_id: String,
     engine: Option<String>,
+    /// Why Bolo doubts this take; the overlay offers Fix last only then.
+    unsure: Option<&'static str>,
 }
 
 struct TakeError {
@@ -666,6 +671,7 @@ fn enqueue(app: &AppHandle, audios: Vec<FinishedAudio>) {
     let settings = lock(&state.settings).clone();
     let recent: Vec<String> = lock(&state.history)
         .iter()
+        .filter(|entry| !crate::diag::was_translation(&entry.text))
         .take(2)
         .map(|entry| entry.text.clone())
         .collect();
@@ -887,8 +893,8 @@ async fn process(
     let (speech_language, speech_path) = speech_meta(&products);
     staged.speech_language = speech_language;
     staged.speech_path = speech_path;
-    let stitched = match pipeline::stitch_products(&products) {
-        Ok(text) => text,
+    let (stitched, partial_note) = match pipeline::stitch_partial(&products) {
+        Ok(pair) => pair,
         Err(message) => {
             let hint = products.iter().all(|product| product.silence || product.error.is_none())
                 && products.iter().any(|product| product.silence);
@@ -923,10 +929,15 @@ async fn process(
             // The transcript already exists. Keep it so paste-again can use it
             // even when cleanup cannot reach Groq.
             let _ = err;
+            let unsure = crate::unsure::reason(&crate::unsure::Signals {
+                cleanup_wanted: settings.cleanup_enabled && !settings.verbatim,
+                ..take_signals(&products, partial_note.is_some(), &stitched)
+            });
             return Ok(Outcome {
+                unsure,
                 text: stitched,
                 cleaned: false,
-                note: None,
+                note: partial_note,
                 duration_ms: clock.held_ms,
                 model: settings.model.clone(),
                 staged,
@@ -960,10 +971,17 @@ async fn process(
             staged,
         });
     }
+    let unsure = crate::unsure::reason(&crate::unsure::Signals {
+        cleanup_wanted: settings.cleanup_enabled && !settings.verbatim,
+        cleanup_why: staged.cleanup_why.clone(),
+        pasted: text.clone(),
+        ..take_signals(&products, partial_note.is_some(), &stitched)
+    });
     Ok(Outcome {
+        unsure,
         text,
         cleaned: cleaned.used_model,
-        note: cleaned.note,
+        note: partial_note.or(cleaned.note),
         duration_ms: clock.held_ms,
         model,
         staged,
@@ -973,8 +991,20 @@ async fn process(
 }
 
 async fn deliver(app: &AppHandle, mut outcome: Outcome, generation: u64) {
-    absorb_dictionary(app, &outcome.text);
+    // The user's own fixes (Fix last) apply to every new take.
+    let fixes = crate::memory::snapshot().corrections;
+    if !fixes.is_empty() {
+        outcome.text = crate::memory::apply_corrections(&outcome.text, &fixes);
+    }
+    // A translation's English words aren't the user's own terms; learning
+    // them put mis-heard junk ("Kaju", "Banning") into the next prompt.
+    if crate::diag::take_translated() {
+        crate::diag::remember_translation(&outcome.text);
+    } else {
+        absorb_dictionary(app, &outcome.text);
+    }
     let state = app.state::<AppState>();
+    crate::diag::flush(&state.config_dir, &outcome.spool_id, &outcome.text);
     spool::write_text(&state.config_dir, &outcome.spool_id, &outcome.text);
     *lock(&state.last_text) = Some(outcome.text.clone());
     let text = outcome.text.clone();
@@ -1009,9 +1039,13 @@ async fn deliver(app: &AppHandle, mut outcome: Outcome, generation: u64) {
     // as Typed, including when the field can't be read back.
     let word = insert::status_word(inserted.method, inserted.verified);
     let verified_paste = word == "Inserted";
-    if verified_paste {
-        spool::remove(&state.config_dir, &outcome.spool_id);
+    let partial = outcome.note.as_deref() == Some(pipeline::PARTIAL_NOTE);
+    if verified_paste && !partial {
+        // Keep the audio for Fix last; it is no longer a take to recover.
+        spool::mark_pasted(&state.config_dir, &outcome.spool_id);
     }
+    // Paste-again only ever uses the newest take, so a few is plenty.
+    spool::prune(&state.config_dir, &outcome.spool_id, 3);
     log_stages(app, &outcome.staged, release_ms);
     log_line(
         &state.config_dir,
@@ -1024,11 +1058,25 @@ async fn deliver(app: &AppHandle, mut outcome: Outcome, generation: u64) {
                 InsertMethod::Clipboard => "clipboard",
                 InsertMethod::Typed => "typed",
             },
-            inserted.verified,
+            match (inserted.method, inserted.verified) {
+                (_, true) => "true",
+                // Typing into an app that can't be read back (browsers, Electron)
+                // is not a failure; it just can't be confirmed.
+                (InsertMethod::Typed, false) => "unconfirmed",
+                (InsertMethod::Clipboard, false) => "changed",
+            },
             outcome.engine.as_deref().unwrap_or("none")
         ),
     );
-    remember(app, &outcome);
+    let history_id = remember(app, &outcome);
+    *lock(&state.last_take) = Some(crate::fixlast::LastTake {
+        spool_id: outcome.spool_id.clone(),
+        history_id,
+        text: outcome.text.clone(),
+        target: insert::current_target(),
+        at: Instant::now(),
+        verified_paste: verified_paste && matches!(inserted.method, InsertMethod::Clipboard),
+    });
     mark_idle(app);
     let (phase, fallback) = if verified_paste {
         ("done", "Inserted")
@@ -1046,14 +1094,81 @@ async fn deliver(app: &AppHandle, mut outcome: Outcome, generation: u64) {
             engine: outcome.engine.clone(),
         },
     );
-    schedule_hide(app.clone(), generation, DISMISS_MS);
+    if let Some(why) = outcome.unsure {
+        crate::logbuf::log_line(&state.config_dir, "info", &format!("unsure take ({why}); offering Fix last"));
+        schedule_fix_offer(app.clone(), generation);
+    }
+}
+
+/// After the done pose, offer "Fix last" in the overlay for a few seconds.
+/// Esc pressed while the Fix last card was showing.
+pub(crate) fn dismiss_fix_card(app: &AppHandle) {
+    if idle_generation(app).is_some() {
+        show_phase(app, "idle", None);
+    }
+}
+
+fn schedule_fix_offer(app: AppHandle, generation: u64) {
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(DISMISS_MS));
+        if !still_idle(&app, generation) {
+            return;
+        }
+        publish(
+            &app,
+            &DictationEvent {
+                phase: "fix".into(),
+                message: None,
+                elapsed_ms: 0,
+                level: 0.0,
+                engine: None,
+            },
+        );
+        schedule_hide(app, generation, FIX_OFFER_MS);
+    });
+}
+
+fn still_idle(app: &AppHandle, generation: u64) -> bool {
+    let state = app.state::<AppState>();
+    let engine = lock(&state.engine);
+    engine.generation == generation && matches!(engine.phase, Phase::Idle)
+}
+
+/// Idle, and the generation to pass to `schedule_hide`.
+pub(crate) fn idle_generation(app: &AppHandle) -> Option<u64> {
+    let state = app.state::<AppState>();
+    let engine = lock(&state.engine);
+    matches!(engine.phase, Phase::Idle).then_some(engine.generation)
+}
+
+pub(crate) fn hide_later(app: &AppHandle, delay_ms: u64) {
+    if let Some(generation) = idle_generation(app) {
+        schedule_hide(app.clone(), generation, delay_ms);
+    }
+}
+
+pub(crate) fn show_phase(app: &AppHandle, phase: &str, message: Option<String>) {
+    publish(
+        app,
+        &DictationEvent {
+            phase: phase.into(),
+            message,
+            elapsed_ms: 0,
+            level: 0.0,
+            engine: None,
+        },
+    );
 }
 
 fn absorb_dictionary(app: &AppHandle, text: &str) {
     let state = app.state::<AppState>();
+    if !lock(&state.settings).keep_learning {
+        return;
+    }
+    crate::memory::update(|memory| crate::memory::add_style(memory, text));
     let added = {
         let mut settings = lock(&state.settings);
-        let added = cleanup::learn_terms(text, &mut settings.dictionary);
+        let added = crate::memory::update(|memory| crate::memory::learn(memory, text, &mut settings.dictionary));
         if added.is_empty() {
             return;
         }
@@ -1126,6 +1241,18 @@ fn stage_line(staged: &Staged, release_ms: u64) -> String {
     line
 }
 
+fn take_signals(products: &[Product], partial: bool, raw: &str) -> crate::unsure::Signals {
+    crate::unsure::Signals {
+        paths: products.iter().map(|p| p.speech_path.clone()).filter(|p| !p.is_empty()).collect(),
+        engines: products.iter().filter(|p| !p.silence).map(|p| p.engine.clone()).collect(),
+        partial,
+        cleanup_wanted: false,
+        cleanup_why: String::new(),
+        raw: raw.to_string(),
+        pasted: raw.to_string(),
+    }
+}
+
 fn speech_meta(products: &[Product]) -> (String, String) {
     let language = products
         .iter()
@@ -1156,24 +1283,27 @@ fn quote_log(value: &str) -> String {
     format!("\"{}\"", value.replace('"', "'"))
 }
 
-fn remember(app: &AppHandle, outcome: &Outcome) {
+fn remember(app: &AppHandle, outcome: &Outcome) -> Option<String> {
     let state = app.state::<AppState>();
     if !lock(&state.settings).history_enabled {
-        return;
+        return None;
     }
+    let id = store::new_history_id();
     let entry = HistoryEntry {
-        id: store::new_history_id(),
+        id: id.clone(),
         text: outcome.text.clone(),
         created_unix_ms: store::now_ms(),
         model: outcome.model.clone(),
         cleaned: outcome.cleaned,
         duration_ms: outcome.duration_ms,
+        audio_id: Some(outcome.spool_id.clone()).filter(|id| !id.is_empty()),
     };
     let mut history = lock(&state.history);
     store::push_history(&mut history, entry);
     if let Err(err) = store::save_history(&state.config_dir, &history) {
         log_line(&state.config_dir, "error", &err);
     }
+    Some(id)
 }
 
 fn fail(app: &AppHandle, message: &str) {
@@ -1220,6 +1350,8 @@ fn show_problem(app: &AppHandle, message: &str, hide_ms: u64) {
 
 /// Long enough for the overlay's dismiss motion and sound, then the window hides.
 const DISMISS_MS: u64 = 700;
+/// How long the overlay offers "Fix last" after a paste.
+const FIX_OFFER_MS: u64 = 6_000;
 
 fn schedule_hide(app: AppHandle, generation: u64, delay_ms: u64) {
     std::thread::spawn(move || {
@@ -1257,10 +1389,13 @@ fn mark_idle(app: &AppHandle) {
 }
 
 fn publish(app: &AppHandle, event: &DictationEvent) {
+    crate::listener::FIX_CARD_ESC.store(event.phase == "fix", std::sync::atomic::Ordering::SeqCst);
     let _ = app.emit("dictation-state", event);
     let Some(overlay) = app.get_webview_window("overlay") else {
         return;
     };
+    // Only the Fix last offer takes clicks; every other pose lets them through.
+    let _ = overlay.set_ignore_cursor_events(event.phase != "fix");
     if event.phase == "idle" {
         let _ = overlay.hide();
         return;

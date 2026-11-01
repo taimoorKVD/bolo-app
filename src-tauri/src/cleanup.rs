@@ -11,6 +11,7 @@ use zeroize::Zeroize;
 /// Fast Groq instruct model. `llama-3.1-8b-instant` was removed for the
 /// developer tier on 16 Aug 2026 and now returns 404.
 pub const CLEANUP_MODEL: &str = "openai/gpt-oss-20b";
+const TRANSLATE_MODEL: &str = "openai/gpt-oss-120b";
 
 /// Tried in order when the preferred model is missing. The saved setting is
 /// first; these follow so a 404 does not fail the paste.
@@ -20,6 +21,7 @@ pub const CLEANUP_MODELS: &[&str] = &[
     "qwen/qwen3.6-27b",
 ];
 const CLEANUP_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(3000);
+const TRANSLATE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(9000);
 
 fn model_order(preferred: &str) -> Vec<String> {
     let mut out = Vec::new();
@@ -259,9 +261,13 @@ pub fn polish_locally(input: &str) -> String {
     apply_commands(&text)
 }
 
-fn polish_model_output(input: &str) -> String {
-    let text = apply_self_correction(input);
-    apply_commands(&text)
+/// The model already applied spoken corrections and punctuation. Only the
+/// unambiguous markers run again here: "I mean" and single words such as
+/// "period" are ordinary English ("what I mean is", "the trial period") in a
+/// rewrite, so they are left alone unless a single command word ends the take.
+pub(crate) fn polish_model_output(input: &str) -> String {
+    let text = self_correction(input, false);
+    commands_with(&text, true)
 }
 
 /// Remove standalone "um" / "uh" (and stretched forms like "umm").
@@ -338,9 +344,14 @@ pub async fn translate_preserving(
     if original.is_empty() {
         return skipped(String::new(), "empty");
     }
-    let system = "Translate this transcript into English. Preserve the meaning exactly. Do not add, drop, explain, or summarize. Keep names, numbers, and words that are already English unchanged. If the speech mixes Urdu and English, or Roman Urdu, translate only the parts that are not English. Return only the English text, with no preamble and no quotes.";
+    let system = "You translate a speech-to-text transcript of someone dictating in Urdu (often mixed with English words, sometimes Roman Urdu) into the natural English they meant. The transcript comes from automatic speech recognition and may contain mis-heard words; use the surrounding context to recover the intended word (for example a word that sounds like a tech term). Common mis-hearings: بیٹری (battery) is usually بہتری (improvement, betterment) unless a real battery fits; بہتر means better. Keep English words the speaker used, especially technical and product words (animation, background, box, responsive, robot, website, app), as they are. Translate faithfully and completely: every point the speaker made, in the same order, as clear first-person English. Do not summarize, add ideas, answer questions, or explain. Return only the English text, with no preamble and no quotes.";
     let max_tokens = (original.chars().count() as u32 / 2 + 96).clamp(64, 400);
-    let models = model_order(model);
+    // Urdu meaning needs the bigger model; the small one translated word by word.
+    let mut models = model_order(model);
+    if let Some(pos) = models.iter().position(|m| m == TRANSLATE_MODEL) {
+        let big = models.remove(pos);
+        models.insert(0, big);
+    }
     let mut missed = Vec::new();
     for model_id in &models {
         match post_chat(client, api_key, model_id, system, original, max_tokens, using_builtin).await {
@@ -515,7 +526,7 @@ async fn request_cleanup(
         format!(
             "Punctuate a dictation transcript. Return only those words.\n{}\nDo not add words. Do not drop words, except standalone um or uh, and except the words a spoken correction replaces (scratch that, no wait, I mean). Do not paraphrase, explain, or wrap the result in quotes.",
             style_line(tone)
-        )
+        ) + &style_samples_line()
     };
     let user = transcript.trim();
     let max_tokens = (transcript.chars().count() as u32 / 2 + if plain { 96 } else { 48 }).clamp(48, 320);
@@ -556,7 +567,7 @@ async fn post_chat(
     }
     let response = match client
         .post("https://api.groq.com/openai/v1/chat/completions")
-        .timeout(CLEANUP_TIMEOUT)
+        .timeout(if system.starts_with("You translate") { TRANSLATE_TIMEOUT } else { CLEANUP_TIMEOUT })
         .bearer_auth(api_key)
         .json(&body)
         .send()
@@ -677,6 +688,29 @@ struct GroqErrorDetail {
 
 /// Replace the last spoken self-correction and keep the words that survived it.
 pub fn apply_self_correction(input: &str) -> String {
+    self_correction(input, true)
+}
+
+/// "I mean" is a correction in "Email Sarah I mean Sam", not in
+/// "what I mean is" or "I mean it".
+fn i_mean_is_correction(words: &[&str], at: usize) -> bool {
+    const NOT_AFTER: &[&str] = &["what", "you", "i", "do", "if", "know"];
+    const NOT_BEFORE: &[&str] = &[
+        "is", "was", "it", "that", "this", "to", "by", "what", "well", "yes", "no", "really", "business",
+    ];
+    if at == 0 {
+        return false;
+    }
+    if NOT_AFTER.iter().any(|w| same_word(words[at - 1], w)) {
+        return false;
+    }
+    match words.get(at + 2) {
+        Some(next) => !NOT_BEFORE.iter().any(|w| same_word(next, w)),
+        None => false,
+    }
+}
+
+fn self_correction(input: &str, allow_i_mean: bool) -> String {
     let words: Vec<&str> = input.split_whitespace().collect();
     let markers: [&[&str]; 3] = [&["scratch", "that"], &["no", "wait"], &["i", "mean"]];
     let mut found: Option<(usize, usize)> = None;
@@ -684,6 +718,7 @@ pub fn apply_self_correction(input: &str) -> String {
         for marker in markers {
             if words.len() - index >= marker.len()
                 && marker.iter().zip(&words[index..]).all(|(want, got)| same_word(got, want))
+                && (marker[0] != "i" || (allow_i_mean && i_mean_is_correction(&words, index)))
             {
                 found = Some((index, marker.len()));
             }
@@ -709,6 +744,10 @@ pub fn apply_self_correction(input: &str) -> String {
 
 /// Spoken punctuation and line breaks. Longer phrases win over single words.
 pub fn apply_commands(input: &str) -> String {
+    commands_with(input, false)
+}
+
+fn commands_with(input: &str, strict: bool) -> String {
     let words: Vec<&str> = input.split_whitespace().collect();
     let commands: &[(&[&str], &str)] = &[
         (&["new", "paragraph"], "\n\n"),
@@ -725,10 +764,25 @@ pub fn apply_commands(input: &str) -> String {
         (&["period"], "."),
         (&["dash"], "—"),
     ];
-    apply_commands_plain(&words, commands)
+    apply_commands_plain(&words, commands, strict)
 }
 
-fn apply_commands_plain(words: &[&str], commands: &[(&[&str], &str)]) -> String {
+/// A lone command word after "the", "a", "trial"... is a noun, not punctuation.
+fn single_word_is_noun(words: &[&str], index: usize) -> bool {
+    const BEFORE: &[&str] = &[
+        "a", "an", "the", "this", "that", "each", "every", "per", "my", "your", "our", "their", "his",
+        "her", "its", "trial", "grace", "time", "waiting", "notice", "billing", "free", "first", "last",
+        "next", "same", "one", "long", "short", "em", "en",
+    ];
+    const AFTER: &[&str] = &["of", "cancer", "is", "was", "ends", "ended", "starts", "board", "cam"];
+    let before = index.checked_sub(1).map(|i| words[i]);
+    if before.is_some_and(|w| BEFORE.iter().any(|b| same_word(w, b))) {
+        return true;
+    }
+    words.get(index + 1).is_some_and(|w| AFTER.iter().any(|a| same_word(w, a)))
+}
+
+fn apply_commands_plain(words: &[&str], commands: &[(&[&str], &str)], strict: bool) -> String {
     let mut out = String::new();
     let mut index = 0;
     while index < words.len() {
@@ -736,6 +790,8 @@ fn apply_commands_plain(words: &[&str], commands: &[(&[&str], &str)]) -> String 
         for (phrase, insert) in commands {
             if words.len() - index >= phrase.len()
                 && phrase.iter().zip(&words[index..]).all(|(want, got)| same_word(got, want))
+                && (phrase.len() > 1
+                    || (!single_word_is_noun(words, index) && (!strict || index + 1 == words.len())))
             {
                 push_command(&mut out, insert);
                 index += phrase.len();
@@ -793,22 +849,80 @@ const LEARN_STOP: &[&str] = &[
     "Would", "Should", "Their", "They", "Them",
 ];
 
-/// Remember capitalized names that are not just the first word of the take.
+/// Ordinary English words that get capitalized at a sentence start or by the
+/// model and were being learned as "terms" (Then, Currently, Whatever, Easy,
+/// Override, Like, Urdu...). They're never worth putting in the prompt.
+const COMMON_WORDS: &[&str] = &[
+    "about", "above", "after", "again", "against", "also", "always", "another", "anyone", "anything", "around", "because",
+    "before", "being", "below", "between", "both", "bring", "cannot", "change", "check", "close", "come", "could",
+    "currently", "daily", "different", "doing", "done", "down", "during", "each", "early", "easy", "either", "else",
+    "enough", "even", "ever", "every", "everyone", "everything", "example", "fine", "first", "following", "from", "full",
+    "give", "going", "good", "great", "have", "having", "here", "however", "just", "keep", "kind", "know",
+    "last", "later", "least", "left", "less", "like", "little", "look", "made", "make", "many", "maybe",
+    "mean", "might", "more", "most", "much", "must", "need", "never", "next", "nice", "note", "nothing",
+    "number", "only", "open", "other", "over", "override", "part", "people", "place", "please", "point", "pretty",
+    "probably", "quite", "rather", "ready", "really", "right", "same", "says", "second", "seems", "send", "should",
+    "show", "side", "simple", "since", "small", "some", "something", "sometimes", "soon", "sorry", "start", "still",
+    "such", "sure", "take", "than", "thank", "thanks", "that", "their", "them", "then", "there", "these",
+    "thing", "things", "think", "this", "those", "though", "through", "time", "today", "together", "tomorrow", "totally",
+    "under", "until", "very", "want", "well", "were", "what", "whatever", "when", "where", "whether", "which",
+    "while", "will", "with", "within", "without", "work", "would", "wrong", "yeah", "year", "years", "your",
+    "hello", "okay", "alright", "actually", "basically", "literally", "anyway", "also", "maybe", "english", "urdu", "hindi",
+    "arabic", "project", "software", "architect", "system", "update", "version", "design", "section", "product", "page", "button",
+    "settings", "website", "application", "issue", "problem", "testing", "working", "words"
+];
+
+/// Test helper: `learn_terms_with` with a per-thread pending list.
+#[cfg(test)]
 pub fn learn_terms(text: &str, dictionary: &mut Vec<String>) -> Vec<String> {
+    thread_local! {
+        static PENDING: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+    PENDING.with(|pending| learn_terms_with(text, dictionary, &mut pending.borrow_mut(), &[]))
+}
+
+/// Remember brand/tech-shaped terms (GitHub, ReactJS, AWS, Win11) at once, and
+/// plain capitalized names only after they show up mid-sentence in two takes.
+/// Common English words and sentence-start words are never learned.
+/// `pending` holds names seen once and is saved in memory.json so it survives
+/// a restart. `blocked` words are never learned.
+pub fn learn_terms_with(
+    text: &str,
+    dictionary: &mut Vec<String>,
+    pending: &mut Vec<String>,
+    blocked: &[String],
+) -> Vec<String> {
     let mut added = Vec::new();
-    for (index, word) in text.split_whitespace().enumerate() {
+    let mut after_stop = true;
+    for word in text.split_whitespace() {
+        let sentence_start = after_stop;
+        after_stop = word.ends_with(['.', '?', '!', ':']);
         if added.len() >= 3 || dictionary.len() >= 200 {
             break;
         }
-        if index == 0 {
+        if sentence_start {
             continue;
         }
         let bare = word.trim_matches(|c: char| !c.is_ascii_alphanumeric());
         if !learnable(bare) {
             continue;
         }
+        if blocked.iter().any(|term| term.eq_ignore_ascii_case(bare)) {
+            continue;
+        }
         if dictionary.iter().any(|term| term.eq_ignore_ascii_case(bare)) {
             continue;
+        }
+        if !tech_shaped(bare) {
+            if let Some(pos) = pending.iter().position(|w| w.eq_ignore_ascii_case(bare)) {
+                pending.remove(pos);
+            } else {
+                pending.push(bare.to_string());
+                if pending.len() > 200 {
+                    pending.remove(0);
+                }
+                continue;
+            }
         }
         dictionary.push(bare.to_string());
         added.push(bare.to_string());
@@ -816,18 +930,50 @@ pub fn learn_terms(text: &str, dictionary: &mut Vec<String>) -> Vec<String> {
     added
 }
 
+/// A few of the user's own recent sentences, from memory.json.
+static STYLE: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+pub fn set_style(samples: Vec<String>) {
+    *STYLE.lock().unwrap_or_else(|e| e.into_inner()) = samples;
+}
+
+fn style_samples_line() -> String {
+    let samples = STYLE.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    if samples.is_empty() {
+        return String::new();
+    }
+    let joined: Vec<String> = samples.iter().take(3).map(|s| format!("\"{s}\"")).collect();
+    format!(
+        "\nFor reference only, this speaker usually writes like: {}. Match their spelling of names and their punctuation habits. Never copy words from these examples.",
+        joined.join(" ")
+    )
+}
+
+/// Internal capitals (GitHub), digits (Win11), or an acronym (AWS).
+fn tech_shaped(word: &str) -> bool {
+    let chars: Vec<char> = word.chars().collect();
+    let inner_upper = chars.iter().skip(1).any(|c| c.is_ascii_uppercase()) && chars.iter().any(|c| c.is_ascii_lowercase());
+    let digit = chars.iter().any(|c| c.is_ascii_digit()) && chars.iter().any(|c| c.is_ascii_alphabetic());
+    let acronym = chars.len() >= 2 && chars.len() <= 6 && chars.iter().all(|c| c.is_ascii_uppercase());
+    inner_upper || digit || acronym
+}
+
+pub fn is_common_word(word: &str) -> bool {
+    LEARN_STOP.iter().chain(COMMON_WORDS.iter()).any(|stop| stop.eq_ignore_ascii_case(word))
+}
+
 fn learnable(word: &str) -> bool {
     let chars: Vec<char> = word.chars().collect();
-    if chars.len() < 4 || chars.len() > 40 {
+    if chars.len() < 2 || chars.len() > 40 {
         return false;
     }
-    if !chars[0].is_uppercase() || !chars.iter().any(|c| c.is_lowercase()) {
+    if !chars.iter().all(|c| c.is_ascii_alphanumeric()) || !chars[0].is_ascii_alphabetic() {
         return false;
     }
-    if !chars.iter().all(|c| c.is_ascii_alphabetic()) {
+    if !tech_shaped(word) && (chars.len() < 4 || !chars[0].is_uppercase() || !chars.iter().any(|c| c.is_lowercase())) {
         return false;
     }
-    !LEARN_STOP.iter().any(|stop| stop.eq_ignore_ascii_case(word))
+    !is_common_word(word)
 }
 
 /// Best-effort wipe of a secret that is about to be dropped.
@@ -838,6 +984,18 @@ pub fn wipe(secret: &mut String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn never_learns_common_words_and_learns_tech_terms_at_once() {
+        let mut dictionary = Vec::new();
+        for _ in 0..3 {
+            learn_terms("Ok so Then we go. Currently it is Easy, Whatever, Override it Like that in Urdu and English", &mut dictionary);
+        }
+        assert!(dictionary.is_empty(), "{dictionary:?}");
+        let added = learn_terms("we deploy on GitHub with AWS and Win11", &mut dictionary);
+        assert_eq!(added, vec!["GitHub".to_string(), "AWS".to_string(), "Win11".to_string()]);
+        assert!(is_common_word("currently") && !is_common_word("Laravel"));
+    }
 
     #[test]
     fn missing_model_falls_through_the_list() {
@@ -924,7 +1082,8 @@ mod tests {
     #[test]
     fn learns_a_mid_sentence_name_and_skips_weekdays() {
         let mut dictionary = vec!["Bolo".into()];
-        let added = learn_terms("Meet Priya on Wednesday about Tauri", &mut dictionary);
+        assert!(learn_terms("Meet Priya on Wednesday about Tauri", &mut dictionary).is_empty());
+        let added = learn_terms("Call Priya then ship Tauri", &mut dictionary);
         assert_eq!(added, vec!["Priya".to_string(), "Tauri".to_string()]);
         assert!(dictionary.iter().any(|term| term == "Priya"));
         assert!(!dictionary.iter().any(|term| term == "Wednesday"));

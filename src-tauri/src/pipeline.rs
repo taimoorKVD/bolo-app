@@ -136,6 +136,28 @@ pub fn collect(mut flights: Vec<Flight>) -> Vec<Product> {
         .collect()
 }
 
+pub const PARTIAL_NOTE: &str = "Part of this take didn't transcribe. The rest was inserted, and the full recording is kept.";
+
+/// Like `stitch_products`, but a failed piece no longer throws away the pieces
+/// that did transcribe. Returns the text plus a note when something was lost.
+pub fn stitch_partial(products: &[Product]) -> Result<(String, Option<String>), String> {
+    match stitch_products(products) {
+        Ok(text) => Ok((text, None)),
+        Err(error) => {
+            let parts: Vec<&str> = products
+                .iter()
+                .filter(|p| p.error.is_none() && has_words(&p.text))
+                .map(|p| p.text.as_str())
+                .collect();
+            if parts.is_empty() {
+                Err(error)
+            } else {
+                Ok((crate::chunk::stitch(parts), Some(PARTIAL_NOTE.to_string())))
+            }
+        }
+    }
+}
+
 pub fn stitch_products(products: &[Product]) -> Result<String, String> {
     let mut failure = None;
     let mut parts = Vec::new();
@@ -233,6 +255,15 @@ fn transcribe_one(index: usize, audio: FinishedAudio, env: &JobEnv) -> Product {
     product
 }
 
+/// Signals from one Groq recognition that feed the "unsure" decision.
+#[derive(Default)]
+pub(crate) struct SpeechFlags {
+    /// A second pass (Urdu prompt or pinned language) replaced the first text.
+    pub(crate) repass: bool,
+    /// Whisper reported low confidence.
+    pub(crate) doubtful: bool,
+}
+
 pub(crate) struct Recognized {
     pub(crate) text: String,
     pub(crate) tries: u8,
@@ -243,7 +274,7 @@ pub(crate) struct Recognized {
 
 async fn recognize(bytes: Vec<u8>, env: &JobEnv) -> Result<Recognized, String> {
     let offline_model = env.settings.offline_model.clone();
-    let prompt = transcribe::whisper_prompt_with(&env.settings.dictionary, &env.recent);
+    let prompt = transcribe::whisper_prompt_with(&prompt_words(&env.settings.dictionary), &env.recent);
     let model = env.settings.model.clone();
     let language = env.settings.language.clone();
     let output = env.settings.output.clone();
@@ -331,8 +362,40 @@ pub(crate) async fn speech_with_groq(
     cleanup_model: &str,
     using_builtin: bool,
 ) -> anyhow::Result<Recognized> {
+    let mut flags = SpeechFlags::default();
+    let mut got = speech_with_groq_raw(client, api_key, audio, model, language, output, prompt, cleanup_model, using_builtin, &mut flags).await?;
+    if flags.repass {
+        got.path.push_str("-repass");
+    }
+    if flags.doubtful {
+        got.path.push_str("-lowconf");
+    }
+    crate::diag::note(format!("route path={} language={} text={}", got.path, got.language, got.text));
+    crate::diag::set_translated(got.path.contains("translate") || got.path.contains("mixed"));
+    if transcribe::repetitive(&got.text) {
+        crate::diag::note("loop detected in final text, collapsing");
+        got.text = transcribe::collapse_repeats(&got.text);
+        got.path = format!("{}-collapsed", got.path);
+    }
+    Ok(got)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn speech_with_groq_raw(
+    client: &reqwest::Client,
+    api_key: &str,
+    audio: Vec<u8>,
+    model: &str,
+    language: &str,
+    output: &str,
+    prompt: Option<&str>,
+    cleanup_model: &str,
+    using_builtin: bool,
+    flags: &mut SpeechFlags,
+) -> anyhow::Result<Recognized> {
     if transcribe::direct_translate(output, language) {
         let translated = transcribe::translate_audio(client, api_key, audio, prompt, using_builtin).await?;
+        flags.doubtful |= translated.doubtful;
         let code = transcribe::normalize_language(language).unwrap_or_else(|| "unknown".into());
         return Ok(Recognized {
             text: translated.text,
@@ -343,7 +406,11 @@ pub(crate) async fn speech_with_groq(
         });
     }
     let model = effective_model(model, language);
-    let mut spoken = transcribe::transcribe(client, api_key, audio.clone(), model, language, prompt.map(str::to_string), using_builtin).await?;
+    let urdu_set = transcribe::normalize_language(language).as_deref() == Some("ur");
+    let first_prompt = if urdu_set { Some(transcribe::URDU_PROMPT.to_string()) } else { prompt.map(str::to_string) };
+    crate::diag::note(format!("whisper#1 model={model} lang={language} prompt={:?}", first_prompt));
+    let mut spoken = transcribe::transcribe(client, api_key, audio.clone(), model, language, first_prompt, using_builtin).await?;
+    crate::diag::note(format!("whisper#1 detected={} text={}", spoken.language, spoken.text));
     if unlikely_language(language, &spoken.language) {
         // Short or accented English is sometimes detected as Spanish, Welsh,
         // etc., which then got translated and came out garbled. Bolo users
@@ -351,17 +418,42 @@ pub(crate) async fn speech_with_groq(
         // Urdu is often detected as Hindi and written in Devanagari, which an
         // Urdu speaker can't use. Pin Urdu for that case, English otherwise.
         let pin = if hindi_like(&spoken.language, &spoken.text) { "ur" } else { "en" };
-        if let Ok(pinned) = transcribe::transcribe(client, api_key, audio.clone(), model, pin, prompt.map(str::to_string), using_builtin).await {
+        let pin_prompt = if pin == "ur" { Some(transcribe::URDU_PROMPT.to_string()) } else { prompt.map(str::to_string) };
+        crate::diag::note(format!("repin lang={pin} prompt={:?}", pin_prompt));
+        if let Ok(pinned) = transcribe::transcribe(client, api_key, audio.clone(), model, pin, pin_prompt, using_builtin).await {
+            crate::diag::note(format!("repin text={}", pinned.text));
             if !pinned.text.trim().is_empty() {
                 let tries = spoken.tries.saturating_add(pinned.tries);
                 spoken = pinned;
                 spoken.tries = tries;
                 spoken.language = pin.into();
+                flags.repass = true;
             }
         }
     }
+    if urdu_needs_clean_pass(language, &spoken.language, &spoken.text) {
+        // Auto-detect heard Urdu but the English prompt leaked English
+        // look-alike words in. Transcribe again as Urdu with an Urdu prompt.
+        crate::diag::note("urdu clean pass (auto heard Urdu; redo with the Urdu prompt)");
+        if let Ok(pinned) = transcribe::transcribe(client, api_key, audio.clone(), model, "ur", Some(transcribe::URDU_PROMPT.to_string()), using_builtin).await {
+            crate::diag::note(format!("urdu clean pass text={}", pinned.text));
+            if !pinned.text.trim().is_empty() {
+                let tries = spoken.tries.saturating_add(pinned.tries);
+                spoken = pinned;
+                spoken.tries = tries;
+                spoken.language = "ur".into();
+                flags.repass = true;
+            }
+        }
+    }
+    flags.doubtful |= spoken.doubtful;
     let detected = spoken.language.clone();
-    let route = transcribe::speech_route(output, language, &detected, &spoken.text);
+    let mut route = transcribe::speech_route(output, language, &detected, &spoken.text);
+    // Whisper's audio translation loops and drops most of a long Urdu take.
+    // We already have the Urdu text, so translate that with the LLM instead.
+    if route == SpeechRoute::Translate && transcribe::has_arabic(&spoken.text) && !transcribe::repetitive(&spoken.text) {
+        route = SpeechRoute::Mixed;
+    }
     match route {
         SpeechRoute::Transcribe => Ok(Recognized {
             text: spoken.text,
@@ -372,6 +464,7 @@ pub(crate) async fn speech_with_groq(
         }),
         SpeechRoute::Translate => {
             let translated = transcribe::translate_audio(client, api_key, audio, prompt, using_builtin).await?;
+            flags.doubtful |= translated.doubtful;
             Ok(Recognized {
                 text: translated.text,
                 tries: spoken.tries.saturating_add(translated.tries),
@@ -381,8 +474,10 @@ pub(crate) async fn speech_with_groq(
             })
         }
         SpeechRoute::Mixed => {
+            crate::diag::note(format!("llm translate input={}", spoken.text));
             let outcome = cleanup::translate_preserving(client, api_key, &spoken.text, cleanup_model, using_builtin).await;
-            if outcome.used_model {
+            crate::diag::note(format!("llm translate used={} why={} loop={} output={}", outcome.used_model, outcome.why, transcribe::repetitive(&outcome.text), outcome.text));
+            if outcome.used_model && !transcribe::repetitive(&outcome.text) {
                 return Ok(Recognized {
                     text: outcome.text,
                     tries: spoken.tries,
@@ -391,25 +486,41 @@ pub(crate) async fn speech_with_groq(
                     path: "mixed-llama".into(),
                 });
             }
-            match transcribe::translate_audio(client, api_key, audio, prompt, using_builtin).await {
-                Ok(translated) => Ok(Recognized {
+            match transcribe::translate_audio(client, api_key, audio, None, using_builtin).await {
+                Ok(translated) if !transcribe::repetitive(&translated.text) || spoken.text.trim().is_empty() => Ok(Recognized {
                     text: translated.text,
                     tries: spoken.tries.saturating_add(translated.tries),
                     engine: "Groq".into(),
                     language: source_language(language, &detected),
                     path: "translate".into(),
                 }),
-                Err(_) if !spoken.text.trim().is_empty() => Ok(Recognized {
+                Ok(_) | Err(_) if !spoken.text.trim().is_empty() => Ok(Recognized {
                     text: spoken.text,
                     tries: spoken.tries,
                     engine: "Groq".into(),
                     language: source_language(language, &detected),
                     path: "transcribe".into(),
                 }),
+                Ok(translated) => Ok(Recognized {
+                    text: translated.text,
+                    tries: translated.tries,
+                    engine: "Groq".into(),
+                    language: source_language(language, &detected),
+                    path: "translate".into(),
+                }),
                 Err(err) => Err(err),
             }
         }
     }
+}
+
+/// Auto language, Whisper heard Urdu, and the text has Latin words in it,
+/// so the English prompt may have bent Urdu words into English ones.
+pub(crate) fn urdu_needs_clean_pass(setting: &str, detected: &str, _text: &str) -> bool {
+    // diag.log showed the English-prompt pass spelling بہتری as بیٹری
+    // ("battery") even in pure Urdu script, so any Urdu heard on auto gets
+    // the Urdu-prompt pass, not only takes with Latin words.
+    transcribe::normalize_language(setting).is_none() && transcribe::language_code(detected) == "ur"
 }
 
 /// Auto language and Whisper picked something other than English or Urdu.
@@ -451,6 +562,28 @@ fn should_fallback(err: &anyhow::Error) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn whisper_loops_are_detected_and_collapsed() {
+        let bad = "Ok, so is there any, yeah. So is there any, yeah. So is there any, yeah.";
+        assert!(transcribe::repetitive(bad));
+        assert_eq!(transcribe::collapse_repeats(bad), "Ok, so is there any, yeah.");
+        assert!(transcribe::repetitive("thank you thank you thank you thank you"));
+        assert!(!transcribe::repetitive("Ok, and then we need to work on their traffic side as well to get more and more traffic on this, on my website."));
+        assert!(!transcribe::repetitive("I said many things, but it only transcript the above line as it is."));
+        assert!(!transcribe::repetitive("very very good"));
+        let fine = "First point. Second point is different. Third one too.";
+        assert_eq!(transcribe::collapse_repeats(fine), fine);
+    }
+
+    #[test]
+    fn urdu_with_english_words_on_auto_gets_a_clean_urdu_pass() {
+        assert!(urdu_needs_clean_pass("auto", "urdu", "کیا کوئی battery باقی ہے"));
+        assert!(urdu_needs_clean_pass("auto", "urdu", "کیا کوئی بہتری باقی ہے"));
+        assert!(!urdu_needs_clean_pass("auto", "english", "is there any betterment left"));
+        assert!(!urdu_needs_clean_pass("ur", "urdu", "کیا کوئی battery باقی ہے"));
+        assert!(!transcribe::URDU_PROMPT.chars().any(|c| c.is_ascii_alphabetic()));
+    }
     #[test]
     fn urdu_capable_takes_use_the_full_model() {
         use crate::transcribe::{WHISPER_LARGE, WHISPER_TURBO};
@@ -506,4 +639,15 @@ mod tests {
         let err = stitch_products(&[product(0, "", "", Some("Groq is rate limiting requests right now."))]);
         assert!(err.unwrap_err().contains("rate limiting"));
     }
+}
+
+/// The words list plus what the user's fixes taught (Fix last).
+pub(crate) fn prompt_words(dictionary: &[String]) -> Vec<String> {
+    let mut words = dictionary.to_vec();
+    for term in crate::memory::prompt_terms(&crate::memory::snapshot()) {
+        if !words.iter().any(|word| word.eq_ignore_ascii_case(&term)) {
+            words.push(term);
+        }
+    }
+    words
 }

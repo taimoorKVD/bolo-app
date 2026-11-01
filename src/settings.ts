@@ -1,4 +1,5 @@
-import { api, onDictation, onListenerStatus, onMicStatus } from "./api";
+import { api, onDictation, onHistoryChanged, onListenerStatus, onMicStatus, onOpenFix } from "./api";
+import type { MemoryView } from "./types";
 import {
   CHARACTERS,
   DEFAULT_CHARACTER,
@@ -61,6 +62,7 @@ type SectionId =
   | "character"
   | "languages"
   | "history"
+  | "learned"
   | "advanced"
   | "key"
   | "engine"
@@ -77,6 +79,7 @@ const NAV: Array<[SectionId, string, string]> = [
   ["character", "☺", "Character & sounds"],
   ["languages", "◍", "Languages"],
   ["history", "↺", "History"],
+  ["learned", "✦", "What Bolo has learned"],
 ];
 
 /** Rows on the Advanced page. Each opens its own page. */
@@ -110,6 +113,7 @@ function normalizeSettings(settings: Settings): Settings {
     smartMood: settings.smartMood === true,
     smartTimeOfDay: settings.smartTimeOfDay === true,
     smartHoliday: settings.smartHoliday === true,
+    keepLearning: settings.keepLearning !== false,
   };
 }
 
@@ -209,6 +213,7 @@ function render(root: HTMLElement, draft: Draft): void {
     characterPanel(draft),
     languagePanel(draft),
     historyPanel(draft),
+    learnedPanel(draft),
     advancedPanel(draft),
     keyPanel(draft),
     enginePanel(draft),
@@ -244,6 +249,17 @@ function render(root: HTMLElement, draft: Draft): void {
   void onMicStatus((status) => applyDevices(draft, status.devices));
   void watchListener(draft, form);
   window.addEventListener("bolo-history", () => void refreshHistory(draft));
+  void onHistoryChanged(() => void refreshHistory(draft));
+  void onOpenFix((id) => {
+    void api.fixRequested().catch(() => {});
+    void openFixDialog(draft, id || null);
+  });
+  void api
+    .takeFixRequest()
+    .then((id) => {
+      if (id !== null && id !== undefined) void openFixDialog(draft, id || null);
+    })
+    .catch(() => {});
   window.setInterval(() => void paintMeter(), 120);
 }
 
@@ -1488,7 +1504,10 @@ function fillHistory(list: HTMLElement, draft: Draft): void {
         list.prepend(el("p", "field-note bad", messageOf(error)));
       });
     });
-    actions.append(copy, remove);
+    const fix = button("Fix", "ghost");
+    fix.title = "Listen again or type the right words";
+    fix.addEventListener("click", () => void openFixDialog(draft, entry.id));
+    actions.append(fix, copy, remove);
     item.append(body, actions);
     list.append(item);
   }
@@ -1801,4 +1820,241 @@ function normalizeKey(event: KeyboardEvent): string | null {
     Escape: "esc",
   };
   return map[event.key] ?? null;
+}
+
+// ---- What Bolo has learned -------------------------------------------------
+
+let memoryView: MemoryView | null = null;
+
+function learnedPanel(draft: Draft): HTMLElement {
+  const panel = panelEl(
+    "learned",
+    "What Bolo has learned",
+    "Bolo learns names, your fixes and how you write. All of it stays on this PC.",
+  );
+  panel.classList.add("learned-panel");
+  const body = el("div", "learned-body");
+  body.dataset.learned = "true";
+  body.append(el("p", "field-note", "Loading…"));
+  panel.append(body);
+  void refreshMemory(draft);
+  return panel;
+}
+
+async function refreshMemory(draft: Draft, view?: MemoryView): Promise<void> {
+  try {
+    memoryView = view ?? (await api.getMemory());
+  } catch (error) {
+    const body = document.querySelector<HTMLElement>("[data-learned]");
+    body?.replaceChildren(el("p", "field-note bad", messageOf(error)));
+    return;
+  }
+  // The backend already saved these. Keep the draft in step so autosave
+  // never writes back an older list.
+  draft.settings.dictionary = [...memoryView.words];
+  draft.settings.keepLearning = memoryView.keepLearning;
+  const area = document.querySelector<HTMLTextAreaElement>('[aria-label="Custom dictionary"]');
+  if (area && document.activeElement !== area) area.value = memoryView.words.join("\n");
+  fillLearned(draft);
+}
+
+function memoryAction(draft: Draft, run: () => Promise<MemoryView>): void {
+  void run()
+    .then((view) => refreshMemory(draft, view))
+    .catch((error) => {
+      const body = document.querySelector<HTMLElement>("[data-learned]");
+      body?.prepend(el("p", "field-note bad", messageOf(error)));
+    });
+}
+
+function fillLearned(draft: Draft): void {
+  const body = document.querySelector<HTMLElement>("[data-learned]");
+  const view = memoryView;
+  if (!body || !view) return;
+  body.replaceChildren();
+
+  body.append(
+    switchRow(
+      "Keep learning",
+      "Learn new names, fixes and style from what you say.",
+      view.keepLearning,
+      (on) => memoryAction(draft, () => api.setKeepLearning(on)),
+    ),
+  );
+
+  // Names and words
+  const words = el("div", "learned-section");
+  words.append(el("h3", "", "Names and words"), el("p", "field-note", "Bolo spells these the way you see them."));
+  const chips = el("div", "chips");
+  if (view.words.length === 0) chips.append(el("p", "field-note", "Nothing yet."));
+  for (const word of view.words) {
+    const chip = el("span", "chip");
+    chip.append(el("span", "chip-text", word));
+    const x = button("✕", "text");
+    x.className = "chip-x";
+    x.title = `Forget ${word}`;
+    x.setAttribute("aria-label", `Forget ${word}`);
+    x.addEventListener("click", () => memoryAction(draft, () => api.forgetWord(word)));
+    chip.append(x);
+    chips.append(chip);
+  }
+  const addRow = el("div", "add-word");
+  const input = document.createElement("input");
+  input.type = "text";
+  input.placeholder = "Add a name or word";
+  input.setAttribute("aria-label", "Add a name or word");
+  const add = button("Add", "ghost");
+  const doAdd = () => {
+    const w = input.value.trim();
+    if (w) memoryAction(draft, () => api.addWord(w));
+  };
+  add.addEventListener("click", doAdd);
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      doAdd();
+    }
+  });
+  addRow.append(input, add);
+  words.append(chips, addRow);
+
+  // Your fixes
+  const fixes = el("div", "learned-section");
+  fixes.append(el("h3", "", "Your fixes"), el("p", "field-note", "When Bolo hears the left side, it writes the right side."));
+  if (view.fixes.length === 0) fixes.append(el("p", "field-note", "No fixes yet. Use Fix on a History entry to teach Bolo."));
+  for (const fix of view.fixes) {
+    const row = el("div", "learned-row");
+    const text = el("p", "fix-pair");
+    text.append(el("span", "fix-from", fix.from), el("span", "fix-arrow", " → "), el("strong", "", fix.to));
+    const forget = button("Forget", "text");
+    forget.addEventListener("click", () => memoryAction(draft, () => api.forgetFix(fix.from)));
+    row.append(text, forget);
+    fixes.append(row);
+  }
+
+  // Your style
+  const style = el("div", "learned-section");
+  style.append(el("h3", "", "Your style"), el("p", "field-note", "Short examples so clean-up sounds like you. Never pasted as-is."));
+  if (view.style.length === 0) style.append(el("p", "field-note", "Nothing yet."));
+  view.style.forEach((sample, index) => {
+    const row = el("div", "learned-row");
+    row.append(el("p", "style-sample", `“${sample}”`));
+    const forget = button("Forget", "text");
+    forget.addEventListener("click", () => memoryAction(draft, () => api.forgetStyle(index)));
+    row.append(forget);
+    style.append(row);
+  });
+
+  const wipe = button("Forget everything", "ghost");
+  wipe.classList.add("danger");
+  wipe.addEventListener("click", () => {
+    if (wipe.dataset.confirm !== "1") {
+      wipe.dataset.confirm = "1";
+      wipe.textContent = "Click again to forget everything";
+      window.setTimeout(() => {
+        wipe.dataset.confirm = "";
+        wipe.textContent = "Forget everything";
+      }, 4000);
+      return;
+    }
+    memoryAction(draft, () => api.forgetEverything());
+  });
+  const foot = el("div", "learned-foot");
+  foot.append(wipe, el("p", "field-note", "Your History and settings are not touched."));
+  body.append(words, fixes, style, foot);
+}
+
+// ---- Fix last --------------------------------------------------------------
+
+let fixOpen = false;
+
+async function openFixDialog(draft: Draft, id: string | null): Promise<void> {
+  if (fixOpen) document.querySelector(".fix-dialog")?.remove();
+  let target;
+  try {
+    target = await api.fixTarget(id);
+  } catch (error) {
+    const status = document.querySelector<HTMLElement>("[data-save-status]");
+    if (status) {
+      status.textContent = messageOf(error);
+      status.className = "save-status bad is-shown";
+    }
+    return;
+  }
+  const fixId = target.id || null;
+  fixOpen = true;
+  const dialog = document.createElement("dialog");
+  dialog.className = "fix-dialog";
+  const close = () => {
+    fixOpen = false;
+    dialog.close();
+    dialog.remove();
+  };
+  dialog.addEventListener("cancel", () => {
+    fixOpen = false;
+    dialog.remove();
+  });
+  const head = el("div", "fix-head");
+  head.append(el("h2", "", target.isLast ? "Fix last dictation" : "Fix this dictation"));
+  const x = button("✕", "text");
+  x.setAttribute("aria-label", "Close");
+  x.addEventListener("click", close);
+  head.append(x);
+  const said = el("blockquote", "fix-said", target.text);
+  const note = el("p", "field-note", "");
+  note.setAttribute("aria-live", "polite");
+
+  const relisten = button("↻ Listen again carefully", "primary");
+  const relistenNote = el(
+    "p",
+    "field-note",
+    target.canRelisten
+      ? "Bolo listens to the same recording again with its most careful setting."
+      : "The recording for this one is gone. Type the right words instead.",
+  );
+  relisten.disabled = !target.canRelisten;
+
+  const area = document.createElement("textarea");
+  area.rows = 3;
+  area.value = target.text;
+  area.setAttribute("aria-label", "Type the right words");
+  const typeLabel = el("label", "fix-label", "Or type the right words");
+  const save = button("Save fix", "ghost");
+
+  const busy = (on: boolean) => {
+    relisten.disabled = on || !target.canRelisten;
+    save.disabled = on;
+  };
+  const done = (result: { text: string; message: string; learned: string[] }) => {
+    said.textContent = result.text;
+    area.value = result.text;
+    note.textContent = result.learned.length
+      ? `${result.message} Learned: ${result.learned.join(", ")}.`
+      : result.message;
+    note.className = "field-note good";
+    busy(false);
+    void refreshHistory(draft);
+    void refreshMemory(draft);
+  };
+  const fail = (error: unknown) => {
+    note.textContent = messageOf(error);
+    note.className = "field-note bad";
+    busy(false);
+  };
+  relisten.addEventListener("click", () => {
+    busy(true);
+    note.textContent = "Listening again…";
+    note.className = "field-note";
+    void api.fixRelisten(fixId).then(done).catch(fail);
+  });
+  save.addEventListener("click", () => {
+    const text = area.value.trim();
+    if (!text) return;
+    busy(true);
+    void api.fixWithText(fixId, text).then(done).catch(fail);
+  });
+
+  dialog.append(head, el("p", "fix-kicker", "Bolo wrote:"), said, relisten, relistenNote, typeLabel, area, save, note);
+  document.body.append(dialog);
+  dialog.showModal();
 }
