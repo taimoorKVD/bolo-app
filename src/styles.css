@@ -442,7 +442,7 @@ body.view-overlay.browser-preview .demo-row button {
   border: 1px solid var(--line); border-radius: 18px;
   background: radial-gradient(120% 140% at 0% 0%, var(--accent-soft), transparent 60%), var(--bg-raised);
 }
-.char-preview-clip { width: 214px; height: 120px; border-radius: 18px; object-fit: cover; background: #000; flex: none; }
+.char-preview-clip { width: 160px; height: 140px; border-radius: 18px; object-fit: contain; background: radial-gradient(circle at 50% 60%, rgba(198, 161, 90, 0.12), transparent 70%); flex: none; }
 .char-preview-copy { display: grid; gap: 6px; }
 .char-preview-name { font-family: "Iowan Old Style", Palatino, serif; font-size: 20px; }
 .char-pose-row { display: flex; gap: 6px; }
@@ -565,7 +565,8 @@ input.switch:disabled { opacity: .45; }
   .hero { grid-template-columns: 1fr; }
   .char-featured { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
-.hero-clip, .char-feature-clip { object-fit: cover; }
+.hero-clip { object-fit: cover; }
+.char-feature-clip { object-fit: contain; }
 .v2 button { white-space: nowrap; }
 .char-feature .char-card-name { white-space: normal; text-align: center; font-size: 13px; }
 .v2 .sidenav { grid-auto-flow: row; overflow: visible; padding-bottom: 0; }
