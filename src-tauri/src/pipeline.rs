@@ -642,9 +642,12 @@ mod tests {
 }
 
 /// The words list plus what the user's fixes taught (Fix last).
+/// My words and the built-in names come first, so they survive the prompt cap.
 pub(crate) fn prompt_words(dictionary: &[String]) -> Vec<String> {
-    let mut words = dictionary.to_vec();
-    for term in crate::memory::prompt_terms(&crate::memory::snapshot()) {
+    let memory = crate::memory::snapshot();
+    let mut words = crate::vocab::protected(&memory.my_words);
+    crate::vocab::set_current(words.clone());
+    for term in dictionary.iter().cloned().chain(crate::memory::prompt_terms(&memory)) {
         if !words.iter().any(|word| word.eq_ignore_ascii_case(&term)) {
             words.push(term);
         }

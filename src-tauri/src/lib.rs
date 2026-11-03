@@ -2,6 +2,7 @@ mod audio;
 mod builtin;
 mod chunk;
 mod cleanup;
+mod vocab;
 mod context;
 mod credentials;
 mod diag;

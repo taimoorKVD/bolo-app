@@ -36,6 +36,7 @@ pub struct MemoryView {
     pub fixes: Vec<Correction>,
     pub style: Vec<String>,
     pub keep_learning: bool,
+    pub my_words: Vec<String>,
 }
 
 #[derive(Serialize, Clone)]
@@ -72,6 +73,7 @@ fn view(state: &AppState) -> MemoryView {
         fixes: memory.corrections,
         style: memory.style,
         keep_learning: settings.keep_learning,
+        my_words: memory.my_words,
     }
 }
 
@@ -108,7 +110,10 @@ pub fn add_word(state: tauri::State<'_, AppState>, word: String) -> Result<Memor
         if !settings.dictionary.iter().any(|w| w.eq_ignore_ascii_case(&word)) {
             settings.dictionary.push(word.clone());
         }
-        memory::update(|m| m.blocked.retain(|w| !w.eq_ignore_ascii_case(&word)));
+        memory::update(|m| {
+            m.blocked.retain(|w| !w.eq_ignore_ascii_case(&word));
+            memory::add_my_word(m, &word);
+        });
         save_settings(&state, &settings)?;
     }
     Ok(view(&state))
@@ -335,6 +340,8 @@ pub async fn fix_with_text(app: AppHandle, id: Option<String>, text: String) -> 
         let added = memory::update(|m| {
             if let Some((from, to)) = &pair {
                 memory::add_correction(m, from, to, store::now_ms());
+                // The fixed spelling goes straight into My words.
+                memory::add_my_word(m, to);
             }
             let source = pair.as_ref().map(|(_, to)| to.clone()).unwrap_or_default();
             memory::learn_from_fix(m, &source, &mut settings.dictionary)
