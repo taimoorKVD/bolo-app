@@ -88,21 +88,52 @@ pub fn http_client() -> &'static reqwest::Client {
 /// Open a connection to Groq before the first take so the upload does not pay
 /// for TCP and TLS. The response body is irrelevant and the key is not sent.
 pub async fn prewarm(log_dir: &std::path::Path) {
-    let started = std::time::Instant::now();
-    let result = http_client().get("https://api.groq.com/").send().await;
-    let ms = started.elapsed().as_millis();
-    match result {
-        Ok(response) => crate::logbuf::log_line(
-            log_dir,
-            "info",
-            &format!("groq prewarm ms={ms} status={}", response.status().as_u16()),
-        ),
-        Err(err) => crate::logbuf::log_line(
-            log_dir,
-            "info",
-            &format!("groq prewarm ms={ms} error={err}"),
-        ),
+    // One retry: after resume or a network change the first attempt often
+    // fails instantly (DNS or Wi-Fi not back yet) and left the next take cold.
+    for attempt in 1..=PREWARM_TRIES {
+        let started = std::time::Instant::now();
+        let result = http_client().get("https://api.groq.com/").send().await;
+        let ms = started.elapsed().as_millis();
+        match result {
+            Ok(response) => {
+                crate::logbuf::log_line(
+                    log_dir,
+                    "info",
+                    &format!("groq prewarm ms={ms} attempt={attempt} status={}", response.status().as_u16()),
+                );
+                return;
+            }
+            Err(err) => {
+                crate::logbuf::log_line(
+                    log_dir,
+                    if attempt < PREWARM_TRIES { "info" } else { "warn" },
+                    &format!("groq prewarm ms={ms} attempt={attempt} error={}", error_chain(&err)),
+                );
+                if attempt < PREWARM_TRIES {
+                    let _ = tauri::async_runtime::spawn_blocking(|| std::thread::sleep(PREWARM_RETRY_DELAY)).await;
+                }
+            }
+        }
     }
+}
+
+const PREWARM_TRIES: u32 = 2;
+const PREWARM_RETRY_DELAY: Duration = Duration::from_secs(3);
+
+/// An error with its causes. reqwest's own text is only "error sending
+/// request for url (...)", which hid whether DNS, connect, or TLS failed.
+pub fn error_chain(err: &(dyn std::error::Error + 'static)) -> String {
+    let mut out = err.to_string();
+    let mut source = err.source();
+    while let Some(cause) = source {
+        let text = cause.to_string();
+        if !text.is_empty() && !out.contains(&text) {
+            out.push_str(": ");
+            out.push_str(&text);
+        }
+        source = cause.source();
+    }
+    out
 }
 
 pub fn normalize_model(model: &str) -> Option<&'static str> {
@@ -486,7 +517,7 @@ async fn request_audio_once(
         Ok(response) => response,
         Err(err) => {
             return Err(GroqFailure {
-                message: format!("couldn't reach Groq: {err}"),
+                message: format!("couldn't reach Groq: {}", error_chain(&err)),
                 kind: FailKind::Unavailable,
             })
         }
@@ -770,6 +801,26 @@ pub(crate) fn collapse_repeats(text: &str) -> String {
 mod tests {
     use super::*;
 
+    #[derive(Debug)]
+    struct Layer(&'static str, Option<Box<Layer>>);
+    impl std::fmt::Display for Layer {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(self.0)
+        }
+    }
+    impl std::error::Error for Layer {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            self.1.as_deref().map(|e| e as _)
+        }
+    }
+
+    #[test]
+    fn error_chain_shows_the_root_cause() {
+        let err = Layer("error sending request", Some(Box::new(Layer("dns error", Some(Box::new(Layer("No such host is known.", None)))))));
+        assert_eq!(error_chain(&err), "error sending request: dns error: No such host is known.");
+        let repeated = Layer("timed out", Some(Box::new(Layer("timed out", None))));
+        assert_eq!(error_chain(&repeated), "timed out");
+    }
     #[test]
     fn retry_after_is_parsed() {
         assert_eq!(retry_after_ms("Please try again in 3s. Need more"), Some(3000));
