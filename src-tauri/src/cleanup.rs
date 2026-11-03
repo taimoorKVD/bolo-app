@@ -282,7 +282,28 @@ pub fn strip_fillers(input: &str) -> String {
     tidy_spacing(&kept.join(" "))
 }
 
+/// The user's protected words, and the one kind of word change allowed.
+fn vocab_line() -> String {
+    let words = crate::vocab::current();
+    let mut line = String::from(
+        "\nIf a word is a sound-alike that makes no sense in the sentence (roots for wrote, there for their), use the word the whole sentence needs; change nothing else. Write a spoken \"dot com\" in a web address as .com.",
+    );
+    if !words.is_empty() {
+        line.push_str("\nSpell these exactly as written here, including case and dots: ");
+        line.push_str(&words.join(", "));
+        line.push('.');
+    }
+    line
+}
+
 pub fn accept_cleanup(original: &str, candidate: &str) -> bool {
+    accept_cleanup_with(original, candidate, &crate::vocab::current())
+}
+
+/// The rewrite may only reuse the transcript's words, except a few
+/// sound-alike swaps ("roots" -> "wrote") and words from the protected list
+/// ("taimoorhussain dot com" -> "taimoorhussain.com").
+pub fn accept_cleanup_with(original: &str, candidate: &str, vocab: &[String]) -> bool {
     let candidate = candidate.trim();
     if candidate.is_empty() {
         return false;
@@ -292,7 +313,7 @@ pub fn accept_cleanup(original: &str, candidate: &str) -> bool {
     if cand_words.is_empty() {
         return !orig_words.is_empty() && candidate.chars().count() <= 8;
     }
-    if !multiset_subset(&cand_words, &orig_words) {
+    if !multiset_subset(&cand_words, &orig_words) && !allowed_swaps(&cand_words, &orig_words, vocab) {
         return false;
     }
     let dropped = orig_words.len().saturating_sub(cand_words.len());
@@ -313,6 +334,46 @@ fn content_tokens(input: &str) -> Vec<String> {
             }
         })
         .collect()
+}
+
+fn allowed_swaps(candidate: &[String], original: &[String], vocab: &[String]) -> bool {
+    let mut left: Vec<&str> = original.iter().map(String::as_str).collect();
+    let mut extra: Vec<&str> = Vec::new();
+    for word in candidate {
+        if let Some(i) = left.iter().position(|w| *w == word.as_str()) {
+            left.swap_remove(i);
+        } else {
+            extra.push(word.as_str());
+        }
+    }
+    let protected: Vec<String> = vocab
+        .iter()
+        .flat_map(|w| {
+            let lower = w.to_lowercase();
+            let mut parts: Vec<String> = lower
+                .split_whitespace()
+                .map(|p| p.trim_matches(|c: char| !c.is_alphanumeric()).to_string())
+                .collect();
+            parts.push(lower.split_whitespace().collect());
+            parts
+        })
+        .collect();
+    let budget = (original.len() / 8).max(1);
+    let mut swaps = 0;
+    for word in extra {
+        if protected.iter().any(|p| p == word) {
+            continue;
+        }
+        let Some(i) = left.iter().position(|w| crate::vocab::sounds_alike(w, word)) else {
+            return false;
+        };
+        left.swap_remove(i);
+        swaps += 1;
+        if swaps > budget {
+            return false;
+        }
+    }
+    true
 }
 
 fn multiset_subset(candidate: &[String], original: &[String]) -> bool {
@@ -528,6 +589,7 @@ async fn request_cleanup(
             style_line(tone)
         ) + &style_samples_line()
     };
+    let system = system + &vocab_line();
     let user = transcript.trim();
     let max_tokens = (transcript.chars().count() as u32 / 2 + if plain { 96 } else { 48 }).clamp(48, 320);
     let text = post_chat(client, api_key, model, &system, user, max_tokens, using_builtin).await?;
@@ -561,7 +623,8 @@ async fn post_chat(
     if model.starts_with("openai/gpt-oss") {
         body["reasoning_effort"] = serde_json::json!("low");
         body["include_reasoning"] = serde_json::json!(false);
-        body["max_tokens"] = serde_json::json!(max_tokens + 512);
+        // 512 still ran out on a few long takes (6 "no text" in the log).
+        body["max_tokens"] = serde_json::json!(max_tokens + 1024);
     } else if model.starts_with("qwen/") {
         body["reasoning_effort"] = serde_json::json!("none");
     }
@@ -984,6 +1047,29 @@ pub fn wipe(secret: &mut String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cleanup_may_fix_homophones_and_protected_words_only() {
+        let vocab = crate::vocab::protected(&[]);
+        assert!(accept_cleanup_with("I roots the email yesterday", "I wrote the email yesterday.", &vocab));
+        assert!(accept_cleanup_with(
+            "send it to taimoorhussain dot com",
+            "Send it to taimoorhussain.com.",
+            &vocab
+        ));
+        assert!(accept_cleanup_with("open volo and start dictating", "Open Bolo and start dictating.", &vocab));
+        // Still rejected: added words, and too many swaps.
+        assert!(!accept_cleanup_with("ship it tomorrow", "Ship it tomorrow, boss.", &vocab));
+        assert!(!accept_cleanup_with("I roots the email", "I wrote the mail later", &vocab));
+        assert!(!accept_cleanup_with("their cat sat there", "There cats sit their", &vocab));
+    }
+
+    #[test]
+    fn cleanup_prompt_lists_protected_words() {
+        let line = vocab_line();
+        assert!(line.contains("taimoorhussain.com"));
+        assert!(line.contains("roots for wrote"));
+    }
 
     #[test]
     fn never_learns_common_words_and_learns_tech_terms_at_once() {

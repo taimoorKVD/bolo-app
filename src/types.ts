@@ -118,6 +118,7 @@ export type MemoryView = {
   fixes: Correction[];
   style: string[];
   keepLearning: boolean;
+  myWords?: string[];
 };
 
 export type FixTarget = { id: string; text: string; canRelisten: boolean; isLast: boolean };

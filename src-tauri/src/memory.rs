@@ -15,6 +15,7 @@ const MAX_CORRECTIONS: usize = 100;
 const MAX_STYLE: usize = 5;
 const MAX_PENDING: usize = 200;
 const MAX_BLOCKED: usize = 300;
+const MAX_MY_WORDS: usize = 100;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -35,6 +36,9 @@ pub struct Memory {
     pub blocked: Vec<String>,
     pub corrections: Vec<Correction>,
     pub style: Vec<String>,
+    /// "My words": names and terms the user added or fixed. Always first in
+    /// the Whisper prompt and kept exactly by cleanup.
+    pub my_words: Vec<String>,
 }
 
 impl Default for Memory {
@@ -45,6 +49,7 @@ impl Default for Memory {
             blocked: Vec::new(),
             corrections: Vec::new(),
             style: Vec::new(),
+            my_words: Vec::new(),
         }
     }
 }
@@ -77,6 +82,7 @@ fn migrate(mut memory: Memory) -> Memory {
     memory.corrections.truncate(MAX_CORRECTIONS);
     memory.style.truncate(MAX_STYLE);
     memory.pending.truncate(MAX_PENDING);
+    memory.my_words.truncate(MAX_MY_WORDS);
     memory
 }
 
@@ -247,12 +253,33 @@ pub fn add_style(memory: &mut Memory, text: &str) {
 pub fn forget_word(memory: &mut Memory, dictionary: &mut Vec<String>, word: &str) {
     dictionary.retain(|w| !w.eq_ignore_ascii_case(word));
     memory.pending.retain(|w| !w.eq_ignore_ascii_case(word));
+    memory.my_words.retain(|w| !w.eq_ignore_ascii_case(word));
     if !memory.blocked.iter().any(|w| w.eq_ignore_ascii_case(word)) {
         memory.blocked.push(word.to_string());
         if memory.blocked.len() > MAX_BLOCKED {
             memory.blocked.remove(0);
         }
     }
+}
+
+/// Pin a word or short name to "My words" (newest first). Returns true when
+/// it was added. Sentences and very long text are ignored.
+pub fn add_my_word(memory: &mut Memory, word: &str) -> bool {
+    let word = word.trim().trim_matches(|c: char| !c.is_alphanumeric());
+    if word.is_empty()
+        || word.chars().count() > 40
+        || word.split_whitespace().count() > 4
+        || !word.chars().any(char::is_alphabetic)
+    {
+        return false;
+    }
+    if memory.my_words.iter().any(|w| w.eq_ignore_ascii_case(word)) {
+        return false;
+    }
+    memory.blocked.retain(|w| !w.eq_ignore_ascii_case(word));
+    memory.my_words.insert(0, word.to_string());
+    memory.my_words.truncate(MAX_MY_WORDS);
+    true
 }
 
 pub fn forget_everything(memory: &mut Memory, dictionary: &mut Vec<String>) {
@@ -302,6 +329,22 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn my_words_take_short_fixes_and_forget_removes_them() {
+        let mut memory = Memory::default();
+        assert!(add_my_word(&mut memory, "Taimoor Hussain"));
+        assert!(!add_my_word(&mut memory, "taimoor hussain"));
+        assert!(!add_my_word(&mut memory, "this is a whole long sentence here"));
+        assert!(!add_my_word(&mut memory, "42"));
+        assert!(add_my_word(&mut memory, "Bolo.com."));
+        assert_eq!(memory.my_words, vec!["Bolo.com", "Taimoor Hussain"]);
+        let mut dictionary = vec!["Bolo.com".to_string()];
+        forget_word(&mut memory, &mut dictionary, "bolo.com");
+        assert_eq!(memory.my_words, vec!["Taimoor Hussain"]);
+        let old: Memory = serde_json::from_str("{\"version\":1}").unwrap();
+        assert!(old.my_words.is_empty());
     }
 
     #[test]

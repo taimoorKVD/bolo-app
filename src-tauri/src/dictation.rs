@@ -996,6 +996,8 @@ async fn deliver(app: &AppHandle, mut outcome: Outcome, generation: u64) {
     if !fixes.is_empty() {
         outcome.text = crate::memory::apply_corrections(&outcome.text, &fixes);
     }
+    // Names and sites from My words that were misheard ("Volo" -> "Bolo").
+    outcome.text = crate::vocab::correct(&outcome.text, &crate::vocab::current());
     // A translation's English words aren't the user's own terms; learning
     // them put mis-heard junk ("Kaju", "Banning") into the next prompt.
     if crate::diag::take_translated() {
