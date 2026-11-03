@@ -55,7 +55,8 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
-          npx tauri build --bundles nsis --config '{\"bundle\":{\"createUpdaterArtifacts\":true}}'
+          '{"bundle":{"createUpdaterArtifacts":true}}' | Set-Content updater.conf.json -Encoding utf8NoBOM
+          npx tauri build --bundles nsis --config updater.conf.json
           if ($LASTEXITCODE -ne 0) { throw "tauri build failed" }
       - name: Write latest.json
         shell: pwsh
