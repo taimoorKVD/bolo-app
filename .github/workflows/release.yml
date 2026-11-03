@@ -1,14 +1,21 @@
 name: Release
 
-# Push a tag like v0.1.6 (matching src-tauri/tauri.conf.json) to ship.
-# Mirrors scripts/release.ps1 (+ -StoreToo / publish-store.ps1), minus the version bump:
-# bump and commit the version first, then tag.
+# Real release: push a tag like v0.1.6 that matches src-tauri/tauri.conf.json.
+# Dry run: Actions > Release > Run workflow (dry_run = true). Builds, tests, signs,
+# makes latest.json and the .msixupload as run artifacts only. It never pushes the
+# website and never creates a GitHub Release, so users get nothing new.
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run: build and sign only, no website push, no GitHub Release"
+        type: boolean
+        default: true
 
 concurrency:
-  group: release
+  group: release-${{ github.ref }}
   cancel-in-progress: false
 
 permissions:
@@ -20,22 +27,27 @@ env:
   STORE_PUBLISHER: CN=3E755E45-53C2-4826-A318-2D528490BD69
   STORE_PUBLISHER_DISPLAY_NAME: Taimoor Hussain
   BASE_URL: https://bolo.thebetawebsite.com
+  # A manual run is a dry run unless dry_run is explicitly unticked AND it runs on a tag.
+  DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && (inputs.dry_run || !startsWith(github.ref, 'refs/tags/v')) }}
 
 jobs:
   build:
-    name: Test and build the signed installer
+    name: Test, build and sign the NSIS installer
     runs-on: windows-latest
     outputs:
       version: ${{ steps.ver.outputs.version }}
+      dry_run: ${{ steps.ver.outputs.dry_run }}
     steps:
       - uses: actions/checkout@v5
-      - name: Tag must match the app version
+      - name: Read version (tag must match on a real release)
         id: ver
         shell: pwsh
         run: |
           $v = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
-          if ("v$v" -ne $env:GITHUB_REF_NAME) { throw "Tag $env:GITHUB_REF_NAME does not match tauri.conf.json version $v" }
+          if ($env:DRY_RUN -ne 'true' -and "v$v" -ne $env:GITHUB_REF_NAME) { throw "Tag $env:GITHUB_REF_NAME does not match tauri.conf.json version $v" }
           "version=$v" >> $env:GITHUB_OUTPUT
+          "dry_run=$env:DRY_RUN" >> $env:GITHUB_OUTPUT
+          "Version $v, dry run: $env:DRY_RUN"
       - uses: actions/setup-node@v5
         with:
           node-version: 22
@@ -49,15 +61,31 @@ jobs:
       - name: cargo test (no --ignored)
         working-directory: src-tauri
         run: cargo test -- --test-threads=1
-      - name: Build the NSIS installer with updater signature
+      - name: Build the NSIS installer
+        shell: pwsh
+        run: |
+          # Updater artifacts are signed in the next step, so the build never prompts for a password.
+          '{"bundle":{"createUpdaterArtifacts":false}}' | Set-Content updater-off.conf.json -Encoding utf8NoBOM
+          npx tauri build --bundles nsis --config updater-off.conf.json
+          if ($LASTEXITCODE -ne 0) { throw "tauri build failed" }
+      - name: Write the updater key to a temp file
         shell: pwsh
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
-          '{"bundle":{"createUpdaterArtifacts":true}}' | Set-Content updater.conf.json -Encoding utf8NoBOM
-          npx tauri build --bundles nsis --config updater.conf.json
-          if ($LASTEXITCODE -ne 0) { throw "tauri build failed" }
+          if (-not $env:TAURI_SIGNING_PRIVATE_KEY) { throw "TAURI_SIGNING_PRIVATE_KEY secret is missing" }
+          [IO.File]::WriteAllText("$env:RUNNER_TEMP\updater.key", $env:TAURI_SIGNING_PRIVATE_KEY.Trim())
+      - name: Sign the installer (empty password via cmd, stdin closed so it cannot hang)
+        shell: cmd
+        timeout-minutes: 5
+        run: |
+          for %%f in (src-tauri\target\release\bundle\nsis\*_x64-setup.exe) do (
+            call npx tauri signer sign -f "%RUNNER_TEMP%\updater.key" -p "" "%%f" < NUL || exit /b 1
+          )
+      - name: Remove the temp key
+        if: always()
+        shell: pwsh
+        run: Remove-Item "$env:RUNNER_TEMP\updater.key" -ErrorAction SilentlyContinue
       - name: Write latest.json
         shell: pwsh
         run: |
@@ -66,11 +94,13 @@ jobs:
           $nsis = "src-tauri/target/release/bundle/nsis"
           $exe = Get-ChildItem $nsis -Filter "*_${v}_x64-setup.exe" | Select-Object -First 1
           if (-not $exe) { throw "No installer for $v in $nsis" }
+          if (-not (Test-Path "$($exe.FullName).sig")) { throw "Signature missing" }
           $sig = Get-Content "$($exe.FullName).sig" -Raw
           New-Item -ItemType Directory -Force out | Out-Null
           Copy-Item $exe.FullName "out/$name"
           Copy-Item "$($exe.FullName).sig" "out/$name.sig"
-          $notes = git tag -l --format='%(contents)' $env:GITHUB_REF_NAME
+          $notes = ""
+          if ($env:GITHUB_REF_TYPE -eq 'tag') { $notes = git tag -l --format='%(contents)' $env:GITHUB_REF_NAME }
           if (-not "$notes".Trim()) { $notes = "Bolo $v" }
           [ordered]@{
             version  = $v
@@ -78,17 +108,79 @@ jobs:
             pub_date = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
             platforms = @{ "windows-x86_64" = @{ signature = $sig.Trim(); url = "$env:BASE_URL/downloads/$name" } }
           } | ConvertTo-Json -Depth 5 | Set-Content out/latest.json -Encoding utf8NoBOM
+          Get-ChildItem out | Format-Table Name, Length
+      - name: Verify the signature against the app's public key
+        shell: pwsh
+        run: |
+          # The .sig is base64 of a minisign signature; check it names the same key id as tauri.conf.json's pubkey.
+          $pub = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String((Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).plugins.updater.pubkey))
+          $sig = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String((Get-Content (Get-ChildItem out -Filter *.sig).FullName -Raw).Trim()))
+          $pubId = [Convert]::FromBase64String(($pub -split "`n")[1].Trim())[2..9]
+          $sigId = [Convert]::FromBase64String(($sig -split "`n")[1].Trim())[2..9]
+          if (Compare-Object $pubId $sigId) { throw "Installer was signed with a different key than tauri.conf.json trusts" }
+          "Signature key id matches the updater pubkey"
       - uses: actions/upload-artifact@v4
         with:
           name: nsis
           path: out/
           if-no-files-found: error
 
+  store:
+    name: Build the .msixupload
+    needs: build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          package-manager-cache: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target-store
+      - run: npm ci
+      - name: Build MSIX (no in-app updater) and wrap it as .msixupload
+        shell: pwsh
+        run: |
+          $v = "${{ needs.build.outputs.version }}.0"
+          ./scripts/build-msix.ps1 -IdentityName $env:STORE_IDENTITY_NAME -Publisher $env:STORE_PUBLISHER `
+            -PublisherDisplayName $env:STORE_PUBLISHER_DISPLAY_NAME -Version $v
+          $msix = "target-msix/Bolo_${v}_x64.msix"
+          if (-not (Test-Path $msix)) { throw "Missing $msix" }
+          Compress-Archive -Path $msix -DestinationPath "target-msix/Bolo_${v}_x64.zip" -Force
+          Move-Item "target-msix/Bolo_${v}_x64.zip" "target-msix/Bolo_${v}_x64.msixupload" -Force
+          Get-ChildItem target-msix | Format-Table Name, Length
+      # Optional: automatic Store submission. Needs Partner Center API access (MSSTORE_* secrets).
+      # Uncomment when those secrets exist; until then upload the .msixupload in Partner Center by hand.
+      # - uses: microsoft/setup-msstore-cli@v1
+      # - name: Submit to Partner Center
+      #   if: env.DRY_RUN != 'true'
+      #   shell: pwsh
+      #   env:
+      #     MSSTORE_TENANT_ID: ${{ secrets.MSSTORE_TENANT_ID }}
+      #     MSSTORE_SELLER_ID: ${{ secrets.MSSTORE_SELLER_ID }}
+      #     MSSTORE_CLIENT_ID: ${{ secrets.MSSTORE_CLIENT_ID }}
+      #     MSSTORE_CLIENT_SECRET: ${{ secrets.MSSTORE_CLIENT_SECRET }}
+      #   run: |
+      #     msstore reconfigure --tenantId $env:MSSTORE_TENANT_ID --sellerId $env:MSSTORE_SELLER_ID `
+      #       --clientId $env:MSSTORE_CLIENT_ID --clientSecret $env:MSSTORE_CLIENT_SECRET
+      #     if ($LASTEXITCODE -ne 0) { throw "msstore reconfigure failed" }
+      #     msstore publish "target-msix/Bolo_${{ needs.build.outputs.version }}.0_x64.msix" --appId $env:STORE_APP_ID
+      #     if ($LASTEXITCODE -ne 0) { throw "msstore publish failed (a pending submission blocks this)" }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: msix
+          path: target-msix/*.msixupload
+          if-no-files-found: error
+
   website:
-    # Same as 0.1.4: the site is a git checkout on the server. Committing to
+    # Same as 0.1.4/0.1.5: the site is a git checkout on the server. Pushing to
     # bolo-website triggers its own Deploy workflow, which pulls on the server.
     name: Publish installer + latest.json to bolo.thebetawebsite.com
-    needs: build
+    needs: [build, store]
+    if: needs.build.outputs.dry_run != 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -121,6 +213,7 @@ jobs:
           git config user.name "bolo-release-bot"
           git config user.email "bolo-release-bot@users.noreply.github.com"
           git add -A
+          git diff --cached --quiet && { echo "Website already has this version"; exit 0; }
           git commit -m "Bolo ${{ needs.build.outputs.version }}"
           git push
       - name: Smoke test after deploy
@@ -132,54 +225,14 @@ jobs:
           done
           echo "::error::latest.json did not show the new version within 10 minutes"; exit 1
 
-  store:
-    name: Build MSIX and submit to the Microsoft Store
-    needs: build
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
-        with:
-          node-version: 22
-          cache: npm
-          package-manager-cache: false
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: swatinem/rust-cache@v2
-        with:
-          workspaces: src-tauri -> target-store
-      - run: npm ci
-      - name: Build MSIX (no in-app updater)
-        shell: pwsh
-        run: |
-          ./scripts/build-msix.ps1 -IdentityName $env:STORE_IDENTITY_NAME -Publisher $env:STORE_PUBLISHER `
-            -PublisherDisplayName $env:STORE_PUBLISHER_DISPLAY_NAME -Version "${{ needs.build.outputs.version }}.0"
-      - uses: microsoft/setup-msstore-cli@v1
-      - name: Submit to Partner Center
-        shell: pwsh
-        env:
-          MSSTORE_TENANT_ID: ${{ secrets.MSSTORE_TENANT_ID }}
-          MSSTORE_SELLER_ID: ${{ secrets.MSSTORE_SELLER_ID }}
-          MSSTORE_CLIENT_ID: ${{ secrets.MSSTORE_CLIENT_ID }}
-          MSSTORE_CLIENT_SECRET: ${{ secrets.MSSTORE_CLIENT_SECRET }}
-        run: |
-          msstore reconfigure --tenantId $env:MSSTORE_TENANT_ID --sellerId $env:MSSTORE_SELLER_ID `
-            --clientId $env:MSSTORE_CLIENT_ID --clientSecret $env:MSSTORE_CLIENT_SECRET
-          if ($LASTEXITCODE -ne 0) { throw "msstore reconfigure failed" }
-          $msix = "target-msix/Bolo_${{ needs.build.outputs.version }}.0_x64.msix"
-          msstore publish $msix --appId $env:STORE_APP_ID
-          if ($LASTEXITCODE -ne 0) { throw "msstore publish failed (a pending submission in Partner Center blocks this)" }
-      - uses: actions/upload-artifact@v4
-        with:
-          name: msix
-          path: target-msix/*.msix
-
   github-release:
     name: GitHub Release
-    needs: [build, website]
+    needs: [build, store, website]
+    if: needs.build.outputs.dry_run != 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
-        with: { name: nsis, path: out }
+        with: { path: out, merge-multiple: true }
       - uses: softprops/action-gh-release@v2
         with:
           name: Bolo ${{ needs.build.outputs.version }}
@@ -187,3 +240,4 @@ jobs:
             out/*.exe
             out/*.sig
             out/latest.json
+            out/*.msixupload
