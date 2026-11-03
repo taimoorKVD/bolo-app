@@ -108,11 +108,20 @@ impl LiveTake {
 
 /// Probe every input in the background and move off a silent one before the
 /// user's next take, instead of failing that take first.
+static PROBING: AtomicBool = AtomicBool::new(false);
+
 fn spawn_probe(watch: Arc<Watch>, delay_ms: u64) {
+    if PROBING.swap(true, Ordering::AcqRel) {
+        return;
+    }
     let _ = std::thread::Builder::new().name("bolo-probe".into()).spawn(move || {
         std::thread::sleep(Duration::from_millis(delay_ms));
         let found = crate::audio::probe_inputs();
-        let silent: Vec<&str> = found.iter().filter(|(_, peak)| *peak < 0.0005).map(|(n, _)| n.as_str()).collect();
+        PROBING.store(false, Ordering::Release);
+        // Let the capture loop compare its device with the new best pick
+        // (e.g. a jack proved silent, or a built-in array proved live).
+        watch.default_event.store(true, Ordering::Relaxed);
+        let silent: Vec<&str> = found.iter().filter(|(_, peak)| *peak < crate::audio::SILENT_PEAK).map(|(n, _)| n.as_str()).collect();
         if let Some(dir) = &watch.config_dir {
             crate::logbuf::log_line(dir, "info", &format!("mic probe inputs={} silent={}", found.len(), silent.len()));
         }
@@ -229,6 +238,13 @@ struct Capture {
     take_mark_len: usize,
     /// Set on the first sample that arrives after that copy.
     first_sample: Arc<Mutex<Option<Instant>>>,
+    /// When the current take was armed.
+    take_started: Option<Instant>,
+    /// Samples and peak delivered by the device since the take was armed.
+    take_fresh: usize,
+    take_peak: f32,
+    /// The take already moved off a silent microphone once.
+    take_failed_over: bool,
 }
 
 impl Capture {
@@ -248,6 +264,10 @@ impl Capture {
             take_silence_ms: 0,
             take_mark_len: 0,
             first_sample: Arc::new(Mutex::new(None)),
+            take_started: None,
+            take_fresh: 0,
+            take_peak: 0.0,
+            take_failed_over: false,
         }
     }
 
@@ -415,9 +435,14 @@ fn handle_cmd(cmd: Cmd, state: &Arc<Mutex<Capture>>, watch: &Watch, next_id: &mu
             }
         }
         Cmd::End { id, reply } => {
+            let held_ms = state
+                .lock()
+                .ok()
+                .and_then(|guard| guard.take_started.map(|at| at.elapsed().as_millis() as u64))
+                .unwrap_or(0);
             let result = disarm_take(state, id);
             if let Ok(finished) = &result {
-                check_silent_device(finished, watch);
+                check_silent_device(finished, held_ms, watch);
             }
             let _ = reply.send(result);
         }
@@ -461,6 +486,17 @@ fn io_loop(state: Arc<Mutex<Capture>>, live: Arc<AtomicBool>, watch: Arc<Watch>)
             plan_reopen(have_stream, ever_opened, preference_dirty, default_event, names_differ)
         };
 
+        if reason.is_none() && have_stream {
+            let armed_dead = state
+                .lock()
+                .ok()
+                .and_then(|g| g.take_started.map(|at| (at, g.take_failed_over, g.take_fresh, g.take_peak)))
+                .is_some_and(|(at, done, fresh, peak)| take_is_dead(at.elapsed().as_millis() as u64, fresh, peak, done));
+            let device_count = if armed_dead { audio::host_mics(&host).map(|d| d.len()).unwrap_or(0) } else { 0 };
+            if armed_dead && fail_over_dead_take(&state, &watch, device_count) {
+                continue;
+            }
+        }
         if reason.is_none() {
             if preference_dirty && !matches!(names, NameCheck::Unknown) {
                 seen_preference = watch.preference_epoch.load(Ordering::Relaxed);
@@ -531,33 +567,65 @@ enum NameCheck {
     Unknown,
 }
 
-/// On "Automatic", a take of pure digital silence means the default input is
-/// dead (typically an empty headset jack). Remember it and reopen on the next
-/// device so the following take works. Any signal clears the mark.
-fn check_silent_device(finished: &FinishedAudio, watch: &Watch) {
-    let frames = finished.interleaved.len() / finished.channels.max(1) as usize;
-    if finished.sample_rate == 0 || frames < (finished.sample_rate as usize) * 6 / 10 {
-        return;
-    }
+/// A take of pure digital silence (or no bytes at all) means the microphone
+/// is dead, typically an empty headset jack. Remember it and reopen on the
+/// next device so the following take works. Any signal marks the mic as live.
+fn check_silent_device(finished: &FinishedAudio, held_ms: u64, watch: &Watch) {
     let name = watch.active_name.lock().unwrap_or_else(|err| err.into_inner()).clone();
     if name.is_empty() {
         return;
     }
+    let frames = finished.interleaved.len() / finished.channels.max(1) as usize;
+    let long_enough = held_ms >= 600
+        || (finished.sample_rate > 0 && frames >= (finished.sample_rate as usize) * 6 / 10);
     let peak = audio::peak_level(&finished.interleaved);
-    let auto = watch
-        .preference
-        .lock()
-        .unwrap_or_else(|err| err.into_inner())
-        .as_deref()
-        .map_or(true, |pref| pref.trim().is_empty());
-    if peak < 0.0005 {
-        if auto && audio::mark_silent_mic(&name) {
-            log_warm(watch, &format!("mic silent peak={peak:.6} device=\"{name}\"; switching to another microphone"));
-            watch.force_reopen.store(true, Ordering::Relaxed);
-        }
-    } else {
-        audio::clear_silent_mic(&name);
+    if peak >= audio::SILENT_PEAK {
+        audio::mark_live_mic(&name);
+        return;
     }
+    if long_enough && audio::mark_silent_mic(&name) {
+        log_warm(
+            watch,
+            &format!("mic silent peak={peak:.6} frames={frames} device=\"{name}\"; switching to another microphone"),
+        );
+        watch.force_reopen.store(true, Ordering::Relaxed);
+    }
+}
+
+/// True when an armed take has run long enough on a device that delivered
+/// nothing but zeros (or no samples at all) since the key went down.
+fn take_is_dead(elapsed_ms: u64, fresh_samples: usize, peak: f32, failed_over: bool) -> bool {
+    !failed_over && elapsed_ms >= DEAD_TAKE_MS && (fresh_samples == 0 || peak < audio::SILENT_PEAK)
+}
+
+const DEAD_TAKE_MS: u64 = 600;
+
+/// While a take is recording, move it off a dead microphone onto one that
+/// hears. The silent part is dropped (it holds no speech, and the new device
+/// may use another format), and the rest of the take is captured on the new mic.
+fn fail_over_dead_take(state: &Mutex<Capture>, watch: &Watch, device_count: usize) -> bool {
+    let name = watch.active_name.lock().unwrap_or_else(|err| err.into_inner()).clone();
+    if name.is_empty() || device_count < 2 {
+        return false;
+    }
+    let Ok(mut guard) = state.lock() else { return false };
+    let Some(started) = guard.take_started else { return false };
+    if !take_is_dead(started.elapsed().as_millis() as u64, guard.take_fresh, guard.take_peak, guard.take_failed_over) {
+        return false;
+    }
+    guard.take_failed_over = true;
+    let fresh = guard.take_fresh;
+    guard.take = Some(Vec::new());
+    guard.take_mark_len = 0;
+    guard.take_silence_ms = 0;
+    drop(guard);
+    audio::mark_silent_mic(&name);
+    log_warm(
+        watch,
+        &format!("mic dead mid-take samples={fresh} device=\"{name}\"; retrying the take on another microphone"),
+    );
+    watch.force_reopen.store(true, Ordering::Relaxed);
+    true
 }
 
 fn device_names_differ(host: &cpal::Host, preference: &Option<String>, active_name: &str) -> NameCheck {
@@ -792,6 +860,16 @@ mod default_device {
         watch: Arc<Watch>,
     }
 
+    impl DefaultDeviceNotifications_Impl {
+        /// A mic was plugged, unplugged, enabled or disabled: forget what we
+        /// learned about silence and probe every input again.
+        fn devices_changed(&self) {
+            self.watch.default_event.store(true, Ordering::Relaxed);
+            crate::audio::clear_silent_mics();
+            crate::warm::spawn_probe(Arc::clone(&self.watch), 600);
+        }
+    }
+
     #[allow(non_snake_case)]
     impl IMMNotificationClient_Impl for DefaultDeviceNotifications_Impl {
         fn OnDeviceStateChanged(
@@ -799,14 +877,17 @@ mod default_device {
             _id: &windows::core::PCWSTR,
             _state: DEVICE_STATE,
         ) -> windows::core::Result<()> {
+            self.devices_changed();
             Ok(())
         }
 
         fn OnDeviceAdded(&self, _id: &windows::core::PCWSTR) -> windows::core::Result<()> {
+            self.devices_changed();
             Ok(())
         }
 
         fn OnDeviceRemoved(&self, _id: &windows::core::PCWSTR) -> windows::core::Result<()> {
+            self.devices_changed();
             Ok(())
         }
 
@@ -860,6 +941,10 @@ fn push_samples(state: &Mutex<Capture>, samples: impl IntoIterator<Item = f32>) 
         state.ring.push_back(sample);
         while state.ring.len() > state.cap {
             state.ring.pop_front();
+        }
+        if state.take.is_some() {
+            state.take_fresh += 1;
+            state.take_peak = state.take_peak.max(sample.abs());
         }
         if let Some(take) = state.take.as_mut() {
             take.push(sample);
@@ -975,6 +1060,10 @@ fn arm_take(
     let pre_roll_samples = guard.ring.len();
     guard.take_mark_len = pre_roll_samples;
     guard.take = Some(guard.ring.iter().copied().collect());
+    guard.take_started = Some(Instant::now());
+    guard.take_fresh = 0;
+    guard.take_peak = 0.0;
+    guard.take_failed_over = false;
     let first_sample = Arc::new(Mutex::new(None));
     guard.first_sample = Arc::clone(&first_sample);
     let note = if note.is_empty() && active_name.is_empty() {
@@ -999,6 +1088,7 @@ fn disarm_take(state: &Mutex<Capture>, id: u64) -> Result<FinishedAudio, String>
         return Err("This take already ended.".into());
     }
     let samples = guard.take.take().unwrap_or_default();
+    guard.take_started = None;
     let err = guard.error.clone();
     guard.error = None;
     if samples.is_empty() {
@@ -1074,6 +1164,57 @@ fn arm_marks_preroll_without_opening_a_device() {
             assert_eq!(guard.ring.len(), kept, "reopening the same format cleared the pre-roll");
         }
     }
+
+#[test]
+fn dead_take_detection_needs_time_and_zeros() {
+    assert!(!take_is_dead(200, 0, 0.0, false), "too early to judge");
+    assert!(take_is_dead(700, 0, 0.0, false), "no bytes at all is a dead mic");
+    assert!(take_is_dead(700, 30_000, 0.0, false), "pure zeros is a dead mic");
+    assert!(!take_is_dead(700, 30_000, 0.01, false), "room hiss means the mic hears");
+    assert!(!take_is_dead(5_000, 0, 0.0, true), "only fail over once per take");
+}
+
+#[test]
+fn a_dead_take_is_retried_on_another_mic_and_keeps_recording() {
+    let level = Arc::new(AtomicU32::new(0));
+    let state = Mutex::new(Capture::new(level));
+    let watch = Watch::new(None, None);
+    *watch.active_name.lock().unwrap() = "Jack Mic (test-dead-take)".into();
+    let mut next_id = 1u64;
+    let armed = arm_take(&state, &mut next_id, "Jack Mic (test-dead-take)", "").expect("arm");
+    push_samples(&state, std::iter::repeat(0.0).take(4_800));
+    // Not yet: the take has only just started.
+    assert!(!fail_over_dead_take(&state, &watch, 2));
+    state.lock().unwrap().take_started = Some(Instant::now() - Duration::from_millis(800));
+    // A single microphone has nowhere to go.
+    assert!(!fail_over_dead_take(&state, &watch, 1));
+    assert!(fail_over_dead_take(&state, &watch, 2));
+    assert!(watch.force_reopen.load(Ordering::Relaxed), "the capture loop must reopen on another mic");
+    assert!(audio::is_silent_mic("Jack Mic (test-dead-take)"));
+    assert!(!fail_over_dead_take(&state, &watch, 2), "only once per take");
+    // The new microphone's speech lands in the same take.
+    push_samples(&state, std::iter::repeat(0.2).take(3_200));
+    let finished = disarm_take(&state, armed.id).expect("disarm");
+    assert_eq!(finished.interleaved.len(), 3_200, "silent part dropped, new audio kept");
+    assert!(audio::peak_level(&finished.interleaved) > 0.1);
+    audio::clear_silent_mic("Jack Mic (test-dead-take)");
+}
+
+#[test]
+fn zero_byte_take_marks_the_mic_silent() {
+    let watch = Watch::new(None, None);
+    *watch.active_name.lock().unwrap() = "Jack Mic (test-zero-bytes)".into();
+    let empty = FinishedAudio { interleaved: Vec::new(), channels: 1, sample_rate: 48_000, elapsed_ms: 0, noise_rms: 0.0 };
+    check_silent_device(&empty, 200, &watch);
+    assert!(!audio::is_silent_mic("Jack Mic (test-zero-bytes)"), "a quick tap is not evidence");
+    check_silent_device(&empty, 2_000, &watch);
+    assert!(audio::is_silent_mic("Jack Mic (test-zero-bytes)"), "bytes=0 on a real hold is a dead mic");
+    assert!(watch.force_reopen.load(Ordering::Relaxed));
+    let heard = FinishedAudio { interleaved: vec![0.0, 0.05, -0.04], channels: 1, sample_rate: 48_000, elapsed_ms: 0, noise_rms: 0.0 };
+    check_silent_device(&heard, 2_000, &watch);
+    assert!(!audio::is_silent_mic("Jack Mic (test-zero-bytes)"), "signal clears the mark");
+    audio::clear_silent_mic("Jack Mic (test-zero-bytes)");
+}
 
 #[test]
 fn stable_default_does_not_reopen_and_preroll_is_instant() {

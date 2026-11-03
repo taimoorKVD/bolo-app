@@ -161,13 +161,20 @@ pub fn mic_status(preference: Option<&str>) -> MicStatus {
     }
 }
 
-/// Microphones that delivered pure digital silence on a recent take while the
-/// user was on "Automatic". Windows often makes an empty headset jack the
-/// default input; we then fall back to a microphone that actually hears.
+/// Microphones that delivered pure digital silence on a recent take or probe.
+/// Windows often makes an empty headset jack the default input; we then fall
+/// back to a microphone that actually hears.
 static SILENT_MICS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+/// Microphones that delivered real signal (probe or take). Remembered so the
+/// next take goes straight to a mic that is known to hear.
+static LIVE_MICS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Below this peak a buffer is digital silence: a real mic always has hiss.
+pub const SILENT_PEAK: f32 = 0.0005;
 
 pub fn mark_silent_mic(name: &str) -> bool {
     let key = normalize_mic_name(name);
+    LIVE_MICS.lock().unwrap_or_else(|err| err.into_inner()).retain(|item| *item != key);
     let mut list = SILENT_MICS.lock().unwrap_or_else(|err| err.into_inner());
     if list.contains(&key) {
         return false;
@@ -181,22 +188,116 @@ pub fn clear_silent_mic(name: &str) {
     SILENT_MICS.lock().unwrap_or_else(|err| err.into_inner()).retain(|item| *item != key);
 }
 
-pub fn clear_silent_mics() {
-    SILENT_MICS.lock().unwrap_or_else(|err| err.into_inner()).clear();
+/// Remember that this microphone hears (and is therefore not silent).
+pub fn mark_live_mic(name: &str) {
+    clear_silent_mic(name);
+    let key = normalize_mic_name(name);
+    let mut list = LIVE_MICS.lock().unwrap_or_else(|err| err.into_inner());
+    if !list.contains(&key) {
+        list.push(key);
+    }
 }
 
-fn is_silent_mic(name: &str) -> bool {
+pub fn clear_silent_mics() {
+    SILENT_MICS.lock().unwrap_or_else(|err| err.into_inner()).clear();
+    LIVE_MICS.lock().unwrap_or_else(|err| err.into_inner()).clear();
+}
+
+pub fn is_silent_mic(name: &str) -> bool {
     let key = normalize_mic_name(name);
     SILENT_MICS.lock().unwrap_or_else(|err| err.into_inner()).contains(&key)
 }
 
-/// The system default, unless it is known to be silent and another device isn't.
-fn auto_default(devices: &[ListedMic]) -> &ListedMic {
+fn is_live_mic(name: &str) -> bool {
+    let key = normalize_mic_name(name);
+    LIVE_MICS.lock().unwrap_or_else(|err| err.into_inner()).contains(&key)
+}
+
+/// A headphone/combo jack or line input: often listed even when nothing is
+/// plugged in, and then it records pure zeros.
+pub fn is_jack_like(name: &str) -> bool {
+    let n = normalize_mic_name(name);
+    n.contains("jack") || n.contains("line in") || n.contains("line-in") || n.contains("stereo mix")
+}
+
+/// A microphone built into the laptop or webcam: always physically present.
+pub fn is_builtin_like(name: &str) -> bool {
+    let n = normalize_mic_name(name);
+    n.contains("array") || n.contains("internal") || n.contains("built-in") || n.contains("builtin") || n.contains("integrated")
+}
+
+/// Lower is better. Known-live first, then built-in, then other mics, then
+/// unconfirmed jacks, then mics known to record silence.
+pub(crate) fn mic_rank(name: &str, silent: &dyn Fn(&str) -> bool, live: &dyn Fn(&str) -> bool) -> u8 {
+    if silent(name) {
+        4
+    } else if live(name) {
+        0
+    } else if is_builtin_like(name) {
+        1
+    } else if is_jack_like(name) {
+        3
+    } else {
+        2
+    }
+}
+
+/// "Automatic" choice: the Windows default unless it is known to be silent,
+/// or it is an unconfirmed jack while a better microphone is available.
+pub(crate) fn pick_auto<'a>(
+    devices: &'a [ListedMic],
+    silent: &dyn Fn(&str) -> bool,
+    live: &dyn Fn(&str) -> bool,
+) -> &'a ListedMic {
     let default = devices.iter().find(|device| device.is_default).unwrap_or(&devices[0]);
-    if !is_silent_mic(&default.name) {
+    let default_rank = mic_rank(&default.name, silent, live);
+    if default_rank <= 2 {
         return default;
     }
-    devices.iter().find(|device| !is_silent_mic(&device.name)).unwrap_or(default)
+    let best = devices
+        .iter()
+        .min_by_key(|device| mic_rank(&device.name, silent, live))
+        .unwrap_or(default);
+    if mic_rank(&best.name, silent, live) < default_rank {
+        best
+    } else {
+        default
+    }
+}
+
+fn auto_default(devices: &[ListedMic]) -> &ListedMic {
+    pick_auto(devices, &is_silent_mic, &is_live_mic)
+}
+
+/// When `active` recorded pure silence, the microphone Bolo moves to next.
+/// `None` when there is nothing better (every other mic is silent too).
+pub(crate) fn fallback_from<'a>(
+    devices: &'a [ListedMic],
+    active: &str,
+    silent: &dyn Fn(&str) -> bool,
+    live: &dyn Fn(&str) -> bool,
+) -> Option<&'a ListedMic> {
+    let active = normalize_mic_name(active);
+    devices
+        .iter()
+        .filter(|device| normalize_mic_name(&device.name) != active && !silent(&device.name))
+        .min_by_key(|device| mic_rank(&device.name, silent, live))
+}
+
+/// The microphone to switch to after `active` came back silent, using what
+/// Bolo has learned so far.
+pub fn silent_fallback(active: &str) -> Option<String> {
+    let devices = host_mics(&cpal::default_host()).ok()?;
+    fallback_from(&devices, active, &is_silent_mic, &is_live_mic).map(|mic| mic.name.clone())
+}
+
+/// The message for a take with no speech. The "check your mic" hint only
+/// appears when no other microphone could have heard the user.
+pub fn silent_take_message(silent_mic: Option<&str>, fallback: Option<&str>, default_hint: &str) -> String {
+    match (silent_mic, fallback) {
+        (Some(_), Some(next)) => format!("Switched to {next}. Please say that again."),
+        _ => default_hint.to_string(),
+    }
 }
 
 /// Peak of a take; digital silence (an empty jack) is essentially zero.
@@ -213,10 +314,11 @@ pub fn probe_inputs() -> Vec<(String, f32)> {
         // Skip the first 60 ms: some drivers start with a zeroed buffer.
         let skip = (finished.sample_rate as usize * finished.channels.max(1) as usize * 60) / 1000;
         let peak = peak_level(finished.interleaved.get(skip..).unwrap_or(&[]));
-        if finished.interleaved.len() > skip && peak < 0.0005 {
+        if peak < SILENT_PEAK {
+            // Zero bytes counts as silence too: an empty jack may deliver nothing.
             mark_silent_mic(&mic.name);
-        } else if peak >= 0.0005 {
-            clear_silent_mic(&mic.name);
+        } else {
+            mark_live_mic(&mic.name);
         }
         out.push((mic.name, peak));
     }
@@ -244,6 +346,14 @@ pub fn resolve_microphone(devices: &[ListedMic], preference: Option<&str>) -> Re
     let preference = trimmed(preference);
     if let Some(pref) = preference {
         if let Some(found) = find_named(devices, &pref) {
+            if is_silent_mic(&found.name) && !is_silent_mic(&default.name) && default.name != found.name {
+                return Ok(MicChoice {
+                    active_name: default.name.clone(),
+                    using_fallback: true,
+                    note: Some(format!("{pref} isn't picking up sound. Using {}.", default.name)),
+                    preference: Some(pref),
+                });
+            }
             return Ok(MicChoice {
                 active_name: found.name.clone(),
                 using_fallback: false,
@@ -269,19 +379,31 @@ pub fn resolve_microphone(devices: &[ListedMic], preference: Option<&str>) -> Re
 /// Devices to try, preferred first, then the current default, then the rest.
 /// Names are not repeated. A missing preference is skipped rather than failed.
 pub fn open_order(devices: &[ListedMic], preference: Option<&str>) -> Vec<String> {
+    order_with(devices, preference, &is_silent_mic, &is_live_mic)
+}
+
+/// Preference (unless it is known silent), then the automatic pick, then the
+/// rest best-first; microphones known to record silence go last.
+pub(crate) fn order_with(
+    devices: &[ListedMic],
+    preference: Option<&str>,
+    silent: &dyn Fn(&str) -> bool,
+    live: &dyn Fn(&str) -> bool,
+) -> Vec<String> {
     let mut names = Vec::new();
     if let Some(pref) = trimmed(preference) {
         if let Some(found) = find_named(devices, &pref) {
-            push_unique(&mut names, &found.name);
+            if !silent(&found.name) {
+                push_unique(&mut names, &found.name);
+            }
         }
     }
     if !devices.is_empty() {
-        push_unique(&mut names, &auto_default(devices).name);
+        push_unique(&mut names, &pick_auto(devices, silent, live).name);
     }
-    for device in devices.iter().filter(|device| !is_silent_mic(&device.name)) {
-        push_unique(&mut names, &device.name);
-    }
-    for device in devices {
+    let mut rest: Vec<&ListedMic> = devices.iter().collect();
+    rest.sort_by_key(|device| mic_rank(&device.name, silent, live));
+    for device in rest {
         push_unique(&mut names, &device.name);
     }
     names
@@ -1411,14 +1533,88 @@ mod tests {
             open_order(&devices, Some(&headset().name)),
             vec![headset().name, laptop().name, usb.name.clone()]
         );
+        let none = |_: &str| false;
         assert_eq!(
-            open_order(&devices, None),
-            vec![laptop().name, headset().name, usb.name.clone()]
+            order_with(&devices, None, &none, &none),
+            vec![laptop().name, usb.name.clone(), headset().name]
         );
         assert_eq!(
-            open_order(&devices, Some("Not A Real Mic")),
-            vec![laptop().name, headset().name, usb.name]
+            order_with(&devices, Some("Not A Real Mic"), &none, &none),
+            vec![laptop().name, usb.name, headset().name]
         );
+    }
+
+    fn jack_default() -> Vec<ListedMic> {
+        vec![
+            ListedMic { name: "Jack Mic (Realtek(R) Audio)".into(), is_default: true },
+            ListedMic { name: "Microphone Array (Realtek(R) Audio)".into(), is_default: false },
+        ]
+    }
+
+    #[test]
+    fn unconfirmed_jack_default_prefers_the_built_in_array() {
+        let devices = jack_default();
+        let none = |_: &str| false;
+        assert_eq!(pick_auto(&devices, &none, &none).name, devices[1].name);
+        // A jack that has proven it hears (a plugged-in headset) stays the default.
+        let jack_live = |n: &str| is_jack_like(n);
+        assert_eq!(pick_auto(&devices, &none, &jack_live).name, devices[0].name);
+        // A normal default (USB mic) is still followed as before.
+        let usb = vec![
+            ListedMic { name: "USB Studio Mic".into(), is_default: true },
+            ListedMic { name: "Microphone Array".into(), is_default: false },
+        ];
+        assert_eq!(pick_auto(&usb, &none, &none).name, "USB Studio Mic");
+    }
+
+    #[test]
+    fn silent_default_falls_back_to_a_mic_with_signal() {
+        let devices = vec![
+            ListedMic { name: "Headset Microphone".into(), is_default: true },
+            ListedMic { name: "Microphone Array".into(), is_default: false },
+        ];
+        let silent = |n: &str| n == "Headset Microphone";
+        let live = |n: &str| n == "Microphone Array";
+        assert_eq!(pick_auto(&devices, &silent, &live).name, "Microphone Array");
+        assert_eq!(
+            order_with(&devices, None, &silent, &live),
+            vec!["Microphone Array".to_string(), "Headset Microphone".to_string()]
+        );
+        // A saved microphone that records zeros is tried last, not first.
+        assert_eq!(
+            order_with(&devices, Some("Headset Microphone"), &silent, &live),
+            vec!["Microphone Array".to_string(), "Headset Microphone".to_string()]
+        );
+        assert_eq!(
+            fallback_from(&devices, "Headset Microphone", &silent, &live).map(|m| m.name.as_str()),
+            Some("Microphone Array")
+        );
+    }
+
+    #[test]
+    fn every_mic_silent_has_no_fallback_and_keeps_the_hint() {
+        let devices = jack_default();
+        let all = |_: &str| true;
+        let none = |_: &str| false;
+        assert!(fallback_from(&devices, &devices[0].name, &all, &none).is_none());
+        assert_eq!(pick_auto(&devices, &all, &none).name, devices[0].name);
+        let hint = "Didn't catch any speech.";
+        assert_eq!(silent_take_message(Some("Jack Mic"), None, hint), hint);
+        assert_eq!(silent_take_message(None, None, hint), hint);
+        assert_eq!(
+            silent_take_message(Some("Jack Mic"), Some("Microphone Array"), hint),
+            "Switched to Microphone Array. Please say that again."
+        );
+    }
+
+    #[test]
+    fn jack_and_builtin_names_are_recognised() {
+        assert!(is_jack_like("Jack Mic (Realtek(R) Audio)"));
+        assert!(is_jack_like("Line In (High Definition Audio)"));
+        assert!(!is_jack_like("Microphone Array (Intel Smart Sound)"));
+        assert!(is_builtin_like("Microphone Array (Realtek(R) Audio)"));
+        assert!(is_builtin_like("Internal Microphone"));
+        assert!(!is_builtin_like("USB Studio Mic"));
     }
 
     #[test]
