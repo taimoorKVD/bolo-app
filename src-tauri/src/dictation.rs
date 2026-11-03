@@ -138,6 +138,9 @@ struct Clock {
     hint_held_ms: u64,
     overlay_ms: u64,
     first_sample_ms: Option<u64>,
+    /// Set when this take's microphone recorded pure silence and Bolo has
+    /// already moved to another one: (silent mic, mic now in use).
+    mic_switch: Option<(String, String)>,
 }
 
 struct Staged {
@@ -591,6 +594,7 @@ pub fn end(app: &AppHandle) {
         );
     }
     let open_wait_ms = take.open_wait_ms;
+    let take_mic = take.active_name.clone();
     let bus = take.chunk_bus();
     enqueue(app, take.drain_chunks());
     let stop_started = Instant::now();
@@ -606,6 +610,14 @@ pub fn end(app: &AppHandle) {
         }
     };
     let stop_ms = stop_started.elapsed().as_millis() as u64;
+    // `finish` already judged the take: a mic that delivered only zeros is
+    // marked silent. Work out where Bolo moves next so the user hears that
+    // instead of "check your microphone".
+    let mic_switch = if !take_mic.is_empty() && crate::audio::is_silent_mic(&take_mic) {
+        crate::audio::silent_fallback(&take_mic).map(|next| (take_mic.clone(), next))
+    } else {
+        None
+    };
     let (flights, settings) = {
         // The meter holds this from drain through enqueue. Waiting for it means
         // a chunk it already pulled is in the flight list before we take it.
@@ -631,6 +643,7 @@ pub fn end(app: &AppHandle) {
         hint_held_ms,
         overlay_ms,
         first_sample_ms,
+        mic_switch,
     };
     publish(
         app,
@@ -909,7 +922,9 @@ async fn process(
         let only_silence = products.iter().all(|product| product.error.is_none());
         return Err(TakeError {
             message: if only_silence {
-                if !clock.short_press && crate::levels::health(None).mic_quiet {
+                if let Some((silent, next)) = clock.mic_switch.as_ref().filter(|_| !clock.short_press) {
+                    crate::audio::silent_take_message(Some(silent), Some(next), "")
+                } else if !clock.short_press && crate::levels::health(None).mic_quiet {
                     "Your microphone is turned down too low. Open Bolo and press \"Fix it\".".into()
                 } else {
                     silence_hint(clock.hint_held_ms, clock.short_press).into()
