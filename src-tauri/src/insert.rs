@@ -1235,7 +1235,7 @@ unsafe extern "system" fn paste_wnd_proc(
 /// The clipboard and the delayed-render owner are process-wide. Tests that
 /// use them must not overlap, or Windows can be handed a freed clipboard
 /// handle (seen as 0xC0000374 heap corruption in parallel `cargo test`).
-#[cfg(all(test, windows))]
+#[cfg(test)]
 fn clipboard_test_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     LOCK.lock().unwrap_or_else(|err| err.into_inner())
