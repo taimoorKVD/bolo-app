@@ -574,7 +574,7 @@ async fn post_chat(
         .await
     {
         Ok(response) => response,
-        Err(err) => return Err(CleanupFail::Other(format!("couldn't reach Groq: {err}"))),
+        Err(err) => return Err(CleanupFail::Other(format!("couldn't reach Groq: {}", crate::transcribe::error_chain(&err)))),
     };
     let status = response.status();
     let bytes = match response.text().await {
