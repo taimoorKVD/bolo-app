@@ -332,9 +332,11 @@ fn pick_save_path_windows(app: &tauri::AppHandle) -> Result<Option<std::path::Pa
     use tauri::Manager;
     let window = app.get_webview_window("settings").ok_or_else(|| "Bolo's window isn't open.".to_string())?;
     let foreign = window.hwnd().map_err(|err| err.to_string())?;
-    let hwnd = windows::Win32::Foundation::HWND(foreign.0);
+    // HWND holds a raw pointer, so it is not Send. The main-thread closure is.
+    let raw = foreign.0 as isize;
     let (tx, rx) = std::sync::mpsc::channel();
     app.run_on_main_thread(move || {
+        let hwnd = windows::Win32::Foundation::HWND(raw as *mut core::ffi::c_void);
         let outcome = unsafe { show_save_dialog(hwnd) };
         let _ = tx.send(outcome);
     })
@@ -347,6 +349,7 @@ fn pick_save_path_windows(app: &tauri::AppHandle) -> Result<Option<std::path::Pa
 unsafe fn show_save_dialog(hwnd: windows::Win32::Foundation::HWND) -> Result<Option<std::path::PathBuf>, String> {
     use windows::Win32::System::Com::{CoCreateInstance, CoTaskMemFree, CLSCTX_INPROC_SERVER};
     use windows::Win32::UI::Shell::{IFileSaveDialog, IModalWindow, FileSaveDialog, SIGDN_FILESYSPATH};
+    use windows_core::Interface;
     let dialog: IFileSaveDialog = CoCreateInstance(&FileSaveDialog, None, CLSCTX_INPROC_SERVER).map_err(|err| err.to_string())?;
     dialog.SetTitle(&windows_core::HSTRING::from("Save your Bolo character")).map_err(|err| err.to_string())?;
     dialog.SetFileName(&windows_core::HSTRING::from("bolo-character.png")).map_err(|err| err.to_string())?;

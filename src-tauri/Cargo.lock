@@ -377,7 +377,7 @@ dependencies = [
 
 [[package]]
 name = "bolo"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "anyhow",
  "arboard",
@@ -399,6 +399,7 @@ dependencies = [
  "tauri-plugin-updater",
  "windows 0.61.3",
  "windows-core 0.61.2",
+ "windows-future 0.2.1",
  "zeroize",
  "zip 2.6.1",
 ]

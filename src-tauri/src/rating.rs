@@ -448,9 +448,9 @@ fn open_review_page() -> Result<(), String> {
 #[cfg(all(windows, not(feature = "updater")))]
 fn request_store_review(app: &tauri::AppHandle) -> Result<ReviewResult, String> {
     let (tx, rx) = std::sync::mpsc::channel();
-    let app = app.clone();
+    let dialog_app = app.clone();
     app.run_on_main_thread(move || {
-        if let Err(err) = start_store_dialog(&app, tx.clone()) {
+        if let Err(err) = start_store_dialog(&dialog_app, tx.clone()) {
             let _ = tx.send(Err(err));
         }
     })
@@ -464,6 +464,7 @@ fn start_store_dialog(app: &tauri::AppHandle, tx: std::sync::mpsc::Sender<Result
     use tauri::Manager;
     use windows::Services::Store::StoreContext;
     use windows::Win32::UI::Shell::IInitializeWithWindow;
+    use windows_core::Interface;
     let window = app.get_webview_window("settings").ok_or_else(|| "Bolo's window isn't open.".to_string())?;
     // Tauri's window handle is the windows 0.62 HWND. This crate uses 0.61, so
     // rebuild the handle from the raw pointer. Both are `HWND(pub *mut c_void)`.

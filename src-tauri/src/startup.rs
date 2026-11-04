@@ -44,7 +44,7 @@ const LEGACY_RUN_NAMES: &[&str] = &["Bolo", "Cadence", "cadence"];
 pub fn clean_stale_autostart(log_dir: &Path) {
     use windows::core::{HSTRING, PCWSTR};
     use windows::Win32::System::Registry::{
-        RegCloseKey, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER,
+        RegCloseKey, RegDeleteValueW, RegOpenKeyExW, HKEY, HKEY_CURRENT_USER,
         KEY_QUERY_VALUE, KEY_SET_VALUE,
     };
 

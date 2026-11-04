@@ -25,7 +25,7 @@ const PAIRS: &[Pair] = &[
 /// Repair known brand mishearings. "in" is LinkedIn only when it is not the
 /// preposition in "in the" / "in a".
 pub fn apply(text: &str) -> String {
-    let mut tokens: Vec<String> = text.split_whitespace().map(|token| token.to_string()).collect();
+    let tokens: Vec<String> = text.split_whitespace().map(|token| token.to_string()).collect();
     if tokens.is_empty() {
         return text.to_string();
     }
