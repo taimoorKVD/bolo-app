@@ -113,12 +113,20 @@ export interface AudioHealth {
 
 export type Correction = { from: string; to: string; createdUnixMs: number };
 
+export type MyWordEntry = {
+  word: string;
+  uses: number;
+  seed: boolean;
+  tag: string;
+};
+
 export type MemoryView = {
   words: string[];
   fixes: Correction[];
   style: string[];
   keepLearning: boolean;
   myWords?: string[];
+  entries?: MyWordEntry[];
 };
 
 export type FixTarget = { id: string; text: string; canRelisten: boolean; isLast: boolean };

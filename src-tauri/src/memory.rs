@@ -307,6 +307,62 @@ fn worth_prompt(word: &str) -> bool {
     word.split_whitespace().any(|part| part.chars().count() >= 3 && !crate::cleanup::is_common_word(part))
 }
 
+/// Spoken this many times, the screen says "Used a lot". Fewer than that, "Ready".
+pub const USED_A_LOT: u32 = 3;
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WordRow {
+    pub word: String,
+    pub uses: u32,
+    pub seed: bool,
+    pub tag: &'static str,
+}
+
+/// Seeds plus words the user added, most-used first. A seed is never absent.
+pub fn screen_words(memory: &Memory) -> Vec<WordRow> {
+    let mut rows: Vec<(usize, String, bool)> = Vec::new();
+    for (index, seed) in crate::vocab::SEED_WORDS.iter().enumerate() {
+        rows.push((index, (*seed).to_string(), true));
+    }
+    for (index, word) in memory.my_words.iter().enumerate() {
+        if rows.iter().any(|(_, have, _)| have.eq_ignore_ascii_case(word)) {
+            continue;
+        }
+        rows.push((crate::vocab::SEED_WORDS.len() + index, word.clone(), false));
+    }
+    rows.sort_by(|a, b| use_of(memory, &b.1).cmp(&use_of(memory, &a.1)).then(a.0.cmp(&b.0)));
+    rows.into_iter()
+        .map(|(_, word, seed)| {
+            let uses = use_of(memory, &word);
+            WordRow {
+                tag: if uses >= USED_A_LOT { "Used a lot" } else { "Ready" },
+                word,
+                uses,
+                seed,
+            }
+        })
+        .collect()
+}
+
+/// Drop a word the user added. Seeds stay, whatever the user clicks.
+pub fn dismiss_user_word(memory: &mut Memory, dictionary: &mut Vec<String>, word: &str) -> Result<(), String> {
+    let word = word.trim();
+    if word.is_empty() {
+        return Err("Type a word first.".into());
+    }
+    if crate::vocab::is_seed(word) {
+        return Err("Bolo always spells that one.".into());
+    }
+    let known = memory.my_words.iter().any(|entry| entry.eq_ignore_ascii_case(word))
+        || dictionary.iter().any(|entry| entry.eq_ignore_ascii_case(word));
+    if !known {
+        return Err("That word isn't in your list.".into());
+    }
+    forget_word(memory, dictionary, word);
+    Ok(())
+}
+
 /// Most-used first. Equal counts keep list order (newest first).
 pub fn rank_my_words(memory: &Memory) -> Vec<String> {
     let mut indexed: Vec<(usize, String)> = memory.my_words.iter().cloned().enumerate().collect();
@@ -323,7 +379,12 @@ pub fn note_uses(memory: &mut Memory, text: &str) {
     if text.trim().is_empty() {
         return;
     }
-    let heard: Vec<String> = memory.my_words.iter().filter(|word| contains_phrase(text, word)).cloned().collect();
+    let mut heard: Vec<String> = memory.my_words.iter().filter(|word| contains_phrase(text, word)).cloned().collect();
+    for seed in crate::vocab::SEED_WORDS {
+        if contains_phrase(text, seed) && !heard.iter().any(|word| word.eq_ignore_ascii_case(seed)) {
+            heard.push((*seed).to_string());
+        }
+    }
     for word in heard {
         bump(memory, &word);
     }
@@ -565,5 +626,46 @@ mod tests {
         add_correction(&mut memory, "b", "Beta", 2);
         add_correction(&mut memory, "c", "alpha", 3);
         assert_eq!(prompt_terms(&memory), vec!["alpha".to_string(), "Beta".to_string()]);
+    }
+
+    #[test]
+    fn my_words_screen_orders_by_use_and_will_not_drop_a_seed() {
+        let mut memory = Memory::default();
+        let mut dictionary = Vec::new();
+        assert!(add_my_word(&mut memory, "Priya"));
+        assert!(add_my_word(&mut memory, "Acme Studio"));
+        memory.uses = vec![
+            WordUse { word: "Priya".into(), uses: 9 },
+            WordUse { word: "Bolo".into(), uses: USED_A_LOT },
+            WordUse { word: "Acme Studio".into(), uses: 1 },
+        ];
+        let rows = screen_words(&memory);
+        assert_eq!(rows[0].word, "Priya");
+        assert_eq!(rows[0].tag, "Used a lot");
+        assert!(!rows[0].seed);
+        let bolo = rows.iter().find(|row| row.word == "Bolo").expect("seed");
+        assert!(bolo.seed);
+        assert_eq!(bolo.tag, "Used a lot");
+        let priya = rows.iter().position(|row| row.word == "Priya").unwrap();
+        let bolo_at = rows.iter().position(|row| row.word == "Bolo").unwrap();
+        let kingdom = rows.iter().position(|row| row.word == "Kingdom Vision").unwrap();
+        assert!(priya < bolo_at && bolo_at < kingdom);
+        assert!(rows.iter().any(|row| row.word == "Acme Studio" && row.tag == "Ready" && !row.seed));
+        for seed in crate::vocab::SEED_WORDS {
+            assert!(rows.iter().any(|row| row.word == *seed && row.seed), "{seed}");
+        }
+
+        dismiss_user_word(&mut memory, &mut dictionary, "Acme Studio").unwrap();
+        assert!(!screen_words(&memory).iter().any(|row| row.word == "Acme Studio"));
+        let err = dismiss_user_word(&mut memory, &mut dictionary, "Bolo").unwrap_err();
+        assert!(err.contains("always spells"));
+        assert!(screen_words(&memory).iter().any(|row| row.word == "Bolo" && row.seed));
+        assert!(dismiss_user_word(&mut memory, &mut dictionary, "Priya").is_ok());
+        assert!(!screen_words(&memory).iter().any(|row| row.word == "Priya"));
+
+        assert!(add_my_word(&mut memory, "Northwind"));
+        let again = screen_words(&memory);
+        assert!(again.iter().any(|row| row.word == "Northwind" && !row.seed));
+        assert!(again.len() >= crate::vocab::SEED_WORDS.len());
     }
 }

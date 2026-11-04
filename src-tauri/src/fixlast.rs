@@ -37,6 +37,8 @@ pub struct MemoryView {
     pub style: Vec<String>,
     pub keep_learning: bool,
     pub my_words: Vec<String>,
+    /// Seeds and user words, most-used first, for the My words screen.
+    pub entries: Vec<memory::WordRow>,
 }
 
 #[derive(Serialize, Clone)]
@@ -68,11 +70,13 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 fn view(state: &AppState) -> MemoryView {
     let settings = lock(&state.settings);
     let memory = memory::snapshot();
+    let entries = memory::screen_words(&memory);
     MemoryView {
         words: settings.dictionary.clone(),
         fixes: memory.corrections,
         style: memory.style,
         keep_learning: settings.keep_learning,
+        entries,
         my_words: memory.my_words,
     }
 }
@@ -90,7 +94,7 @@ pub fn get_memory(state: tauri::State<'_, AppState>) -> MemoryView {
 pub fn forget_word(state: tauri::State<'_, AppState>, word: String) -> Result<MemoryView, String> {
     {
         let mut settings = lock(&state.settings);
-        memory::update(|m| memory::forget_word(m, &mut settings.dictionary, word.trim()));
+        memory::update(|m| memory::dismiss_user_word(m, &mut settings.dictionary, word.trim()))?;
         save_settings(&state, &settings)?;
     }
     Ok(view(&state))
@@ -102,18 +106,25 @@ pub fn add_word(state: tauri::State<'_, AppState>, word: String) -> Result<Memor
     if word.is_empty() || word.chars().count() > 64 {
         return Err("Use a word or name up to 64 letters.".into());
     }
+    if crate::vocab::is_seed(&word) {
+        return Err("Bolo already spells that one.".into());
+    }
     {
         let mut settings = lock(&state.settings);
-        if settings.dictionary.len() >= 200 {
+        if settings.dictionary.len() >= 200 && !settings.dictionary.iter().any(|have| have.eq_ignore_ascii_case(&word)) {
             return Err("The words list is full (200). Forget a few first.".into());
+        }
+        let present = memory::update(|m| {
+            m.blocked.retain(|w| !w.eq_ignore_ascii_case(&word));
+            let added = memory::add_my_word(m, &word);
+            added || m.my_words.iter().any(|have| have.eq_ignore_ascii_case(&word))
+        });
+        if !present {
+            return Err("Use a name or a site.".into());
         }
         if !settings.dictionary.iter().any(|w| w.eq_ignore_ascii_case(&word)) {
             settings.dictionary.push(word.clone());
         }
-        memory::update(|m| {
-            m.blocked.retain(|w| !w.eq_ignore_ascii_case(&word));
-            memory::add_my_word(m, &word);
-        });
         save_settings(&state, &settings)?;
     }
     Ok(view(&state))

@@ -7,6 +7,11 @@
 use std::sync::Mutex;
 
 /// Always known, even on a fresh install.
+pub fn is_seed(word: &str) -> bool {
+    let word = word.trim();
+    SEED_WORDS.iter().any(|seed| seed.eq_ignore_ascii_case(word))
+}
+
 pub const SEED_WORDS: &[&str] = &[
     "Bolo",
     "Bolo.com",
