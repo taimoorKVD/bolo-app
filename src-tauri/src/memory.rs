@@ -76,7 +76,15 @@ pub fn load(config: &Path) -> Memory {
         return Memory::default();
     };
     match serde_json::from_str::<Memory>(&raw) {
-        Ok(memory) => migrate(memory),
+        Ok(memory) => {
+            let (memory, dropped_same) = migrate(memory);
+            // A saved "Typed" → "Typed" fix is not a fix. Drop it from the file
+            // so the next launch does not show it again.
+            if dropped_same {
+                let _ = save(config, &memory);
+            }
+            memory
+        }
         Err(_) => {
             let _ = std::fs::copy(&file, config.join("memory.bad.json"));
             Memory::default()
@@ -84,17 +92,25 @@ pub fn load(config: &Path) -> Memory {
     }
 }
 
-fn migrate(mut memory: Memory) -> Memory {
+fn migrate(mut memory: Memory) -> (Memory, bool) {
     if memory.version < VERSION {
         memory.version = VERSION;
     }
-    memory.corrections.retain(|c| !c.from.trim().is_empty() && !c.to.trim().is_empty());
+    let before = memory.corrections.len();
+    memory.corrections.retain(|c| useful_fix(&c.from, &c.to));
+    let dropped_same = memory.corrections.len() != before;
     memory.corrections.truncate(MAX_CORRECTIONS);
     memory.style.truncate(MAX_STYLE);
     memory.pending.truncate(MAX_PENDING);
     memory.my_words.truncate(MAX_MY_WORDS);
     memory.uses.truncate(MAX_MY_WORDS);
-    memory
+    (memory, dropped_same)
+}
+
+fn useful_fix(from: &str, to: &str) -> bool {
+    let from = from.trim();
+    let to = to.trim();
+    !from.is_empty() && !to.is_empty() && from != to
 }
 
 pub fn save(config: &Path, memory: &Memory) -> Result<(), String> {
@@ -244,6 +260,9 @@ pub fn diff_fix(old: &str, new: &str) -> Option<(String, String)> {
 }
 
 pub fn add_correction(memory: &mut Memory, from: &str, to: &str, now: u64) {
+    if !useful_fix(from, to) {
+        return;
+    }
     memory.corrections.retain(|c| !c.from.eq_ignore_ascii_case(from));
     memory.corrections.insert(0, Correction { from: from.into(), to: to.into(), created_unix_ms: now });
     memory.corrections.truncate(MAX_CORRECTIONS);
@@ -617,6 +636,30 @@ mod tests {
         forget_everything(&mut memory, &mut dict);
         assert!(dict.is_empty());
         assert_eq!(memory, Memory::default());
+    }
+
+    #[test]
+    fn identical_heard_and_written_fixes_are_not_kept() {
+        let mut memory = Memory::default();
+        add_correction(&mut memory, "Typed", "Typed", 1);
+        add_correction(&mut memory, "  Typed  ", "Typed", 2);
+        assert!(memory.corrections.is_empty(), "a fix that changes nothing is not stored");
+        add_correction(&mut memory, "Volo", "Bolo", 3);
+        assert_eq!(memory.corrections.len(), 1);
+
+        let dir = temp("typed-same");
+        std::fs::write(
+            path(&dir),
+            r#"{"version":1,"corrections":[{"from":"Typed","to":"Typed","createdUnixMs":1},{"from":"Volo","to":"Bolo","createdUnixMs":2}]}"#,
+        )
+        .unwrap();
+        let loaded = load(&dir);
+        assert_eq!(loaded.corrections.len(), 1);
+        assert_eq!(loaded.corrections[0].to, "Bolo");
+        let saved = path(&dir);
+        let raw = std::fs::read_to_string(&saved).unwrap_or_else(|err| panic!("{err} at {}", saved.display()));
+        assert!(!raw.contains("Typed"), "the identical fix is removed from the saved file");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

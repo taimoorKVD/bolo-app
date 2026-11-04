@@ -1,4 +1,4 @@
-import { listenerNotice, visibleMessage } from "./notices.ts";
+import { listenerNotice, statusBanner, visibleMessage } from "./notices.ts";
 
 function assert(condition: boolean, message: string): void {
   if (!condition) throw new Error(message);
@@ -27,5 +27,16 @@ assert(
     "Global hotkey isn't active. couldn't install the keyboard hook",
   "a real hook error is shown",
 );
+
+assert(statusBanner("typed", "Typed") === null, "Typed — Typed is not shown");
+assert(statusBanner("typed", " typed ") === null, "a repeated Typed status is not shown");
+assert(statusBanner("typed", null) === null, "a bare Typed phase is not a row");
+assert(
+  statusBanner("typed", "Part of this take didn't transcribe.") ===
+    "Typed — Part of this take didn't transcribe.",
+  "a typed take with a real note still explains it",
+);
+assert(statusBanner("recording", null) === "Listening", "listening stays a single label");
+assert(statusBanner("done", "Inserted") === "Inserted — Inserted", "other statuses are left as they are");
 
 console.log("notices ok");

@@ -782,7 +782,7 @@ pub fn paste_last(app: &AppHandle) {
                     &app,
                     &DictationEvent {
                         phase: "typed".into(),
-                        message: Some("Typed".into()),
+                        message: None,
                         elapsed_ms: 0,
                         level: 0.0,
                         engine: None,
@@ -1131,12 +1131,18 @@ async fn deliver(app: &AppHandle, mut outcome: Outcome, generation: u64) {
     } else {
         ("typed", "Typed")
     };
-    let message = outcome.note.clone().unwrap_or_else(|| fallback.into());
+    // "Typed" as both the phase and the message is the "Typed — Typed" row.
+    let message = outcome.note.clone().filter(|note| !(phase == "typed" && note.trim() == "Typed"));
+    let message = if message.is_none() && phase != "typed" {
+        Some(fallback.into())
+    } else {
+        message
+    };
     publish(
         app,
         &DictationEvent {
             phase: phase.into(),
-            message: Some(message),
+            message,
             elapsed_ms: outcome.duration_ms,
             level: 0.0,
             engine: outcome.engine.clone(),

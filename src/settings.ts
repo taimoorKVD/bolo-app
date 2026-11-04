@@ -14,7 +14,7 @@ import {
 } from "./characters";
 import lockupUrl from "./brand-lockup.svg";
 import { formatDuration, formatHotkey, formatWhen, modelLabel } from "./format";
-import { listenerNotice, visibleMessage } from "./notices";
+import { listenerNotice, statusBanner, visibleMessage } from "./notices";
 import type {
   ApiKeyStatus,
   AppInfo,
@@ -384,18 +384,12 @@ function liveBanner(draft: Draft): HTMLElement {
     banner.hidden = true;
     return banner;
   }
-  const titles: Record<string, string> = {
-    arming: "Listening",
-    recording: "Listening",
-    transcribing: "Transcribing",
-    inserting: "Inserting",
-    done: "Inserted",
-    typed: "Typed",
-    error: "Dictation failed",
-  };
-  banner.textContent = draft.live.message
-    ? `${titles[draft.live.phase] ?? "Bolo"} — ${draft.live.message}`
-    : titles[draft.live.phase] ?? "Bolo";
+  const text = statusBanner(draft.live.phase, draft.live.message);
+  if (!text) {
+    banner.hidden = true;
+    return banner;
+  }
+  banner.textContent = text;
   if (draft.live.phase === "error") banner.classList.add("bad");
   return banner;
 }
@@ -2022,8 +2016,9 @@ function fillLearned(draft: Draft): void {
   // Your fixes
   const fixes = el("div", "learned-section");
   fixes.append(el("h3", "", "Your fixes"), el("p", "field-note", "When Bolo hears the left side, it writes the right side."));
-  if (view.fixes.length === 0) fixes.append(el("p", "field-note", "No fixes yet. Use Fix on a History entry to teach Bolo."));
-  for (const fix of view.fixes) {
+  const shownFixes = view.fixes.filter((fix) => fix.from.trim() !== fix.to.trim());
+  if (shownFixes.length === 0) fixes.append(el("p", "field-note", "No fixes yet. Use Fix on a History entry to teach Bolo."));
+  for (const fix of shownFixes) {
     const row = el("div", "learned-row");
     const text = el("p", "fix-pair");
     text.append(el("span", "fix-from", fix.from), el("span", "fix-arrow", " → "), el("strong", "", fix.to));
