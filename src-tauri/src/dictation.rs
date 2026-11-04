@@ -1006,13 +1006,44 @@ async fn process(
 }
 
 async fn deliver(app: &AppHandle, mut outcome: Outcome, generation: u64) {
-    // The user's own fixes (Fix last) apply to every new take.
-    let fixes = crate::memory::snapshot().corrections;
-    if !fixes.is_empty() {
-        outcome.text = crate::memory::apply_corrections(&outcome.text, &fixes);
+    // Fixes, My words (names, brands, spoken emails), then local homophones.
+    // The Groq meaning check runs only when a homophone is still ambiguous.
+    let (verbatim, cleanup_on, cleanup_model) = {
+        let state = app.state::<AppState>();
+        let settings = lock(&state.settings);
+        (settings.verbatim, settings.cleanup_enabled, settings.cleanup_model.clone())
+    };
+    let words = {
+        let memory = crate::memory::snapshot();
+        crate::vocab::protected(&crate::memory::rank_my_words(&memory))
+    };
+    crate::vocab::set_current(words.clone());
+    let corrections = crate::memory::snapshot().corrections;
+    outcome.text = crate::accuracy::polish_text(&outcome.text, &corrections, &words, !verbatim);
+    if cleanup_on && !verbatim && crate::sense::needs_model(&outcome.text) {
+        if let Ok(key) = crate::credentials::SecretKey::load() {
+            let using_builtin = key.is_builtin();
+            let sensed = crate::sense::model_fix(
+                crate::transcribe::http_client(),
+                key.expose(),
+                &outcome.text,
+                &cleanup_model,
+                &words,
+                using_builtin,
+            )
+            .await;
+            drop(key);
+            outcome.staged.cleanup_ms = outcome.staged.cleanup_ms.saturating_add(sensed.latency_ms);
+            outcome.staged.cleanup_why = if outcome.staged.cleanup_why.is_empty() {
+                sensed.why.clone()
+            } else {
+                format!("{} | {}", outcome.staged.cleanup_why, sensed.why)
+            };
+            let corrections = crate::memory::snapshot().corrections;
+            outcome.text = crate::accuracy::polish_text(&sensed.text, &corrections, &words, true);
+        }
     }
-    // Names and sites from My words that were misheard ("Volo" -> "Bolo").
-    outcome.text = crate::vocab::correct(&outcome.text, &crate::vocab::current());
+    crate::memory::update(|memory| crate::memory::note_uses(memory, &outcome.text));
     // A translation's English words aren't the user's own terms; learning
     // them put mis-heard junk ("Kaju", "Banning") into the next prompt.
     if crate::diag::take_translated() {

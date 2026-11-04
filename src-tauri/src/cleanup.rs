@@ -20,7 +20,9 @@ pub const CLEANUP_MODELS: &[&str] = &[
     "openai/gpt-oss-120b",
     "qwen/qwen3.6-27b",
 ];
-const CLEANUP_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(3000);
+/// Punctuation cleanup gives up after 1.2s and pastes the transcript it already has.
+pub const CLEANUP_TIMEOUT_MS: u64 = 1_200;
+const CLEANUP_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(CLEANUP_TIMEOUT_MS);
 const TRANSLATE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(9000);
 
 fn model_order(preferred: &str) -> Vec<String> {
@@ -53,7 +55,7 @@ fn is_missing_model(status: u16, body: &str) -> bool {
     false
 }
 
-enum CleanupFail {
+pub(crate) enum CleanupFail {
     Missing,
     Other(String),
 }
@@ -127,6 +129,11 @@ pub async fn clean_transcript(
                 if first_outcome.used_model {
                     return note_model(first_outcome, model_id, &missed);
                 }
+                // A timeout or a dead connection already has the raw transcript.
+                // Waiting out a second attempt is what made those takes feel stuck.
+                if !should_retry_cleanup(&first_outcome.why) {
+                    return note_fallback(first_outcome, &missed);
+                }
                 // A 404 already moved on. Any other failure gets one simpler retry
                 // on this model, then the local edit. Timeouts do not walk the list.
                 match request_cleanup(client, api_key, transcript, tone, true, model_id, using_builtin).await {
@@ -174,6 +181,24 @@ pub async fn clean_transcript(
     }
 }
 
+fn note_fallback(mut outcome: CleanOutcome, missed: &[String]) -> CleanOutcome {
+    if !missed.is_empty() {
+        outcome.why = compact_why(&format!("model missing: {}; {}", missed.join(", "), outcome.why));
+    }
+    outcome
+}
+
+/// Network failures and timeouts paste the transcript already in hand.
+/// An empty or rejected rewrite may still be worth one simpler retry.
+pub(crate) fn should_retry_cleanup(why: &str) -> bool {
+    let lower = why.to_ascii_lowercase();
+    !(lower.contains("couldn't reach")
+        || lower.contains("could not reach")
+        || lower.contains("timed out")
+        || lower.contains("timeout")
+        || lower.contains("error sending request"))
+}
+
 fn cleanup_result(result: Result<String, CleanupFail>) -> anyhow::Result<String> {
     match result {
         Ok(text) => Ok(text),
@@ -216,6 +241,16 @@ fn outcome_from_model(transcript: &str, result: anyhow::Result<String>) -> Clean
                     used_model: true,
                     note: None,
                     why: "applied".into(),
+                };
+            }
+            // The whole rewrite can be too free (an added word) and still contain
+            // one sound-alike that is right. Keep that swap, drop the rest.
+            if let Some(saved) = salvage_homophones(transcript, &cleaned, &crate::vocab::current()) {
+                return CleanOutcome {
+                    text: polish_model_output(&saved),
+                    used_model: true,
+                    note: None,
+                    why: "applied salvaged homophones".into(),
                 };
             }
             let trimmed = cleaned.trim();
@@ -415,7 +450,7 @@ pub async fn translate_preserving(
     }
     let mut missed = Vec::new();
     for model_id in &models {
-        match post_chat(client, api_key, model_id, system, original, max_tokens, using_builtin).await {
+        match post_chat(client, api_key, model_id, system, original, max_tokens, using_builtin, TRANSLATE_TIMEOUT, 768).await {
             Err(CleanupFail::Missing) => {
                 missed.push(model_id.clone());
                 continue;
@@ -531,7 +566,51 @@ fn style_line(tone: Tone) -> &'static str {
     }
 }
 
-fn salvage_model_text(value: &str) -> String {
+/// Same-length rewrites only. A protected spelling is never taken from the
+/// model. Anything that is not the same word or a sound-alike aborts, and the
+/// caller pastes the transcript it already had.
+pub(crate) fn salvage_homophones(original: &str, candidate: &str, vocab: &[String]) -> Option<String> {
+    let orig: Vec<&str> = original.split_whitespace().collect();
+    let cand: Vec<&str> = candidate.split_whitespace().collect();
+    if orig.is_empty() || orig.len() != cand.len() {
+        return None;
+    }
+    let mut changed = false;
+    let mut out = Vec::with_capacity(orig.len());
+    for (before, after) in orig.iter().zip(cand.iter()) {
+        let left = alnum_core(before);
+        let right = alnum_core(after);
+        if left.is_empty() || right.is_empty() || left.eq_ignore_ascii_case(&right) {
+            out.push((*after).to_string());
+            continue;
+        }
+        if listed(&left, vocab) {
+            out.push((*before).to_string());
+            continue;
+        }
+        if crate::vocab::sounds_alike(&left, &right) {
+            out.push((*after).to_string());
+            changed = true;
+            continue;
+        }
+        return None;
+    }
+    changed.then(|| out.join(" "))
+}
+
+fn alnum_core(token: &str) -> String {
+    token.trim_matches(|c: char| !c.is_alphanumeric()).to_ascii_lowercase()
+}
+
+fn listed(word: &str, vocab: &[String]) -> bool {
+    vocab.iter().any(|entry| {
+        entry.eq_ignore_ascii_case(word)
+            || entry.split(|c: char| !c.is_alphanumeric()).any(|part| part.eq_ignore_ascii_case(word))
+    })
+}
+
+pub(crate) fn salvage_model_text(value: &str) -> String {
+    let value = final_channel(value).unwrap_or_else(|| value.to_string());
     let mut text = value.trim().to_string();
     if text.starts_with("```") {
         if let Some(newline) = text.find('\n') {
@@ -592,11 +671,37 @@ async fn request_cleanup(
     let system = system + &vocab_line();
     let user = transcript.trim();
     let max_tokens = (transcript.chars().count() as u32 / 2 + if plain { 96 } else { 48 }).clamp(48, 320);
-    let text = post_chat(client, api_key, model, &system, user, max_tokens, using_builtin).await?;
+    let text = post_chat(client, api_key, model, &system, user, max_tokens, using_builtin, CLEANUP_TIMEOUT, 768).await?;
     if text.trim().is_empty() {
         return Err(CleanupFail::Other("cleanup response had no text".into()));
     }
     Ok(text)
+}
+
+pub(crate) async fn complete_chat(
+    client: &reqwest::Client,
+    api_key: &str,
+    model: &str,
+    system: &str,
+    user: &str,
+    max_tokens: u32,
+    using_builtin: bool,
+    timeout: std::time::Duration,
+    reasoning_pad: u32,
+) -> Result<String, CleanupFail> {
+    post_chat(client, api_key, model, system, user, max_tokens, using_builtin, timeout, reasoning_pad).await
+}
+
+/// gpt-oss puts the answer after a final channel. When that was left in
+/// `content` or `reasoning` and `content` itself was empty, cleanup logged
+/// "had no text" and the take kept the raw transcript.
+fn final_channel(value: &str) -> Option<String> {
+    let marker = "<|channel|>final";
+    let at = value.rfind(marker)?;
+    let rest = &value[at + marker.len()..];
+    let body = rest.split_once("<|message|>").map(|(_, text)| text).unwrap_or(rest);
+    let body = body.trim().trim_end_matches("<|return|>").trim();
+    if body.is_empty() { None } else { Some(body.to_string()) }
 }
 
 async fn post_chat(
@@ -607,6 +712,8 @@ async fn post_chat(
     user: &str,
     max_tokens: u32,
     using_builtin: bool,
+    timeout: std::time::Duration,
+    reasoning_pad: u32,
 ) -> Result<String, CleanupFail> {
     let mut body = serde_json::json!({
         "model": model,
@@ -620,17 +727,25 @@ async fn post_chat(
     // gpt-oss models reason before answering, and reasoning tokens count
     // against max_tokens. With the small budget used here the answer was
     // often cut off before any text ("cleanup response had no text").
+    // gpt-oss reasons before it answers, and those tokens count against the
+    // completion budget. `max_tokens` is deprecated and was ignored, so the
+    // answer was cut off ("cleanup response had no text", 6 takes in the log).
+    // `max_completion_tokens` is the budget Groq actually applies.
     if model.starts_with("openai/gpt-oss") {
+        let budget = max_tokens.saturating_add(reasoning_pad);
         body["reasoning_effort"] = serde_json::json!("low");
-        body["include_reasoning"] = serde_json::json!(false);
-        // 512 still ran out on a few long takes (6 "no text" in the log).
-        body["max_tokens"] = serde_json::json!(max_tokens + 1024);
+        body["reasoning_format"] = serde_json::json!("hidden");
+        body["max_completion_tokens"] = serde_json::json!(budget);
+        body["max_tokens"] = serde_json::json!(budget);
     } else if model.starts_with("qwen/") {
         body["reasoning_effort"] = serde_json::json!("none");
+        body["max_completion_tokens"] = serde_json::json!(max_tokens);
+    } else {
+        body["max_completion_tokens"] = serde_json::json!(max_tokens);
     }
     let response = match client
         .post("https://api.groq.com/openai/v1/chat/completions")
-        .timeout(if system.starts_with("You translate") { TRANSLATE_TIMEOUT } else { CLEANUP_TIMEOUT })
+        .timeout(timeout)
         .bearer_auth(api_key)
         .json(&body)
         .send()
@@ -658,7 +773,17 @@ async fn post_chat(
         return Err(CleanupFail::Other("cleanup response had no text".into()));
     };
     if let Some(text) = message_text(message.content.as_ref()) {
-        return Ok(text);
+        if let Some(final_text) = final_channel(&text) {
+            return Ok(final_text);
+        }
+        if !text.trim().is_empty() {
+            return Ok(text);
+        }
+    }
+    if let Some(reasoning) = message.reasoning.as_deref() {
+        if let Some(final_text) = final_channel(reasoning) {
+            return Ok(final_text);
+        }
     }
     if let Some(refusal) = message.refusal.filter(|text| !text.trim().is_empty()) {
         return Err(CleanupFail::Other(compact_why(&refusal)));
@@ -737,6 +862,9 @@ struct ChatMessage {
     content: Option<serde_json::Value>,
     #[serde(default)]
     refusal: Option<String>,
+    /// Present when the final channel was not copied into `content`.
+    #[serde(default, alias = "reasoning_content")]
+    reasoning: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -928,7 +1056,7 @@ const COMMON_WORDS: &[&str] = &[
     "show", "side", "simple", "since", "small", "some", "something", "sometimes", "soon", "sorry", "start", "still",
     "such", "sure", "take", "than", "thank", "thanks", "that", "their", "them", "then", "there", "these",
     "thing", "things", "think", "this", "those", "though", "through", "time", "today", "together", "tomorrow", "totally",
-    "under", "until", "very", "want", "well", "were", "what", "whatever", "when", "where", "whether", "which",
+    "under", "until", "very", "want", "well", "were", "what", "whatever", "when", "where", "whether", "which", "wrote",
     "while", "will", "with", "within", "without", "work", "would", "wrong", "yeah", "year", "years", "your",
     "hello", "okay", "alright", "actually", "basically", "literally", "anyway", "also", "maybe", "english", "urdu", "hindi",
     "arabic", "project", "software", "architect", "system", "update", "version", "design", "section", "product", "page", "button",
@@ -1219,6 +1347,24 @@ mod tests {
         assert!(outcome.note.is_none());
         assert!(outcome.why.contains("timed out"));
         assert!(!outcome.why.contains('\n'));
+    }
+
+    #[test]
+    fn unreachable_cleanup_is_not_retried_and_a_homophone_can_be_salvaged() {
+        assert!(!should_retry_cleanup("couldn't reach Groq: timed out"));
+        assert!(!should_retry_cleanup("error sending request: timeout"));
+        assert!(should_retry_cleanup("rejected empty rewrite"));
+        assert!(should_retry_cleanup("rejected rewrite (40 chars, transcript 12 chars)"));
+        let saved = salvage_homophones(
+            "I roots the email yesterday",
+            "I wrote the email yesterday",
+            &crate::vocab::protected(&[]),
+        );
+        assert_eq!(saved.as_deref(), Some("I wrote the email yesterday"));
+        assert!(salvage_homophones("Open Bolo today", "Open Volo today", &crate::vocab::protected(&[])).is_none());
+        assert!(salvage_homophones("ship it", "ship it tomorrow", &[]).is_none());
+        let channeled = salvage_model_text("<|channel|>analysis<|message|>thinking<|channel|>final<|message|>Ship it tomorrow.");
+        assert_eq!(channeled, "Ship it tomorrow.");
     }
 
     #[test]

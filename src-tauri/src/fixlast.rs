@@ -337,14 +337,9 @@ pub async fn fix_with_text(app: AppHandle, id: Option<String>, text: String) -> 
     if lock(&state.settings).keep_learning {
         let mut settings = lock(&state.settings);
         let pair = memory::diff_fix(&target.text, &text);
-        let added = memory::update(|m| {
-            if let Some((from, to)) = &pair {
-                memory::add_correction(m, from, to, store::now_ms());
-                // The fixed spelling goes straight into My words.
-                memory::add_my_word(m, to);
-            }
-            let source = pair.as_ref().map(|(_, to)| to.clone()).unwrap_or_default();
-            memory::learn_from_fix(m, &source, &mut settings.dictionary)
+        let added = memory::update(|m| match &pair {
+            Some((from, to)) => memory::record_fix(m, &mut settings.dictionary, from, to, store::now_ms()),
+            None => Vec::new(),
         });
         if !added.is_empty() {
             if let Err(err) = store::save_settings(&state.config_dir, &settings) {

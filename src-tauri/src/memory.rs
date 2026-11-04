@@ -39,6 +39,15 @@ pub struct Memory {
     /// "My words": names and terms the user added or fixed. Always first in
     /// the Whisper prompt and kept exactly by cleanup.
     pub my_words: Vec<String>,
+    /// How often each My word showed up in a take. Most-used lead the prompt.
+    pub uses: Vec<WordUse>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WordUse {
+    pub word: String,
+    pub uses: u32,
 }
 
 impl Default for Memory {
@@ -50,6 +59,7 @@ impl Default for Memory {
             corrections: Vec::new(),
             style: Vec::new(),
             my_words: Vec::new(),
+            uses: Vec::new(),
         }
     }
 }
@@ -83,6 +93,7 @@ fn migrate(mut memory: Memory) -> Memory {
     memory.style.truncate(MAX_STYLE);
     memory.pending.truncate(MAX_PENDING);
     memory.my_words.truncate(MAX_MY_WORDS);
+    memory.uses.truncate(MAX_MY_WORDS);
     memory
 }
 
@@ -254,6 +265,7 @@ pub fn forget_word(memory: &mut Memory, dictionary: &mut Vec<String>, word: &str
     dictionary.retain(|w| !w.eq_ignore_ascii_case(word));
     memory.pending.retain(|w| !w.eq_ignore_ascii_case(word));
     memory.my_words.retain(|w| !w.eq_ignore_ascii_case(word));
+    memory.uses.retain(|w| !w.word.eq_ignore_ascii_case(word));
     if !memory.blocked.iter().any(|w| w.eq_ignore_ascii_case(word)) {
         memory.blocked.push(word.to_string());
         if memory.blocked.len() > MAX_BLOCKED {
@@ -263,7 +275,8 @@ pub fn forget_word(memory: &mut Memory, dictionary: &mut Vec<String>, word: &str
 }
 
 /// Pin a word or short name to "My words" (newest first). Returns true when
-/// it was added. Sentences and very long text are ignored.
+/// it was added. Sentences, common English, and very long text are ignored
+/// so junk never reaches the Whisper prompt. A repeat bumps its use count.
 pub fn add_my_word(memory: &mut Memory, word: &str) -> bool {
     let word = word.trim().trim_matches(|c: char| !c.is_alphanumeric());
     if word.is_empty()
@@ -273,13 +286,101 @@ pub fn add_my_word(memory: &mut Memory, word: &str) -> bool {
     {
         return false;
     }
-    if memory.my_words.iter().any(|w| w.eq_ignore_ascii_case(word)) {
+    if let Some(existing) = memory.my_words.iter().find(|w| w.eq_ignore_ascii_case(word)).cloned() {
+        bump(memory, &existing);
+        return false;
+    }
+    if !worth_prompt(word) {
         return false;
     }
     memory.blocked.retain(|w| !w.eq_ignore_ascii_case(word));
     memory.my_words.insert(0, word.to_string());
     memory.my_words.truncate(MAX_MY_WORDS);
+    bump(memory, word);
     true
+}
+
+fn worth_prompt(word: &str) -> bool {
+    if word.contains('.') || word.contains('@') {
+        return true;
+    }
+    word.split_whitespace().any(|part| part.chars().count() >= 3 && !crate::cleanup::is_common_word(part))
+}
+
+/// Most-used first. Equal counts keep list order (newest first).
+pub fn rank_my_words(memory: &Memory) -> Vec<String> {
+    let mut indexed: Vec<(usize, String)> = memory.my_words.iter().cloned().enumerate().collect();
+    indexed.sort_by(|a, b| use_of(memory, &b.1).cmp(&use_of(memory, &a.1)).then(a.0.cmp(&b.0)));
+    indexed.into_iter().map(|(_, word)| word).collect()
+}
+
+pub fn use_of(memory: &Memory, word: &str) -> u32 {
+    memory.uses.iter().find(|stat| stat.word.eq_ignore_ascii_case(word)).map(|stat| stat.uses).unwrap_or(0)
+}
+
+/// Count My words that actually appeared in this take.
+pub fn note_uses(memory: &mut Memory, text: &str) {
+    if text.trim().is_empty() {
+        return;
+    }
+    let heard: Vec<String> = memory.my_words.iter().filter(|word| contains_phrase(text, word)).cloned().collect();
+    for word in heard {
+        bump(memory, &word);
+    }
+}
+
+fn bump(memory: &mut Memory, word: &str) {
+    if let Some(stat) = memory.uses.iter_mut().find(|stat| stat.word.eq_ignore_ascii_case(word)) {
+        stat.uses = stat.uses.saturating_add(1);
+        return;
+    }
+    memory.uses.push(WordUse { word: word.to_string(), uses: 1 });
+    memory.uses.truncate(MAX_MY_WORDS);
+}
+
+fn contains_phrase(text: &str, phrase: &str) -> bool {
+    let words: Vec<String> = text
+        .split_whitespace()
+        .map(|word| word.trim_matches(|c: char| !c.is_alphanumeric() && c != '.' && c != '@').to_lowercase())
+        .filter(|word| !word.is_empty())
+        .collect();
+    let phrase: Vec<String> = phrase.split_whitespace().map(|word| word.to_lowercase()).collect();
+    if phrase.is_empty() {
+        return false;
+    }
+    if phrase.len() == 1 {
+        return words.iter().any(|word| word == &phrase[0]);
+    }
+    words.windows(phrase.len()).any(|window| window == phrase.as_slice())
+}
+
+/// Fix last: save wrong->right immediately, pin the right spelling, and keep
+/// the mishearing out of the prompt. No twice-seen wait.
+pub fn record_fix(memory: &mut Memory, dictionary: &mut Vec<String>, from: &str, to: &str, now: u64) -> Vec<String> {
+    add_correction(memory, from, to, now);
+    for word in from.split_whitespace().map(bare) {
+        if word.is_empty() || to.to_lowercase().contains(&word.to_lowercase()) {
+            continue;
+        }
+        dictionary.retain(|entry| !entry.eq_ignore_ascii_case(&word));
+        memory.pending.retain(|entry| !entry.eq_ignore_ascii_case(&word));
+        memory.my_words.retain(|entry| !entry.eq_ignore_ascii_case(&word));
+        memory.uses.retain(|entry| !entry.word.eq_ignore_ascii_case(&word));
+        if crate::vocab::SEED_WORDS.iter().any(|seed| seed.eq_ignore_ascii_case(&word)) {
+            continue;
+        }
+        if word.chars().count() >= 4
+            && !crate::cleanup::is_common_word(&word)
+            && !memory.blocked.iter().any(|entry| entry.eq_ignore_ascii_case(&word))
+        {
+            memory.blocked.push(word);
+            if memory.blocked.len() > MAX_BLOCKED {
+                memory.blocked.remove(0);
+            }
+        }
+    }
+    add_my_word(memory, to);
+    learn_from_fix(memory, to, dictionary)
 }
 
 pub fn forget_everything(memory: &mut Memory, dictionary: &mut Vec<String>) {

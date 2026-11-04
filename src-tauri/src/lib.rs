@@ -1,3 +1,4 @@
+mod accuracy;
 mod audio;
 mod builtin;
 mod chunk;
@@ -19,6 +20,7 @@ mod memory;
 mod micwatch;
 mod offline;
 mod pipeline;
+mod sense;
 mod spool;
 #[cfg(windows)]
 mod startup;
