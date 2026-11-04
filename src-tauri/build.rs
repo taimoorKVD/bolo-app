@@ -13,7 +13,7 @@ fn main() {
 /// `option_env!("BOLO_BUILTIN_GROQ_KEY")` is the wrong read here. The macro
 /// expands when *this build script* is compiled, so a later `cargo build` with
 /// the variable set would keep the old value, and the same macro in the
-/// application crate would leave a plaintext `&'static str` in `cadence.exe`.
+/// application crate would leave a plaintext `&'static str` in `bolo.exe`.
 /// `std::env::var` is the build-script equivalent: it sees the variable for
 /// this build, and only the XOR'd bytes are emitted.
 fn emit_builtin_key() {
@@ -30,7 +30,7 @@ fn emit_builtin_key() {
     } else {
         key.bytes()
             .enumerate()
-            .map(|(index, byte)| byte ^ mask[index % mask.len()])
+            .map(|(index, byte)| mix_key_byte(index, byte, &mask))
             .collect()
     };
     let out_dir = std::env::var_os("OUT_DIR").expect("OUT_DIR");
@@ -57,4 +57,13 @@ fn emit_builtin_key() {
     }
     body.push_str("\n];\n");
     fs::write(&path, body).expect("write builtin_key.rs");
+}
+
+/// Keep this in sync with `builtin::obfuscate`. Index-dependent so the mask
+/// does not repeat every 16 bytes. This is not a secret; it only keeps the
+/// key out of `strings` output.
+fn mix_key_byte(index: usize, byte: u8, mask: &[u8]) -> u8 {
+    let mask_byte = mask[index % mask.len()];
+    let spin = (index as u8).wrapping_mul(0x5B).wrapping_add(0x3C);
+    byte ^ mask_byte ^ spin
 }

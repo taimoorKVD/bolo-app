@@ -213,13 +213,109 @@ pub(crate) fn decode_secret(bytes: &[u8]) -> Option<String> {
     }
 }
 
-#[cfg(windows)]
+/// Process-wide lock for tests that share the isolated credential files.
+#[cfg(test)]
+pub(crate) static CRED_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Where keys are stored when this process must not touch Credential Manager.
+/// Tests always get the isolated folder. A real launch uses the OS store
+/// unless `BOLO_CONFIG_DIR` or `BOLO_CREDENTIALS_DIR` is set (smoke tests).
+pub(crate) fn credential_store_dir() -> Option<std::path::PathBuf> {
+    if cfg!(test) {
+        let dir = crate::isolate::isolated_config_dir().join("credentials");
+        if crate::isolate::is_inside_real_config(&dir) {
+            panic!("test credential store resolved inside the real user config");
+        }
+        return Some(dir);
+    }
+    if let Some(dir) = std::env::var_os("BOLO_CREDENTIALS_DIR") {
+        let dir = std::path::PathBuf::from(dir);
+        if !dir.as_os_str().is_empty() {
+            return Some(dir);
+        }
+    }
+    if let Some(dir) = std::env::var_os("BOLO_CONFIG_DIR") {
+        let dir = std::path::PathBuf::from(dir);
+        if !dir.as_os_str().is_empty() {
+            return Some(dir.join("credentials"));
+        }
+    }
+    None
+}
+
 fn write_target(target: &str, secret: &str) -> anyhow::Result<()> {
     write_blob(target, secret.as_bytes())
 }
 
-#[cfg(windows)]
 fn write_blob(target: &str, secret: &[u8]) -> anyhow::Result<()> {
+    if let Some(dir) = credential_store_dir() {
+        return file_write(&dir, target, secret);
+    }
+    platform_write_blob(target, secret)
+}
+
+fn read_target(target: &str) -> anyhow::Result<Option<String>> {
+    if let Some(dir) = credential_store_dir() {
+        return file_read(&dir, target);
+    }
+    platform_read_target(target)
+}
+
+fn delete_target(target: &str) -> anyhow::Result<()> {
+    if let Some(dir) = credential_store_dir() {
+        return file_delete(&dir, target);
+    }
+    platform_delete_target(target)
+}
+
+fn file_name(target: &str) -> String {
+    target
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '.' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn file_write(dir: &std::path::Path, target: &str, secret: &[u8]) -> anyhow::Result<()> {
+    std::fs::create_dir_all(dir).context("couldn't create the isolated credential folder")?;
+    let path = dir.join(file_name(target));
+    std::fs::write(&path, secret).with_context(|| format!("couldn't write isolated credential {target}"))?;
+    Ok(())
+}
+
+fn file_read(dir: &std::path::Path, target: &str) -> anyhow::Result<Option<String>> {
+    let path = dir.join(file_name(target));
+    match std::fs::read(&path) {
+        Ok(bytes) => Ok(decode_secret(&bytes)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err).context("couldn't read the isolated credential"),
+    }
+}
+
+fn file_delete(dir: &std::path::Path, target: &str) -> anyhow::Result<()> {
+    let path = dir.join(file_name(target));
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err).context("couldn't remove the isolated credential"),
+    }
+}
+
+fn refuse_real_store_from_tests() -> anyhow::Result<()> {
+    if cfg!(test) {
+        anyhow::bail!("a test tried to use the real Groq key store");
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn platform_write_blob(target: &str, secret: &[u8]) -> anyhow::Result<()> {
+    refuse_real_store_from_tests()?;
     use windows::Win32::Security::Credentials::{CredWriteW, CREDENTIALW, CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_GENERIC};
     use windows::core::PWSTR;
 
@@ -249,7 +345,8 @@ fn write_blob(target: &str, secret: &[u8]) -> anyhow::Result<()> {
 }
 
 #[cfg(windows)]
-fn read_target(target: &str) -> anyhow::Result<Option<String>> {
+fn platform_read_target(target: &str) -> anyhow::Result<Option<String>> {
+    refuse_real_store_from_tests()?;
     use windows::Win32::Security::Credentials::{CredFree, CredReadW, CRED_TYPE_GENERIC};
     use windows::core::PCWSTR;
 
@@ -281,7 +378,8 @@ fn read_target(target: &str) -> anyhow::Result<Option<String>> {
 }
 
 #[cfg(windows)]
-fn delete_target(target: &str) -> anyhow::Result<()> {
+fn platform_delete_target(target: &str) -> anyhow::Result<()> {
+    refuse_real_store_from_tests()?;
     use windows::Win32::Security::Credentials::{CredDeleteW, CRED_TYPE_GENERIC};
     use windows::core::PCWSTR;
 
@@ -306,7 +404,9 @@ fn is_missing(err: &windows::core::Error) -> bool {
 }
 
 #[cfg(not(windows))]
-fn write_target(target: &str, secret: &str) -> anyhow::Result<()> {
+fn platform_write_blob(target: &str, secret: &[u8]) -> anyhow::Result<()> {
+    refuse_real_store_from_tests()?;
+    let secret = std::str::from_utf8(secret).context("credential blob was not utf-8")?;
     let service = service_for_target(target).unwrap_or(SERVICE);
     let entry = keyring::Entry::new(service, ACCOUNT).context("couldn't open the credential store")?;
     entry
@@ -316,7 +416,8 @@ fn write_target(target: &str, secret: &str) -> anyhow::Result<()> {
 }
 
 #[cfg(not(windows))]
-fn read_target(target: &str) -> anyhow::Result<Option<String>> {
+fn platform_read_target(target: &str) -> anyhow::Result<Option<String>> {
+    refuse_real_store_from_tests()?;
     let Some(service) = service_for_target(target) else {
         return Ok(None);
     };
@@ -332,7 +433,8 @@ fn read_target(target: &str) -> anyhow::Result<Option<String>> {
 }
 
 #[cfg(not(windows))]
-fn delete_target(target: &str) -> anyhow::Result<()> {
+fn platform_delete_target(target: &str) -> anyhow::Result<()> {
+    refuse_real_store_from_tests()?;
     let Some(service) = service_for_target(target) else {
         return Ok(());
     };
@@ -346,11 +448,11 @@ fn delete_target(target: &str) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    /// The Credential Manager tests share one real entry; running them in
-    /// parallel let one restore the other's probe key over the user's key.
-    static CRED_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     use super::*;
+
+    fn lock() -> std::sync::MutexGuard<'static, ()> {
+        CRED_TEST_LOCK.lock().unwrap_or_else(|poison| poison.into_inner())
+    }
 
     #[test]
     fn rejects_blank_and_short_keys() {
@@ -405,32 +507,19 @@ mod tests {
         assert_eq!(decode_secret(&[]), None);
     }
 
-    /// Real Credential Manager round trip. Restores whatever was stored so a
-    /// local self-test does not wipe the user's Groq key.
-    #[cfg(windows)]
+    /// Round trip stays in the temp credential folder. It must not touch
+    /// Credential Manager or the user's Groq key.
     #[test]
-    #[ignore = "touches the real Groq key in Credential Manager"]
-    fn windows_credential_round_trip_restores_the_previous_key() {
-        let _serial = CRED_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let previous = load_api_key().expect("read current key");
-        struct Restore(Option<String>);
-        impl Drop for Restore {
-            fn drop(&mut self) {
-                match self.0.take() {
-                    Some(key) => {
-                        let _ = set_api_key(&key);
-                    }
-                    None => {
-                        let _ = clear_api_key();
-                    }
-                }
-            }
-        }
-        let _restore = Restore(previous);
+    fn credential_round_trip_stays_in_the_isolated_store() {
+        let _serial = lock();
+        clear_api_key().expect("clear");
         let probe = "gsk_bolo_selftest_key_123456";
         set_api_key(probe).expect("save probe key");
-        let loaded = load_api_key().expect("read probe key");
-        assert_eq!(loaded.as_deref(), Some(probe));
+        let dir = credential_store_dir().expect("isolated store");
+        assert!(dir.starts_with(crate::isolate::isolated_config_dir()));
+        assert!(!crate::isolate::is_inside_real_config(&dir));
+        assert!(dir.join(file_name(TARGET)).is_file());
+        assert_eq!(load_api_key().expect("read").as_deref(), Some(probe));
         let reported = status();
         assert!(reported.configured);
         assert_eq!(reported.hint.as_deref(), Some("····3456"));
@@ -440,46 +529,70 @@ mod tests {
     }
 
     /// A blob written the way keyring 3 writes Windows passwords must still load.
-    #[cfg(windows)]
     #[test]
-    #[ignore = "writes a throwaway entry to Windows Credential Manager"]
-    fn windows_reads_a_legacy_utf16_blob() {
+    fn reads_a_legacy_utf16_blob_from_the_isolated_store() {
+        let _serial = lock();
         let target = format!("com.cadence.dictation/selftest-utf16-{}", std::process::id());
         let secret = "gsk_legacy_utf16_key_123456";
         let blob: Vec<u8> = secret.encode_utf16().flat_map(|unit| unit.to_le_bytes()).collect();
         write_blob(&target, &blob).expect("write utf16 blob");
         let loaded = read_target(&target).expect("read utf16 blob");
         delete_target(&target).expect("delete utf16 blob");
+        let dir = credential_store_dir().expect("isolated store");
+        assert!(!dir.join(file_name(&target)).exists());
+        assert!(!crate::isolate::is_inside_real_config(&dir));
         assert_eq!(loaded.as_deref(), Some(secret));
     }
 
     /// A key saved by Cadence must load, and a copy must land on the Bolo
-    /// target, without deleting the original entry.
-    #[cfg(windows)]
+    /// target, without deleting the original entry. Both files are in the
+    /// isolated store.
     #[test]
-    #[ignore = "touches the real Groq key in Credential Manager"]
-    fn windows_copies_a_cadence_credential_forward() {
-        let _serial = CRED_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let previous = load_api_key().expect("read current key");
-        struct Restore(Option<String>);
-        impl Drop for Restore {
-            fn drop(&mut self) {
-                let _ = clear_api_key();
-                if let Some(key) = self.0.take() {
-                    let _ = set_api_key(&key);
-                }
-            }
-        }
-        let _restore = Restore(previous);
+    fn copies_a_cadence_credential_forward_without_touching_the_real_key() {
+        let _serial = lock();
         clear_api_key().expect("clear before carryover");
         let probe = "gsk_cadence_carry_forward_key_99";
         write_target(CADENCE_TARGET, probe).expect("write cadence target");
         assert_eq!(read_target(TARGET).expect("read new target"), None);
         assert_eq!(load_api_key().expect("load").as_deref(), Some(probe));
         assert_eq!(read_target(TARGET).expect("copied").as_deref(), Some(probe));
+        assert_eq!(read_target(CADENCE_TARGET).expect("old entry").as_deref(), Some(probe));
+        let dir = credential_store_dir().expect("isolated store");
+        assert!(dir.starts_with(std::env::temp_dir()));
+        assert!(!crate::isolate::is_inside_real_config(&dir.join(file_name(TARGET))));
+        clear_api_key().expect("clear probe");
+    }
+
+    #[test]
+    fn tests_cannot_overwrite_the_real_config_or_groq_key() {
+        let _serial = lock();
+        let real = crate::isolate::real_user_config_dir();
+        let legacy = crate::isolate::real_legacy_config_dir();
+        let settings_before = std::fs::metadata(real.join("settings.json")).ok().map(|meta| meta.len());
+        let legacy_before = std::fs::metadata(legacy.join("settings.json")).ok().map(|meta| meta.len());
+        let log_existed = real.join("bolo.log").exists();
+        assert!(crate::store::save_settings(&real, &crate::store::Settings::default()).is_err());
+        assert!(crate::store::save_history(&real, &[]).is_err());
+        assert!(crate::store::save_settings(&legacy, &crate::store::Settings::default()).is_err());
+        crate::logbuf::log_line(&real, "info", "must not land in the user profile");
         assert_eq!(
-            read_target(CADENCE_TARGET).expect("old entry").as_deref(),
-            Some(probe)
+            std::fs::metadata(real.join("settings.json")).ok().map(|meta| meta.len()),
+            settings_before
         );
+        assert_eq!(
+            std::fs::metadata(legacy.join("settings.json")).ok().map(|meta| meta.len()),
+            legacy_before
+        );
+        if !log_existed {
+            assert!(!real.join("bolo.log").exists(), "a test created the real bolo.log");
+        }
+        let probe = "gsk_isolation_guard_key_1234567890";
+        set_api_key(probe).expect("save probe");
+        let dir = credential_store_dir().expect("store");
+        assert!(dir.starts_with(crate::isolate::isolated_config_dir()));
+        assert!(!crate::isolate::is_inside_real_config(&dir));
+        assert_eq!(load_api_key().expect("load").as_deref(), Some(probe));
+        assert!(dir.join(file_name(TARGET)).is_file());
+        clear_api_key().ok();
     }
 }

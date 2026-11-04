@@ -342,7 +342,8 @@ fn retry_plan_backs_off_then_falls_back_to_this_pc() {
     assert_eq!(retry_plan(FailKind::Unavailable, 0), RetryPlan::Backoff { ms: 250 });
     assert_eq!(retry_plan(FailKind::Unavailable, 1), RetryPlan::Backoff { ms: 750 });
     assert_eq!(retry_plan(FailKind::Unavailable, 2), RetryPlan::Stop { fallback: true });
-    assert_eq!(retry_plan(FailKind::Rejected, 0), RetryPlan::Stop { fallback: false }, "a bad key must be shown, not hidden");
+    assert_eq!(retry_plan(FailKind::Rejected, 0), RetryPlan::Backoff { ms: 400 }, "a rejected key is retried once");
+    assert_eq!(retry_plan(FailKind::Rejected, 1), RetryPlan::Stop { fallback: true }, "then the on-device model takes the chunk");
 }
 
 #[test]

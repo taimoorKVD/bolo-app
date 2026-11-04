@@ -19,8 +19,8 @@ mod memory;
 mod micwatch;
 mod offline;
 mod pipeline;
+mod isolate;
 mod spool;
-#[cfg(windows)]
 mod startup;
 mod store;
 mod transcribe;
@@ -33,6 +33,8 @@ mod live_tests;
 mod harness;
 #[cfg(test)]
 mod qa_tests;
+#[cfg(test)]
+mod regressions;
 
 use crate::credentials::ApiKeyStatus;
 use crate::dictation::AppState;
@@ -251,9 +253,18 @@ fn config_dir(app: &tauri::App) -> std::path::PathBuf {
             return dir;
         }
     }
-    app.path()
-        .app_config_dir()
-        .unwrap_or_else(|_| std::env::temp_dir().join("bolo"))
+    // Unit tests never fall through to the real app-config folder.
+    #[cfg(test)]
+    {
+        let _ = app;
+        return isolate::isolated_config_dir();
+    }
+    #[cfg(not(test))]
+    {
+        app.path()
+            .app_config_dir()
+            .unwrap_or_else(|_| std::env::temp_dir().join("bolo"))
+    }
 }
 
 fn create_windows(app: &tauri::App, smoke: bool) -> Result<(), String> {

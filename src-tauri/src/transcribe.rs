@@ -15,7 +15,7 @@ pub enum FailKind {
     RateLimit,
     /// Network failure or HTTP 5xx. A few backoffs, then the on-device model.
     Unavailable,
-    /// The key was rejected. Do not hide that behind the on-device model.
+    /// The key was rejected. Retry once, then the on-device model may take the chunk.
     Rejected,
     Other,
 }
@@ -46,10 +46,24 @@ pub enum RetryPlan {
     Stop { fallback: bool },
 }
 
+/// What the overlay may say when Groq rejects the key. No settings, no
+/// Windows, no "API key" — Bolo retries and falls back on its own.
+pub const REJECTED_KEY_MESSAGE: &str =
+    "Dictation had a brief problem. Bolo will try again on its own.";
+
 /// `attempt` is how many failures have already been seen, starting at 0.
 pub fn retry_plan(kind: FailKind, attempt: u32) -> RetryPlan {
     match kind {
-        FailKind::Rejected | FailKind::Other => RetryPlan::Stop { fallback: false },
+        // A single rejection is often a blip. Retry once, then let the
+        // on-device model take the chunk instead of stopping the take.
+        FailKind::Rejected => {
+            if attempt == 0 {
+                RetryPlan::Backoff { ms: 400 }
+            } else {
+                RetryPlan::Stop { fallback: true }
+            }
+        }
+        FailKind::Other => RetryPlan::Stop { fallback: false },
         FailKind::RateLimit => {
             if attempt == 0 {
                 RetryPlan::Backoff { ms: 700 }
@@ -117,8 +131,8 @@ pub async fn prewarm(log_dir: &std::path::Path) {
     }
 }
 
-const PREWARM_TRIES: u32 = 2;
-const PREWARM_RETRY_DELAY: Duration = Duration::from_secs(3);
+pub(crate) const PREWARM_TRIES: u32 = 2;
+pub(crate) const PREWARM_RETRY_DELAY: Duration = Duration::from_secs(3);
 
 /// An error with its causes. reqwest's own text is only "error sending
 /// request for url (...)", which hid whether DNS, connect, or TLS failed.
@@ -207,16 +221,14 @@ fn snippet(text: &str, max_chars: usize) -> String {
 }
 
 /// Drop Whisper prompt echoes that sometimes prepend the pasted transcript.
-fn strip_prompt_leak(text: &str) -> String {
+pub(crate) fn strip_prompt_leak(text: &str) -> String {
     let mut out = text.trim().to_string();
     loop {
         let before = out.clone();
         let trimmed = out.trim_start();
-        let next = if let Some(rest) = trimmed.strip_prefix("Recent dictation:") {
+        let next = if let Some(rest) = strip_known_prefix(trimmed) {
             rest
-        } else if let Some(rest) = trimmed.strip_prefix("Dictation transcript.") {
-            rest
-        } else if let Some(rest) = trimmed.strip_prefix("Dictation transcript:") {
+        } else if let Some(rest) = strip_term_instruction(trimmed) {
             rest
         } else {
             break;
@@ -231,6 +243,31 @@ fn strip_prompt_leak(text: &str) -> String {
         }
     }
     out
+}
+
+fn strip_known_prefix(text: &str) -> Option<String> {
+    const PREFIXES: &[&str] = &[
+        "Recent dictation:",
+        "Dictation transcript.",
+        "Dictation transcript:",
+    ];
+    for prefix in PREFIXES {
+        if let Some(rest) = text.strip_prefix(prefix) {
+            return Some(rest.to_string());
+        }
+    }
+    None
+}
+
+/// "Spell these terms exactly when spoken: Bolo, Tauri." is the prompt, not speech.
+/// Drop that sentence, including the term list, when Whisper echoes it.
+fn strip_term_instruction(text: &str) -> Option<String> {
+    const MARKER: &str = "Spell these terms exactly when spoken:";
+    let rest = text.strip_prefix(MARKER)?;
+    match rest.find('.') {
+        Some(index) => Some(rest[index + 1..].to_string()),
+        None => Some(String::new()),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -862,6 +899,12 @@ mod tests {
             strip_prompt_leak("Recent dictation:\"Hey, can you listen to me?\""),
             "Hey, can you listen to me?"
         );
+        assert_eq!(
+            strip_prompt_leak(
+                "Dictation transcript. Spell these terms exactly when spoken: Bolo, Tauri. Ship it tomorrow."
+            ),
+            "Ship it tomorrow."
+        );
         assert_eq!(strip_prompt_leak("Ship it tomorrow."), "Ship it tomorrow.");
     }
 
@@ -886,7 +929,10 @@ mod tests {
         assert_eq!(retry_plan(FailKind::Unavailable, 0), RetryPlan::Backoff { ms: 250 });
         assert_eq!(retry_plan(FailKind::Unavailable, 1), RetryPlan::Backoff { ms: 750 });
         assert_eq!(retry_plan(FailKind::Unavailable, 2), RetryPlan::Stop { fallback: true });
-        assert_eq!(retry_plan(FailKind::Rejected, 0), RetryPlan::Stop { fallback: false });
+        assert_eq!(retry_plan(FailKind::Rejected, 0), RetryPlan::Backoff { ms: 400 });
+        assert_eq!(retry_plan(FailKind::Rejected, 1), RetryPlan::Stop { fallback: true });
+        assert!(!REJECTED_KEY_MESSAGE.to_lowercase().contains("settings"));
+        assert!(!REJECTED_KEY_MESSAGE.to_lowercase().contains("windows"));
         let failure = GroqFailure {
             message: "Groq is rate limiting requests right now".into(),
             kind: FailKind::RateLimit,

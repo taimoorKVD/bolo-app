@@ -5,7 +5,7 @@ Releases are automated by `.github/workflows/release.yml`. It mirrors
 
 ## How to ship
 
-1. Bump the version in `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml` and `package.json`, then commit to `main`.
+1. Bump the version in `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml`, `package.json`, and `package-lock.json` (the root package), then commit to `main`. Keep `productName` as `Bolo.com`: that string is the NSIS install folder and uninstall key, and changing it installs a second copy next to 0.1.6 instead of upgrading it. The exe name is `bolo.exe` (`mainBinaryName`). Do not change the Microsoft Store Identity Name or Publisher.
 2. Tag and push: `git tag -a v0.1.6 -m "What changed"` then `git push origin v0.1.6`.
    The tag message becomes the updater notes. The tag must equal the app version or the run stops.
 3. When the run is green, download `Bolo_<v>.0_x64.msixupload` from the GitHub Release and submit it in

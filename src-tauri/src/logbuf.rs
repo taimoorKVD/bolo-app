@@ -20,6 +20,9 @@ pub fn log_line(dir: &Path, level: &str, message: &str) {
         .unwrap_or(0);
     let line = format!("{millis} {level} {message}");
     eprintln!("{line}");
+    if cfg!(test) && crate::isolate::is_inside_real_config(dir) {
+        return;
+    }
     let _ = fs::create_dir_all(dir);
     if let Ok(mut file) = OpenOptions::new()
         .create(true)

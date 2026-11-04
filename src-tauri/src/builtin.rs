@@ -1,8 +1,12 @@
 //! Built-in Groq key compiled into the binary.
 //!
-//! `build.rs` reads `BOLO_BUILTIN_GROQ_KEY` and writes XOR bytes to `OUT_DIR`.
+//! `build.rs` reads `BOLO_BUILTIN_GROQ_KEY` and writes mixed bytes to `OUT_DIR`.
 //! This module never sees a string literal of the key. An empty slice means
 //! this build has no built-in key, and the user must save their own.
+//!
+//! The mix is not encryption. Anyone with the binary can recover the key, and
+//! a stolen key can be billed until it is rotated. A small relay that holds
+//! the key is the real fix; it is not built into this app.
 
 use zeroize::Zeroize;
 
@@ -41,7 +45,11 @@ pub fn obfuscate(plain: &[u8], mask: &[u8]) -> Vec<u8> {
     plain
         .iter()
         .enumerate()
-        .map(|(index, byte)| byte ^ mask[index % mask.len()])
+        .map(|(index, byte)| {
+            let mask_byte = mask[index % mask.len()];
+            let spin = (index as u8).wrapping_mul(0x5B).wrapping_add(0x3C);
+            byte ^ mask_byte ^ spin
+        })
         .collect()
 }
 

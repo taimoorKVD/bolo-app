@@ -15,7 +15,11 @@ if (-not $Version) { $v = (Get-Content "$root\src-tauri\tauri.conf.json" -Raw | 
 # (--no-default-features drops the `updater` cargo feature). It builds into its
 # own target dir so an updater-enabled NSIS build can never be packaged by mistake.
 $storeTarget = "$root\src-tauri\target-store"
-$exe = "$storeTarget\release\cadence.exe"
+# The cargo package is `bolo`, so the unpacked binary is bolo.exe. The package
+# copies it to Bolo.exe for the manifest. Identity Name and Publisher come from
+# Partner Center (Store product 9NMW6C99BF04). Do not hardcode a new identity:
+# a different Name is a different app and existing Store installs will not update.
+$exe = "$storeTarget\release\bolo.exe"
 if (-not $SkipBuild -or -not (Test-Path $exe)) {
   Push-Location $root
   $env:CARGO_TARGET_DIR = $storeTarget
@@ -51,7 +55,7 @@ foreach ($f in "StoreLogo.png","Square150x150Logo.png","Square44x44Logo.png","Sq
   IgnorableNamespaces="uap desktop rescap">
   <Identity Name="$IdentityName" Publisher="$Publisher" Version="$Version" ProcessorArchitecture="x64" />
   <Properties>
-    <DisplayName>Bolo.com</DisplayName>
+    <DisplayName>Bolo</DisplayName>
     <PublisherDisplayName>$PublisherDisplayName</PublisherDisplayName>
     <Logo>Assets\StoreLogo.png</Logo>
   </Properties>
@@ -61,7 +65,7 @@ foreach ($f in "StoreLogo.png","Square150x150Logo.png","Square44x44Logo.png","Sq
   <Resources><Resource Language="en-us" /></Resources>
   <Applications>
     <Application Id="Bolo" Executable="Bolo.exe" EntryPoint="Windows.FullTrustApplication">
-      <uap:VisualElements DisplayName="Bolo.com" Description="Push-to-talk voice dictation"
+      <uap:VisualElements DisplayName="Bolo" Description="Push-to-talk voice dictation"
         BackgroundColor="transparent" Square150x150Logo="Assets\Square150x150Logo.png" Square44x44Logo="Assets\Square44x44Logo.png">
         <uap:DefaultTile Wide310x150Logo="Assets\Wide310x150Logo.png" Square310x310Logo="Assets\Square310x310Logo.png" Square71x71Logo="Assets\Square71x71Logo.png" />
       </uap:VisualElements>

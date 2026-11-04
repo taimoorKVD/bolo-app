@@ -64,43 +64,70 @@ mod imp {
     }
 
     pub async fn check(app: &AppHandle, background: bool) -> Result<Option<UpdateInfo>, String> {
-        let started = std::time::Instant::now();
-        let result = async {
-            let updater = app.updater().map_err(|err| err.to_string())?;
-            updater.check().await.map_err(|err| err.to_string())
-        }
-        .await;
-        let ms = started.elapsed().as_millis();
-        match result {
-            Ok(Some(update)) => {
-                let info = UpdateInfo {
-                    current_version: update.current_version.clone(),
-                    version: update.version.clone(),
-                    notes: update.body.clone().unwrap_or_default(),
-                    date: update.date.map(|date| date.to_string()),
-                };
-                log_line(&dir(app), "info", &format!("update available version={} check_ms={ms}", info.version));
-                let pending = app.state::<Pending>();
-                *pending.update.lock().unwrap_or_else(|err| err.into_inner()) = Some(update);
-                let first_time = {
-                    let mut seen = pending.announced.lock().unwrap_or_else(|err| err.into_inner());
-                    let fresh = seen.as_deref() != Some(info.version.as_str());
-                    *seen = Some(info.version.clone());
-                    fresh
-                };
-                if background && first_time {
-                    let _ = app.emit("update-available", &info);
-                    crate::show_settings(app);
+        let mut attempt = 0u32;
+        loop {
+            let started = std::time::Instant::now();
+            let result = async {
+                let updater = app.updater().map_err(|err| err.to_string())?;
+                updater.check().await.map_err(|err| err.to_string())
+            }
+            .await;
+            let ms = started.elapsed().as_millis();
+            match result {
+                Ok(Some(update)) => {
+                    let info = UpdateInfo {
+                        current_version: update.current_version.clone(),
+                        version: update.version.clone(),
+                        notes: update.body.clone().unwrap_or_default(),
+                        date: update.date.map(|date| date.to_string()),
+                    };
+                    log_line(&dir(app), "info", &format!("update available version={} check_ms={ms}", info.version));
+                    let pending = app.state::<Pending>();
+                    *pending.update.lock().unwrap_or_else(|err| err.into_inner()) = Some(update);
+                    let first_time = {
+                        let mut seen = pending.announced.lock().unwrap_or_else(|err| err.into_inner());
+                        let fresh = seen.as_deref() != Some(info.version.as_str());
+                        *seen = Some(info.version.clone());
+                        fresh
+                    };
+                    if background && first_time {
+                        let _ = app.emit("update-available", &info);
+                        crate::show_settings(app);
+                    }
+                    return Ok(Some(info));
                 }
-                Ok(Some(info))
-            }
-            Ok(None) => {
-                log_line(&dir(app), "info", &format!("update check: up to date check_ms={ms}"));
-                Ok(None)
-            }
-            Err(err) => {
-                log_line(&dir(app), "warn", &format!("update check failed check_ms={ms} err={err}"));
-                Err(err)
+                Ok(None) => {
+                    log_line(&dir(app), "info", &format!("update check: up to date check_ms={ms}"));
+                    return Ok(None);
+                }
+                Err(err) if super::update_error_is_transient(&err) => {
+                    if let Some(delay) = super::update_check_backoff(attempt) {
+                        // Info, not a warning: a blip that we are about to retry
+                        // is not a failure the user should see.
+                        log_line(
+                            &dir(app),
+                            "info",
+                            &format!(
+                                "update check retrying after a network blip attempt={} wait_ms={} check_ms={ms} err={err}",
+                                attempt + 1,
+                                delay.as_millis()
+                            ),
+                        );
+                        sleep(delay).await;
+                        attempt += 1;
+                        continue;
+                    }
+                    log_line(
+                        &dir(app),
+                        "warn",
+                        &format!("update check failed check_ms={ms} attempts={} err={err}", attempt + 1),
+                    );
+                    return Err(err);
+                }
+                Err(err) => {
+                    log_line(&dir(app), "warn", &format!("update check failed check_ms={ms} err={err}"));
+                    return Err(err);
+                }
             }
         }
     }
@@ -180,6 +207,60 @@ mod imp {
 }
 
 pub use imp::{check, enabled, init, install, pending, spawn};
+
+/// Quiet waits after a dropped update check. `None` means the failure is real
+/// and may be shown. Brief network blips never get that far.
+pub fn update_check_backoff(attempt: u32) -> Option<std::time::Duration> {
+    match attempt {
+        0 => Some(std::time::Duration::from_millis(750)),
+        1 => Some(std::time::Duration::from_secs(2)),
+        2 => Some(std::time::Duration::from_secs(5)),
+        _ => None,
+    }
+}
+
+/// True for a dropped connection, DNS failure, or timeout. A bad signature
+/// or a missing file is not transient and should surface immediately.
+pub fn update_error_is_transient(err: &str) -> bool {
+    let err = err.to_ascii_lowercase();
+    const HINTS: &[&str] = &[
+        "timed out",
+        "timeout",
+        "dns",
+        "connect",
+        "connection",
+        "network",
+        "offline",
+        "tls",
+        "reset",
+        "unreachable",
+        "os error",
+        "temporary",
+        "failed to fetch",
+        "error sending request",
+        "couldn't reach",
+        "could not resolve",
+    ];
+    HINTS.iter().any(|hint| err.contains(hint))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_brief_network_drop_is_retried_quietly_then_given_up() {
+        assert_eq!(update_check_backoff(0), Some(std::time::Duration::from_millis(750)));
+        assert_eq!(update_check_backoff(1), Some(std::time::Duration::from_secs(2)));
+        assert_eq!(update_check_backoff(2), Some(std::time::Duration::from_secs(5)));
+        assert_eq!(update_check_backoff(3), None);
+        assert!(update_error_is_transient("error sending request for url: dns error: no such host"));
+        assert!(update_error_is_transient("connection reset by peer"));
+        assert!(update_error_is_transient("operation timed out"));
+        assert!(!update_error_is_transient("signature verification failed"));
+        assert!(!update_error_is_transient("404 not found"));
+    }
+}
 
 #[tauri::command]
 pub async fn check_for_update(app: tauri::AppHandle) -> Result<Option<UpdateInfo>, String> {

@@ -2,7 +2,7 @@
 //!
 //! Two chunks run at a time. The rest wait, so a long take does not stampede Groq.
 //! Each chunk tries Groq first and falls back to whisper.cpp on rate limit,
-//! server error, or a network failure. The following take tries Groq again.
+//! a rejected key, a server error, or a network failure. The following take tries Groq again.
 
 use crate::audio::{self, FinishedAudio, SpeechError};
 use crate::credentials::SecretKey;
@@ -556,7 +556,7 @@ fn log_speech(env: &JobEnv, language: &str, path: &str) {
 fn should_fallback(err: &anyhow::Error) -> bool {
     matches!(
         transcribe::failure_kind(err),
-        Some(FailKind::RateLimit | FailKind::Unavailable)
+        Some(FailKind::RateLimit | FailKind::Unavailable | FailKind::Rejected)
     )
 }
 
@@ -594,6 +594,17 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn a_rejected_key_falls_back_to_the_on_device_model() {
+        let err = anyhow::Error::from(transcribe::GroqFailure {
+            message: transcribe::REJECTED_KEY_MESSAGE.into(),
+            kind: FailKind::Rejected,
+        });
+        assert!(should_fallback(&err));
+        let other = anyhow::Error::msg("not a groq failure");
+        assert!(!should_fallback(&other));
+    }
 
     #[test]
     fn lone_punctuation_is_not_speech() {

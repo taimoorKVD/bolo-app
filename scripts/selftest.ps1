@@ -215,7 +215,7 @@ function Invoke-StartupSmoke {
         return $false
     }
 
-    $exe = Join-Path $root "src-tauri\target\release\cadence.exe"
+    $exe = Join-Path $root "src-tauri\target\release\bolo.exe"
     if (-not (Test-Path $exe)) {
         Write-Host "FAIL  $name"
         Write-Host "Missing $exe"
@@ -691,7 +691,7 @@ function Invoke-EmbeddedIcons {
         return $false
     }
 
-    $exe = Join-Path $root "src-tauri\target\release\cadence.exe"
+    $exe = Join-Path $root "src-tauri\target\release\bolo.exe"
     $nsisDir = Join-Path $root "src-tauri\target\release\bundle\nsis"
     $setup = Get-ChildItem -Path $nsisDir -Filter "*setup.exe" -ErrorAction SilentlyContinue |
         Sort-Object LastWriteTime -Descending |
@@ -701,7 +701,7 @@ function Invoke-EmbeddedIcons {
         Write-Host "Expected $exe and an NSIS *setup.exe under $nsisDir."
         return $false
     }
-    $appOk = Test-DisplayedIcon "cadence.exe" $exe $expected
+    $appOk = Test-DisplayedIcon "bolo.exe" $exe $expected
     $setupOk = Test-DisplayedIcon "setup exe" $setup.FullName $expected
     if ($appOk -and $setupOk) {
         Write-Host "PASS  $name"

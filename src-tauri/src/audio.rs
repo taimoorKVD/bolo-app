@@ -379,7 +379,24 @@ pub fn resolve_microphone(devices: &[ListedMic], preference: Option<&str>) -> Re
 /// Devices to try, preferred first, then the current default, then the rest.
 /// Names are not repeated. A missing preference is skipped rather than failed.
 pub fn open_order(devices: &[ListedMic], preference: Option<&str>) -> Vec<String> {
-    order_with(devices, preference, &is_silent_mic, &is_live_mic)
+    order_avoiding(devices, preference, None)
+}
+
+/// Like [`open_order`], but a microphone that just dropped is tried last when
+/// another input exists. The avoided name is not marked silent: a stall is not
+/// proof the hardware is dead.
+pub(crate) fn order_avoiding(devices: &[ListedMic], preference: Option<&str>, avoid: Option<&str>) -> Vec<String> {
+    let mut names = order_with(devices, preference, &is_silent_mic, &is_live_mic);
+    let Some(avoid) = avoid.map(str::trim).filter(|name| !name.is_empty()) else {
+        return names;
+    };
+    if let Some(index) = names.iter().position(|name| normalize_mic_name(name) == normalize_mic_name(avoid)) {
+        if names.len() > 1 {
+            let name = names.remove(index);
+            names.push(name);
+        }
+    }
+    names
 }
 
 /// Preference (unless it is known silent), then the automatic pick, then the
@@ -1588,6 +1605,27 @@ mod tests {
         assert_eq!(
             fallback_from(&devices, "Headset Microphone", &silent, &live).map(|m| m.name.as_str()),
             Some("Microphone Array")
+        );
+    }
+
+    #[test]
+    fn a_stalled_mic_is_tried_after_the_others() {
+        let devices = vec![
+            ListedMic { name: "Stall Mic A (bolo-order)".into(), is_default: true },
+            ListedMic { name: "Stall Mic B (bolo-order)".into(), is_default: false },
+        ];
+        assert_eq!(
+            order_avoiding(&devices, None, Some("stall mic a (bolo-order)")),
+            vec![
+                "Stall Mic B (bolo-order)".to_string(),
+                "Stall Mic A (bolo-order)".to_string(),
+            ]
+        );
+        let only = vec![ListedMic { name: "Stall Mic A (bolo-order)".into(), is_default: true }];
+        assert_eq!(
+            order_avoiding(&only, None, Some("Stall Mic A (bolo-order)")),
+            vec!["Stall Mic A (bolo-order)".to_string()],
+            "the only microphone is still opened"
         );
     }
 

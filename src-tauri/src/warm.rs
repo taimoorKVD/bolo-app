@@ -245,6 +245,8 @@ struct Capture {
     take_peak: f32,
     /// The take already moved off a silent microphone once.
     take_failed_over: bool,
+    /// Last callback that delivered samples. `None` until the first one after open.
+    last_sample_at: Option<Instant>,
 }
 
 impl Capture {
@@ -268,6 +270,7 @@ impl Capture {
             take_fresh: 0,
             take_peak: 0.0,
             take_failed_over: false,
+            last_sample_at: None,
         }
     }
 
@@ -299,6 +302,8 @@ struct Watch {
     /// Set on resume from sleep/hibernate: WASAPI streams can stay "live"
     /// after resume but stop delivering samples, so reopen unconditionally.
     force_reopen: AtomicBool,
+    /// One-shot: the device that just stalled, tried last on the next open.
+    avoid_name: Mutex<Option<String>>,
     config_dir: Option<PathBuf>,
 }
 
@@ -311,6 +316,7 @@ impl Watch {
             preference_epoch: AtomicU64::new(0),
             default_event: AtomicBool::new(false),
             force_reopen: AtomicBool::new(false),
+            avoid_name: Mutex::new(None),
             config_dir,
         }
     }
@@ -341,6 +347,8 @@ enum ReopenReason {
     Preference,
     DeviceChanged,
     Resume,
+    /// Callbacks stopped. The device is still "open" but nothing is arriving.
+    Stalled,
 }
 
 impl ReopenReason {
@@ -351,6 +359,7 @@ impl ReopenReason {
             Self::Preference => "preference",
             Self::DeviceChanged => "device-changed",
             Self::Resume => "resume",
+            Self::Stalled => "stalled",
         }
     }
 }
@@ -358,6 +367,40 @@ impl ReopenReason {
 /// A healthy stream stays up across takes. A default-device event reopens only
 /// when the device we would open is a different one. `names_differ` is false
 /// when the resolved name still matches the open device.
+/// No samples for this long means the stream died without an error callback.
+const STALL_MS: u64 = 2_500;
+
+fn stream_is_stalled(open_ms: u64, since_sample_ms: Option<u64>) -> bool {
+    if open_ms < STALL_MS {
+        return false;
+    }
+    match since_sample_ms {
+        None => true,
+        Some(ms) => ms >= STALL_MS,
+    }
+}
+
+fn decide_reopen(
+    have_stream: bool,
+    ever_opened: bool,
+    preference_dirty: bool,
+    default_event: bool,
+    names_differ: bool,
+    forced: bool,
+    stalled: bool,
+) -> Option<ReopenReason> {
+    if forced {
+        return Some(ReopenReason::Resume);
+    }
+    if let Some(reason) = plan_reopen(have_stream, ever_opened, preference_dirty, default_event, names_differ) {
+        return Some(reason);
+    }
+    if have_stream && stalled {
+        return Some(ReopenReason::Stalled);
+    }
+    None
+}
+
 fn plan_reopen(
     have_stream: bool,
     ever_opened: bool,
@@ -381,8 +424,8 @@ fn plan_reopen(
     None
 }
 
-fn warm_log_line(reason: &str) -> String {
-    format!("warm stream opened/reopened reason={reason}")
+fn warm_log_line(reason: &str, device: &str) -> String {
+    format!("warm stream opened/reopened reason={reason} device=\"{device}\"")
 }
 
 /// `0` when the ring already covered the key. Otherwise the wait for a new sample.
@@ -459,6 +502,7 @@ fn io_loop(state: Arc<Mutex<Capture>>, live: Arc<AtomicBool>, watch: Arc<Watch>)
     let mut ever_opened = false;
     let mut seen_preference = 0u64;
     let mut reopen_after = Instant::now();
+    let mut opened_at: Option<Instant> = None;
     let mut last_fail = String::new();
     let mut last_fail_at = Instant::now() - Duration::from_secs(30);
 
@@ -479,12 +523,26 @@ fn io_loop(state: Arc<Mutex<Capture>>, live: Arc<AtomicBool>, watch: Arc<Watch>)
             NameCheck::Same
         };
         let names_differ = matches!(names, NameCheck::Differ);
+        if !have_stream {
+            opened_at = None;
+        }
+        let since_sample = state
+            .lock()
+            .ok()
+            .and_then(|guard| guard.last_sample_at)
+            .map(|at| at.elapsed().as_millis() as u64);
+        let open_ms = opened_at.map(|at| at.elapsed().as_millis() as u64).unwrap_or(0);
+        let stalled = stream_is_stalled(open_ms, since_sample);
         let forced = watch.force_reopen.swap(false, Ordering::Relaxed);
-        let reason = if forced {
-            Some(ReopenReason::Resume)
-        } else {
-            plan_reopen(have_stream, ever_opened, preference_dirty, default_event, names_differ)
-        };
+        let reason = decide_reopen(
+            have_stream,
+            ever_opened,
+            preference_dirty,
+            default_event,
+            names_differ,
+            forced,
+            stalled,
+        );
 
         if reason.is_none() && have_stream {
             let armed_dead = state
@@ -508,12 +566,23 @@ fn io_loop(state: Arc<Mutex<Capture>>, live: Arc<AtomicBool>, watch: Arc<Watch>)
             continue;
         }
         let reason = reason.expect("reason");
-        if matches!(reason, ReopenReason::StreamError | ReopenReason::Resume) && Instant::now() < reopen_after {
+        if matches!(reason, ReopenReason::StreamError | ReopenReason::Resume | ReopenReason::Stalled)
+            && Instant::now() < reopen_after
+        {
             if forced {
                 watch.force_reopen.store(true, Ordering::Relaxed);
             }
             std::thread::sleep(Duration::from_millis(40));
             continue;
+        }
+        if matches!(reason, ReopenReason::Stalled) {
+            if let Ok(mut slot) = watch.avoid_name.lock() {
+                *slot = Some(active_name.clone());
+            }
+            log_warm(
+                &watch,
+                &format!("mic stalled device=\"{active_name}\"; reopening and auto-picking a working microphone"),
+            );
         }
         // Keep the playing stream until the replacement has started. A press
         // during this open still copies the ring on the other thread.
@@ -538,8 +607,10 @@ fn io_loop(state: Arc<Mutex<Capture>>, live: Arc<AtomicBool>, watch: Arc<Watch>)
                     watch.default_event.store(false, Ordering::Relaxed);
                 }
                 reopen_after = Instant::now();
+                opened_at = Some(Instant::now());
                 last_fail.clear();
-                log_warm(&watch, &warm_log_line(reason.as_str()));
+                let chosen = watch.active_name.lock().unwrap_or_else(|err| err.into_inner()).clone();
+                log_warm(&watch, &warm_log_line(reason.as_str(), &chosen));
             }
             Err(err) => {
                 reopen_after = Instant::now() + Duration::from_millis(400);
@@ -679,7 +750,8 @@ fn open_replacing(
     next_gen: &mut u64,
 ) -> Result<(), String> {
     let devices = audio::host_mics(host).map_err(|err| err.to_string())?;
-    let order = audio::open_order(&devices, preference.as_deref());
+    let avoid = watch.avoid_name.lock().ok().and_then(|mut slot| slot.take());
+    let order = audio::order_avoiding(&devices, preference.as_deref(), avoid.as_deref());
     if order.is_empty() {
         return Err("No microphone is available.".into());
     }
@@ -693,6 +765,7 @@ fn open_replacing(
                 if let Ok(mut guard) = state.lock() {
                     guard.apply_format(opened.channels, opened.sample_rate);
                     guard.error = None;
+                    guard.last_sample_at = None;
                 }
                 if let Ok(mut slot) = watch.note.lock() {
                     *slot = opened.note;
@@ -938,6 +1011,7 @@ fn push_samples(state: &Mutex<Capture>, samples: impl IntoIterator<Item = f32>) 
     }
     let mut chunk = Vec::new();
     for sample in samples {
+        state.last_sample_at = Some(Instant::now());
         state.ring.push_back(sample);
         while state.ring.len() > state.cap {
             state.ring.pop_front();
@@ -1243,11 +1317,28 @@ fn stable_default_does_not_reopen_and_preroll_is_instant() {
         plan_reopen(false, true, false, false, false),
         Some(ReopenReason::StreamError)
     );
-    assert_eq!(warm_log_line("launch"), "warm stream opened/reopened reason=launch");
     assert_eq!(
-        warm_log_line("device-changed"),
-        "warm stream opened/reopened reason=device-changed"
+        warm_log_line("launch", "Microphone Array"),
+        "warm stream opened/reopened reason=launch device=\"Microphone Array\""
     );
+    assert_eq!(
+        warm_log_line("device-changed", "USB Mic"),
+        "warm stream opened/reopened reason=device-changed device=\"USB Mic\""
+    );
+    assert!(!stream_is_stalled(100, None), "a stream that just opened is not stalled");
+    assert!(stream_is_stalled(3_000, None), "no samples after the grace period is a drop");
+    assert!(!stream_is_stalled(3_000, Some(40)), "fresh samples mean the mic is alive");
+    assert!(stream_is_stalled(3_000, Some(3_000)), "callbacks that stopped are a drop");
+    assert_eq!(
+        decide_reopen(true, true, false, false, false, false, true),
+        Some(ReopenReason::Stalled)
+    );
+    assert_eq!(
+        decide_reopen(true, true, false, false, false, true, true),
+        Some(ReopenReason::Resume),
+        "an explicit reopen wins over the stall watch"
+    );
+    assert_eq!(decide_reopen(true, true, false, false, false, false, false), None);
     assert_eq!(reported_first_sample_ms(16_000, Some(4_000)), Some(0));
     assert_eq!(reported_first_sample_ms(0, Some(40)), Some(40));
     assert_eq!(reported_first_sample_ms(0, None), None);

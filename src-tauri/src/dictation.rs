@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, PhysicalSize, WebviewWindow};
 
 /// A release shorter than this may be the first half of a double-tap.
-const TAP_MS: u64 = 240;
+pub(crate) const TAP_MS: u64 = 240;
 /// How long a short release waits for the second tap.
 const DOUBLE_TAP_WAIT_MS: u64 = 320;
 /// Takes shorter than this get the hold-the-key hint when they are silent.
@@ -265,7 +265,7 @@ pub fn silence_hint(held_ms: u64, short_press: bool) -> &'static str {
     if short_press || held_ms < HINT_HOLD_MS {
         "Hold the hotkey while you talk, or double-tap it for hands-free."
     } else {
-        "Didn't catch any speech. Speak a little louder, or check the microphone in Settings."
+        "Didn't catch any speech. Speak a little louder and try again."
     }
 }
 

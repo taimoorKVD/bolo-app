@@ -699,7 +699,7 @@ pub(crate) fn groq_error_message(status: u16, body: &str, using_builtin: bool) -
         .and_then(|parsed| parsed.error.and_then(|error| error.message))
         .unwrap_or_else(|| compact(body, 180));
     let message = match status {
-        401 | 403 => "Groq rejected the API key. Check it in Settings.".to_string(),
+        401 | 403 => crate::transcribe::REJECTED_KEY_MESSAGE.to_string(),
         413 => "The recording was too large to upload.".to_string(),
         429 if using_builtin => {
             "Bolo's built-in key is rate limited right now. Add your own Groq API key in Settings to keep dictating.".to_string()
@@ -1260,8 +1260,14 @@ mod tests {
     #[test]
     fn maps_auth_errors_without_echoing_a_key() {
         let message = groq_error_message(401, "{\"error\":{\"message\":\"invalid\"}}", false);
-        assert!(message.contains("API key"));
-        assert!(!message.to_lowercase().contains("gsk_"));
+        assert_eq!(message, crate::transcribe::REJECTED_KEY_MESSAGE);
+        let lower = message.to_lowercase();
+        assert!(!lower.contains("settings"));
+        assert!(!lower.contains("windows"));
+        assert!(!lower.contains("api key"));
+        assert!(!lower.contains("gsk_"));
+        let builtin = groq_error_message(403, "{\"error\":{\"message\":\"invalid\"}}", true);
+        assert_eq!(builtin, message);
     }
 
     #[test]

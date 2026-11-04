@@ -311,7 +311,7 @@ function demoEvent(demo: string | null): DictationEvent {
   if (demo === "error") {
     return {
       phase: "error",
-      message: "Groq rejected the API key. Check it in Settings.",
+      message: "Dictation had a brief problem. Bolo will try again on its own.",
       elapsedMs: 0,
       level: 0,
     };

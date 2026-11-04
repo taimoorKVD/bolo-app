@@ -3,6 +3,7 @@
   "productName": "Bolo.com",
   "version": "0.1.6",
   "identifier": "com.bolo.dictation",
+  "mainBinaryName": "bolo",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -78,6 +79,7 @@
       "nsis": {
         "installMode": "currentUser",
         "template": "nsis/installer.nsi",
+        "installerHooks": "nsis/hooks.nsh",
         "installerIcon": "icons/icon.ico",
         "uninstallerIcon": "icons/icon.ico",
         "headerImage": "icons/nsis-header.bmp",

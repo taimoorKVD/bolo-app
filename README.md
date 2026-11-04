@@ -19,8 +19,8 @@
 <p align="center"><em>Listening → writing → hide with a soft chime — the in-app overlay.</em></p>
 
 <p align="center">
-  <a href="https://bolo.thebetawebsite.com/downloads/Bolo_0.1.0_x64-setup.exe"><img src="https://img.shields.io/badge/Download-Windows%20x64-0078D6?style=for-the-badge&logo=windows&logoColor=white" alt="Download for Windows" /></a>
-  <img src="https://img.shields.io/badge/version-0.1.0-C9A227?style=for-the-badge&labelColor=100F0C&color=C9A227" alt="Version 0.1.0" />
+  <a href="https://bolo.thebetawebsite.com/downloads/Bolo_0.1.6_x64-setup.exe"><img src="https://img.shields.io/badge/Download-Windows%20x64-0078D6?style=for-the-badge&logo=windows&logoColor=white" alt="Download for Windows" /></a>
+  <img src="https://img.shields.io/badge/version-0.1.6-C9A227?style=for-the-badge&labelColor=100F0C&color=C9A227" alt="Version 0.1.6" />
   <img src="https://img.shields.io/badge/Windows-10%20%7C%2011-0A66C2?style=for-the-badge&logo=windows&logoColor=white" alt="Windows 10 or 11" />
   <a href="https://bolo.thebetawebsite.com"><img src="https://img.shields.io/badge/Live%20site-bolo.thebetawebsite.com-F4EFE6?style=for-the-badge&labelColor=100F0C" alt="Live site" /></a>
 </p>
@@ -36,15 +36,15 @@ Bolo is push-to-talk dictation for Windows. Hold a global hotkey in any app, spe
 | | |
 | --- | --- |
 | **Live site** | [bolo.thebetawebsite.com](https://bolo.thebetawebsite.com) |
-| **Download** | [Bolo 0.1.0 for Windows](https://bolo.thebetawebsite.com/downloads/Bolo_0.1.0_x64-setup.exe) |
+| **Download** | [Bolo 0.1.6 for Windows](https://bolo.thebetawebsite.com/downloads/Bolo_0.1.6_x64-setup.exe) |
 
 <p align="center">
-  <a href="https://bolo.thebetawebsite.com/downloads/Bolo_0.1.0_x64-setup.exe">
+  <a href="https://bolo.thebetawebsite.com/downloads/Bolo_0.1.6_x64-setup.exe">
     <img src="src-tauri/icons/icon.png" alt="Bolo app icon" width="128" />
   </a>
 </p>
 
-<p align="center"><b><a href="https://bolo.thebetawebsite.com/downloads/Bolo_0.1.0_x64-setup.exe">Download Bolo for Windows</a></b></p>
+<p align="center"><b><a href="https://bolo.thebetawebsite.com/downloads/Bolo_0.1.6_x64-setup.exe">Download Bolo for Windows</a></b></p>
 
 ### At a glance
 
@@ -109,7 +109,7 @@ $env:BOLO_BUILTIN_GROQ_KEY = "gsk_..."   # optional; omit to require the user's 
 npm run tauri build
 ```
 
-`BOLO_BUILTIN_GROQ_KEY` is read by `src-tauri/build.rs` at build time and XOR'd into the binary. It is not a string literal in `cadence.exe`, and it is never committed. `option_env!` is not used in the application crate, because that macro would embed the plaintext key. Without the variable, the app behaves as before and asks for a key. `scripts/release.ps1` copies the signed NSIS `setup.exe`, `latest.json`, and `version.json` into the separate `bolo.com-website` repo.
+`BOLO_BUILTIN_GROQ_KEY` is read by `src-tauri/build.rs` at build time and mixed into the binary. It is not a string literal in `bolo.exe`, and it is never committed. `option_env!` is not used in the application crate, because that macro would embed the plaintext key. Without the variable, the app behaves as before and asks for a key. `scripts/release.ps1` copies the signed NSIS `setup.exe`, `latest.json`, and `version.json` into the separate `bolo.com-website` repo.
 
 The installer product name is Bolo. The app icon is the Urdu word Ø¨ÙˆÙ„Ùˆ (Bolo, speak) in gold Nastaliq on a dark tile, with sound waves beside it, from `src-tauri/icons/icon-source.png` (1024Ã—1024). `npm run tauri icon src-tauri/icons/icon-source.png` regenerates the icon set. `python3 scripts/render-icon.py` runs that and redraws the 16, 24, and 32 pixel sizes with a larger word and the waves omitted, so the letters stay readable. `icon.ico` holds 32, 16, 24, 48, 64, 128, and 256 as uncompressed 32-bit images so the NSIS setup, Explorer, and Chrome show this icon instead of a generic one. That icon is the exe, the tray, the window, the NSIS setup and uninstaller, and the WiX product icon shown in Add/Remove Programs. The setup's version resource names the publisher Bolo. The settings sidebar and the installer artwork use the horizontal lockup: the tile, Bolo, and Ø¨ÙˆÙ„Ùˆ.
 
@@ -122,7 +122,7 @@ The build is unsigned. SmartScreen will warn until the binary is signed with a c
 
 WebView2 is configured as a silent download bootstrapper, so a Windows 10 machine without the runtime can install it during setup if it is online.
 
-The binary is still named `cadence.exe` (from the project's original name, Cadence). Renaming it would change the installed path that the NSIS updater, the autostart Run entry, and the old-copy cleanup rely on.
+The shipped executable is `bolo.exe`. The NSIS product name stays `Bolo.com`, so the install folder (`%LOCALAPPDATA%\Bolo.com`) and the uninstall registry key are the same ones 0.1.6 used. An update closes `cadence.exe`, installs `bolo.exe` beside it, deletes the old file, retargets shortcuts, and rewrites a Run entry that still launches `cadence.exe`. The Microsoft Store package identity is the Partner Center name and publisher (product 9NMW6C99BF04). The MSIX manifest changes the display name and exe only.
 
 ## Tests
 
@@ -134,9 +134,9 @@ npm run test:windows
 
 That runs `scripts/selftest.ps1`, which prints a pass/fail line for microphone selection and a real capture (skipped when the machine has no input device), the Credential Manager save/read round trip, settings and key carryover from Cadence, a paste into a hidden edit control, the Groq transcription and Llama cleanup calls, the rest of the unit tests, a startup smoke test, and an icon check. Each group has a time limit. If one hangs, the script stops that process and still runs the groups after it.
 
-The icon check builds the NSIS setup (`npm run tauri -- build --bundles nsis`) and compares the icon Windows displays for `cadence.exe` and the setup `.exe` with every image in `src-tauri/icons/icon.ico`, including the 32px image `ExtractAssociatedIcon` returns. A different image in that icon group fails the check. The WiX package uses that same `.ico` as `ARPPRODUCTICON` when `npm run tauri build` produces the MSI.
+The icon check builds the NSIS setup (`npm run tauri -- build --bundles nsis`) and compares the icon Windows displays for `bolo.exe` and the setup `.exe` with every image in `src-tauri/icons/icon.ico`, including the 32px image `ExtractAssociatedIcon` returns. A different image in that icon group fails the check. The WiX package uses that same `.ico` as `ARPPRODUCTICON` when `npm run tauri build` produces the MSI.
 
-The smoke test builds the release app with `npm run tauri -- build --no-bundle`. That is the same frontend embedding the installer uses: the Tauri CLI passes `tauri/custom-protocol` and embeds `frontendDist`. A plain `cargo build --release` does not, so that exe loads `http://localhost:1420` and the window shows a connection error. The test launches `cadence.exe` with `BOLO_SMOKE=1`. The settings window is created only after app state is registered, parked off-screen, kept off the taskbar, and not focused. It still loads the bundled page and invokes `get_settings` the same way the UI does. The test fails if that command errors, if it does not return, or if a UTF-8 BOM settings file (PowerShell `ConvertTo-Json` shape, microphone null, cleanup on, history left on when the field is omitted) is not what comes back. Afterwards the script kills that process tree, including a WebView2 child that outlives the exe. Quit Bolo first if it is already running; a second instance exits without running the check.
+The smoke test builds the release app with `npm run tauri -- build --no-bundle`. That is the same frontend embedding the installer uses: the Tauri CLI passes `tauri/custom-protocol` and embeds `frontendDist`. A plain `cargo build --release` does not, so that exe loads `http://localhost:1420` and the window shows a connection error. The test launches `bolo.exe` with `BOLO_SMOKE=1`. `BOLO_CONFIG_DIR` points at a temp folder, and while that variable is set the Groq key is stored in that folder instead of Credential Manager. The settings window is created only after app state is registered, parked off-screen, kept off the taskbar, and not focused. It still loads the bundled page and invokes `get_settings` the same way the UI does. The test fails if that command errors, if it does not return, or if a UTF-8 BOM settings file (PowerShell `ConvertTo-Json` shape, microphone null, cleanup on, history left on when the field is omitted) is not what comes back. Afterwards the script kills that process tree, including a WebView2 child that outlives the exe. Quit Bolo first if it is already running; a second instance exits without running the check.
 
 The paste check does not steal foreground focus and does not send Ctrl+V. It writes the clipboard, then sends `WM_PASTE` to a real Edit control â€” the message that control handles for Ctrl+V â€” and fails within a few seconds if any step stalls. If the clipboard holds an image, the test copies it, runs the paste, and puts the image back. If that image cannot be copied, the test prints `SKIP` and leaves the clipboard alone.
 

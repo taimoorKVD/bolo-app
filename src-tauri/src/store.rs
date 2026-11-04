@@ -332,6 +332,7 @@ pub fn load_settings(dir: &Path) -> Settings {
 }
 
 pub fn save_settings(dir: &Path, settings: &Settings) -> Result<(), String> {
+    crate::isolate::refuse_real_config(dir)?;
     validate_settings(settings)?;
     fs::create_dir_all(dir).map_err(|err| format!("couldn't create the config folder: {err}"))?;
     write_atomic(&settings_path(dir), settings)
@@ -380,6 +381,7 @@ pub fn push_history(entries: &mut Vec<HistoryEntry>, mut entry: HistoryEntry) {
 }
 
 pub fn save_history(dir: &Path, entries: &[HistoryEntry]) -> Result<(), String> {
+    crate::isolate::refuse_real_config(dir)?;
     fs::create_dir_all(dir).map_err(|err| format!("couldn't create the config folder: {err}"))?;
     write_atomic(&history_path(dir), entries).map_err(|err| format!("couldn't save history: {err}"))
 }
@@ -410,6 +412,9 @@ fn history_path(dir: &Path) -> PathBuf {
 }
 
 pub(crate) fn write_atomic<T: Serialize + ?Sized>(path: &Path, value: &T) -> anyhow::Result<()> {
+    if let Err(err) = crate::isolate::refuse_real_config(path) {
+        return Err(anyhow::Error::msg(err));
+    }
     let bytes = serde_json::to_vec_pretty(value)?;
     let tmp = path.with_extension("json.tmp");
     {

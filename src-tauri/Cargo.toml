@@ -1,5 +1,5 @@
 [package]
-name = "cadence"
+name = "bolo"
 version = "0.1.6"
 description = "Bolo push-to-talk voice dictation for Windows"
 authors = ["Bolo"]
@@ -12,7 +12,7 @@ rust-version = "1.85"
 # The `_lib` suffix may seem redundant but it is necessary
 # to make the lib name unique and wouldn't conflict with the bin name.
 # This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
-name = "cadence_lib"
+name = "bolo_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [features]
@@ -73,11 +73,11 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "mul
 
 # `tauri dev` is a debug build. Optimize this crate so capture and encoding
 # are not the thing that makes a take feel slow while developing.
-[profile.dev.package.cadence]
+[profile.dev.package.bolo]
 opt-level = 3
 
 # Latency checks run under `cargo test`, which uses the test profile.
-[profile.test.package.cadence]
+[profile.test.package.bolo]
 opt-level = 3
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
