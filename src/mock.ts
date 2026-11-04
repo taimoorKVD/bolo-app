@@ -60,6 +60,15 @@ let history: HistoryEntry[] = [
   },
 ];
 
+const SEEDS: Array<{ word: string; uses: number }> = [
+  { word: "Bolo", uses: 12 },
+  { word: "taimoorhussain.com", uses: 8 },
+  { word: "Kingdom Vision", uses: 0 },
+  { word: "Bolo.com", uses: 0 },
+  { word: "Taimoor Hussain", uses: 1 },
+  { word: "thebetawebsite.com", uses: 0 },
+];
+
 const memory: MemoryView = {
   words: ["Taimoor", "Kingdom Vision", "Lahore", "Groq"],
   fixes: [
@@ -71,11 +80,25 @@ const memory: MemoryView = {
     "Kal meeting 3 baje rakh lo, theek hai?",
   ],
   keepLearning: true,
+  myWords: ["Priya"],
 };
+
+function isSeed(word: string): boolean {
+  return SEEDS.some((seed) => seed.word.toLowerCase() === word.toLowerCase());
+}
 
 function memoryView(): MemoryView {
   memory.keepLearning = settings.keepLearning;
   memory.words = settings.dictionary.length ? [...settings.dictionary] : memory.words;
+  const mine = (memory.myWords ?? []).filter((word) => !isSeed(word));
+  const rows = [
+    ...SEEDS.map((seed) => ({ word: seed.word, uses: seed.uses, seed: true })),
+    ...mine.map((word) => ({ word, uses: 1, seed: false })),
+  ].sort((a, b) => b.uses - a.uses || a.word.localeCompare(b.word));
+  memory.entries = rows.map((row) => ({
+    ...row,
+    tag: row.uses >= 3 ? "Used a lot" : "Ready",
+  }));
   return structuredClone(memory);
 }
 
@@ -180,14 +203,21 @@ export async function mockInvoke<T>(command: string, args?: Record<string, unkno
       } as T;
     case "get_memory":
       return memoryView() as T;
-    case "forget_word":
-      settings.dictionary = memoryView().words.filter((w) => w !== args?.word);
+    case "forget_word": {
+      const word = String(args?.word ?? "").trim();
+      if (isSeed(word)) throw new Error("Bolo always spells that one.");
+      memory.myWords = (memory.myWords ?? []).filter((w) => w.toLowerCase() !== word.toLowerCase());
+      settings.dictionary = memoryView().words.filter((w) => w.toLowerCase() !== word.toLowerCase());
       memory.words = settings.dictionary;
       return memoryView() as T;
+    }
     case "add_word": {
       const w = String(args?.word ?? "").trim();
       if (!w) throw new Error("Type a word first.");
-      settings.dictionary = [...memoryView().words.filter((x) => x !== w), w];
+      if (isSeed(w)) throw new Error("Bolo already spells that one.");
+      if (w.split(/\s+/).length > 4) throw new Error("Use a name or a site.");
+      memory.myWords = [w, ...(memory.myWords ?? []).filter((have) => have.toLowerCase() !== w.toLowerCase())];
+      settings.dictionary = [...memoryView().words.filter((x) => x.toLowerCase() !== w.toLowerCase()), w];
       return memoryView() as T;
     }
     case "forget_fix":
@@ -202,6 +232,7 @@ export async function mockInvoke<T>(command: string, args?: Record<string, unkno
     case "forget_everything":
       settings.dictionary = [];
       memory.words = [];
+      memory.myWords = [];
       memory.fixes = [];
       memory.style = [];
       return memoryView() as T;

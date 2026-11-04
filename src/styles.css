@@ -699,6 +699,35 @@ input.switch:disabled { opacity: .45; }
 /* What Bolo has learned */
 .learned-body { display: grid; gap: 22px; }
 .learned-section h3 { margin: 0 0 2px; font-size: 15px; }
+
+.my-words { display: grid; gap: 18px; }
+.my-words .page-head { margin-bottom: 0; }
+.my-words .eyebrow { margin: 0; letter-spacing: 0.2em; text-transform: uppercase; font-size: 11px; color: var(--gold); }
+.word-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.word-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px;
+  border-radius: 16px;
+  border: 1px solid var(--line2);
+  background: rgba(255, 255, 255, 0.03);
+}
+.word-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.word-side { display: flex; align-items: center; gap: 12px; flex: none; }
+.word-tag { font-size: 14px; }
+.word-tag.is-hot { color: var(--gold); }
+.word-tag.is-ready { color: var(--mut); }
+.word-remove { font-size: 13px; padding: 4px 8px; border-radius: 8px; }
+.word-remove:hover { color: #f0b2a6; }
+.word-add { display: flex; gap: 8px; }
+.word-add input { flex: 1; min-width: 0; }
+.my-words-kept { margin-bottom: 0; }
+@media (max-width: 800px) {
+  .word-add { flex-direction: column; }
+  .word-add button { width: 100%; }
+}
 .chips { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0; }
 .chip {
   display: inline-flex; align-items: center; gap: 4px;

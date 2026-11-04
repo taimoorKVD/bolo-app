@@ -39,6 +39,15 @@ pub struct Memory {
     /// "My words": names and terms the user added or fixed. Always first in
     /// the Whisper prompt and kept exactly by cleanup.
     pub my_words: Vec<String>,
+    /// How often each My word showed up in a take. Most-used lead the prompt.
+    pub uses: Vec<WordUse>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WordUse {
+    pub word: String,
+    pub uses: u32,
 }
 
 impl Default for Memory {
@@ -50,6 +59,7 @@ impl Default for Memory {
             corrections: Vec::new(),
             style: Vec::new(),
             my_words: Vec::new(),
+            uses: Vec::new(),
         }
     }
 }
@@ -66,7 +76,15 @@ pub fn load(config: &Path) -> Memory {
         return Memory::default();
     };
     match serde_json::from_str::<Memory>(&raw) {
-        Ok(memory) => migrate(memory),
+        Ok(memory) => {
+            let (memory, dropped_same) = migrate(memory);
+            // A saved "Typed" → "Typed" fix is not a fix. Drop it from the file
+            // so the next launch does not show it again.
+            if dropped_same {
+                let _ = save(config, &memory);
+            }
+            memory
+        }
         Err(_) => {
             let _ = std::fs::copy(&file, config.join("memory.bad.json"));
             Memory::default()
@@ -74,16 +92,25 @@ pub fn load(config: &Path) -> Memory {
     }
 }
 
-fn migrate(mut memory: Memory) -> Memory {
+fn migrate(mut memory: Memory) -> (Memory, bool) {
     if memory.version < VERSION {
         memory.version = VERSION;
     }
-    memory.corrections.retain(|c| !c.from.trim().is_empty() && !c.to.trim().is_empty());
+    let before = memory.corrections.len();
+    memory.corrections.retain(|c| useful_fix(&c.from, &c.to));
+    let dropped_same = memory.corrections.len() != before;
     memory.corrections.truncate(MAX_CORRECTIONS);
     memory.style.truncate(MAX_STYLE);
     memory.pending.truncate(MAX_PENDING);
     memory.my_words.truncate(MAX_MY_WORDS);
-    memory
+    memory.uses.truncate(MAX_MY_WORDS);
+    (memory, dropped_same)
+}
+
+fn useful_fix(from: &str, to: &str) -> bool {
+    let from = from.trim();
+    let to = to.trim();
+    !from.is_empty() && !to.is_empty() && from != to
 }
 
 pub fn save(config: &Path, memory: &Memory) -> Result<(), String> {
@@ -233,6 +260,9 @@ pub fn diff_fix(old: &str, new: &str) -> Option<(String, String)> {
 }
 
 pub fn add_correction(memory: &mut Memory, from: &str, to: &str, now: u64) {
+    if !useful_fix(from, to) {
+        return;
+    }
     memory.corrections.retain(|c| !c.from.eq_ignore_ascii_case(from));
     memory.corrections.insert(0, Correction { from: from.into(), to: to.into(), created_unix_ms: now });
     memory.corrections.truncate(MAX_CORRECTIONS);
@@ -254,6 +284,7 @@ pub fn forget_word(memory: &mut Memory, dictionary: &mut Vec<String>, word: &str
     dictionary.retain(|w| !w.eq_ignore_ascii_case(word));
     memory.pending.retain(|w| !w.eq_ignore_ascii_case(word));
     memory.my_words.retain(|w| !w.eq_ignore_ascii_case(word));
+    memory.uses.retain(|w| !w.word.eq_ignore_ascii_case(word));
     if !memory.blocked.iter().any(|w| w.eq_ignore_ascii_case(word)) {
         memory.blocked.push(word.to_string());
         if memory.blocked.len() > MAX_BLOCKED {
@@ -263,7 +294,8 @@ pub fn forget_word(memory: &mut Memory, dictionary: &mut Vec<String>, word: &str
 }
 
 /// Pin a word or short name to "My words" (newest first). Returns true when
-/// it was added. Sentences and very long text are ignored.
+/// it was added. Sentences, common English, and very long text are ignored
+/// so junk never reaches the Whisper prompt. A repeat bumps its use count.
 pub fn add_my_word(memory: &mut Memory, word: &str) -> bool {
     let word = word.trim().trim_matches(|c: char| !c.is_alphanumeric());
     if word.is_empty()
@@ -273,13 +305,162 @@ pub fn add_my_word(memory: &mut Memory, word: &str) -> bool {
     {
         return false;
     }
-    if memory.my_words.iter().any(|w| w.eq_ignore_ascii_case(word)) {
+    if let Some(existing) = memory.my_words.iter().find(|w| w.eq_ignore_ascii_case(word)).cloned() {
+        bump(memory, &existing);
+        return false;
+    }
+    if !worth_prompt(word) {
         return false;
     }
     memory.blocked.retain(|w| !w.eq_ignore_ascii_case(word));
     memory.my_words.insert(0, word.to_string());
     memory.my_words.truncate(MAX_MY_WORDS);
+    bump(memory, word);
     true
+}
+
+fn worth_prompt(word: &str) -> bool {
+    if word.contains('.') || word.contains('@') {
+        return true;
+    }
+    word.split_whitespace().any(|part| part.chars().count() >= 3 && !crate::cleanup::is_common_word(part))
+}
+
+/// Spoken this many times, the screen says "Used a lot". Fewer than that, "Ready".
+pub const USED_A_LOT: u32 = 3;
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WordRow {
+    pub word: String,
+    pub uses: u32,
+    pub seed: bool,
+    pub tag: &'static str,
+}
+
+/// Seeds plus words the user added, most-used first. A seed is never absent.
+pub fn screen_words(memory: &Memory) -> Vec<WordRow> {
+    let mut rows: Vec<(usize, String, bool)> = Vec::new();
+    for (index, seed) in crate::vocab::SEED_WORDS.iter().enumerate() {
+        rows.push((index, (*seed).to_string(), true));
+    }
+    for (index, word) in memory.my_words.iter().enumerate() {
+        if rows.iter().any(|(_, have, _)| have.eq_ignore_ascii_case(word)) {
+            continue;
+        }
+        rows.push((crate::vocab::SEED_WORDS.len() + index, word.clone(), false));
+    }
+    rows.sort_by(|a, b| use_of(memory, &b.1).cmp(&use_of(memory, &a.1)).then(a.0.cmp(&b.0)));
+    rows.into_iter()
+        .map(|(_, word, seed)| {
+            let uses = use_of(memory, &word);
+            WordRow {
+                tag: if uses >= USED_A_LOT { "Used a lot" } else { "Ready" },
+                word,
+                uses,
+                seed,
+            }
+        })
+        .collect()
+}
+
+/// Drop a word the user added. Seeds stay, whatever the user clicks.
+pub fn dismiss_user_word(memory: &mut Memory, dictionary: &mut Vec<String>, word: &str) -> Result<(), String> {
+    let word = word.trim();
+    if word.is_empty() {
+        return Err("Type a word first.".into());
+    }
+    if crate::vocab::is_seed(word) {
+        return Err("Bolo always spells that one.".into());
+    }
+    let known = memory.my_words.iter().any(|entry| entry.eq_ignore_ascii_case(word))
+        || dictionary.iter().any(|entry| entry.eq_ignore_ascii_case(word));
+    if !known {
+        return Err("That word isn't in your list.".into());
+    }
+    forget_word(memory, dictionary, word);
+    Ok(())
+}
+
+/// Most-used first. Equal counts keep list order (newest first).
+pub fn rank_my_words(memory: &Memory) -> Vec<String> {
+    let mut indexed: Vec<(usize, String)> = memory.my_words.iter().cloned().enumerate().collect();
+    indexed.sort_by(|a, b| use_of(memory, &b.1).cmp(&use_of(memory, &a.1)).then(a.0.cmp(&b.0)));
+    indexed.into_iter().map(|(_, word)| word).collect()
+}
+
+pub fn use_of(memory: &Memory, word: &str) -> u32 {
+    memory.uses.iter().find(|stat| stat.word.eq_ignore_ascii_case(word)).map(|stat| stat.uses).unwrap_or(0)
+}
+
+/// Count My words that actually appeared in this take.
+pub fn note_uses(memory: &mut Memory, text: &str) {
+    if text.trim().is_empty() {
+        return;
+    }
+    let mut heard: Vec<String> = memory.my_words.iter().filter(|word| contains_phrase(text, word)).cloned().collect();
+    for seed in crate::vocab::SEED_WORDS {
+        if contains_phrase(text, seed) && !heard.iter().any(|word| word.eq_ignore_ascii_case(seed)) {
+            heard.push((*seed).to_string());
+        }
+    }
+    for word in heard {
+        bump(memory, &word);
+    }
+}
+
+fn bump(memory: &mut Memory, word: &str) {
+    if let Some(stat) = memory.uses.iter_mut().find(|stat| stat.word.eq_ignore_ascii_case(word)) {
+        stat.uses = stat.uses.saturating_add(1);
+        return;
+    }
+    memory.uses.push(WordUse { word: word.to_string(), uses: 1 });
+    memory.uses.truncate(MAX_MY_WORDS);
+}
+
+fn contains_phrase(text: &str, phrase: &str) -> bool {
+    let words: Vec<String> = text
+        .split_whitespace()
+        .map(|word| word.trim_matches(|c: char| !c.is_alphanumeric() && c != '.' && c != '@').to_lowercase())
+        .filter(|word| !word.is_empty())
+        .collect();
+    let phrase: Vec<String> = phrase.split_whitespace().map(|word| word.to_lowercase()).collect();
+    if phrase.is_empty() {
+        return false;
+    }
+    if phrase.len() == 1 {
+        return words.iter().any(|word| word == &phrase[0]);
+    }
+    words.windows(phrase.len()).any(|window| window == phrase.as_slice())
+}
+
+/// Fix last: save wrong->right immediately, pin the right spelling, and keep
+/// the mishearing out of the prompt. No twice-seen wait.
+pub fn record_fix(memory: &mut Memory, dictionary: &mut Vec<String>, from: &str, to: &str, now: u64) -> Vec<String> {
+    add_correction(memory, from, to, now);
+    for word in from.split_whitespace().map(bare) {
+        if word.is_empty() || to.to_lowercase().contains(&word.to_lowercase()) {
+            continue;
+        }
+        dictionary.retain(|entry| !entry.eq_ignore_ascii_case(&word));
+        memory.pending.retain(|entry| !entry.eq_ignore_ascii_case(&word));
+        memory.my_words.retain(|entry| !entry.eq_ignore_ascii_case(&word));
+        memory.uses.retain(|entry| !entry.word.eq_ignore_ascii_case(&word));
+        if crate::vocab::SEED_WORDS.iter().any(|seed| seed.eq_ignore_ascii_case(&word)) {
+            continue;
+        }
+        if word.chars().count() >= 4
+            && !crate::cleanup::is_common_word(&word)
+            && !memory.blocked.iter().any(|entry| entry.eq_ignore_ascii_case(&word))
+        {
+            memory.blocked.push(word);
+            if memory.blocked.len() > MAX_BLOCKED {
+                memory.blocked.remove(0);
+            }
+        }
+    }
+    add_my_word(memory, to);
+    learn_from_fix(memory, to, dictionary)
 }
 
 pub fn forget_everything(memory: &mut Memory, dictionary: &mut Vec<String>) {
@@ -458,11 +639,76 @@ mod tests {
     }
 
     #[test]
+    fn identical_heard_and_written_fixes_are_not_kept() {
+        let mut memory = Memory::default();
+        add_correction(&mut memory, "Typed", "Typed", 1);
+        add_correction(&mut memory, "  Typed  ", "Typed", 2);
+        assert!(memory.corrections.is_empty(), "a fix that changes nothing is not stored");
+        add_correction(&mut memory, "Volo", "Bolo", 3);
+        assert_eq!(memory.corrections.len(), 1);
+
+        let dir = temp("typed-same");
+        std::fs::write(
+            path(&dir),
+            r#"{"version":1,"corrections":[{"from":"Typed","to":"Typed","createdUnixMs":1},{"from":"Volo","to":"Bolo","createdUnixMs":2}]}"#,
+        )
+        .unwrap();
+        let loaded = load(&dir);
+        assert_eq!(loaded.corrections.len(), 1);
+        assert_eq!(loaded.corrections[0].to, "Bolo");
+        let saved = path(&dir);
+        let raw = std::fs::read_to_string(&saved).unwrap_or_else(|err| panic!("{err} at {}", saved.display()));
+        assert!(!raw.contains("Typed"), "the identical fix is removed from the saved file");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn prompt_terms_are_newest_first_and_unique() {
         let mut memory = Memory::default();
         add_correction(&mut memory, "a", "Alpha", 1);
         add_correction(&mut memory, "b", "Beta", 2);
         add_correction(&mut memory, "c", "alpha", 3);
         assert_eq!(prompt_terms(&memory), vec!["alpha".to_string(), "Beta".to_string()]);
+    }
+
+    #[test]
+    fn my_words_screen_orders_by_use_and_will_not_drop_a_seed() {
+        let mut memory = Memory::default();
+        let mut dictionary = Vec::new();
+        assert!(add_my_word(&mut memory, "Priya"));
+        assert!(add_my_word(&mut memory, "Acme Studio"));
+        memory.uses = vec![
+            WordUse { word: "Priya".into(), uses: 9 },
+            WordUse { word: "Bolo".into(), uses: USED_A_LOT },
+            WordUse { word: "Acme Studio".into(), uses: 1 },
+        ];
+        let rows = screen_words(&memory);
+        assert_eq!(rows[0].word, "Priya");
+        assert_eq!(rows[0].tag, "Used a lot");
+        assert!(!rows[0].seed);
+        let bolo = rows.iter().find(|row| row.word == "Bolo").expect("seed");
+        assert!(bolo.seed);
+        assert_eq!(bolo.tag, "Used a lot");
+        let priya = rows.iter().position(|row| row.word == "Priya").unwrap();
+        let bolo_at = rows.iter().position(|row| row.word == "Bolo").unwrap();
+        let kingdom = rows.iter().position(|row| row.word == "Kingdom Vision").unwrap();
+        assert!(priya < bolo_at && bolo_at < kingdom);
+        assert!(rows.iter().any(|row| row.word == "Acme Studio" && row.tag == "Ready" && !row.seed));
+        for seed in crate::vocab::SEED_WORDS {
+            assert!(rows.iter().any(|row| row.word == *seed && row.seed), "{seed}");
+        }
+
+        dismiss_user_word(&mut memory, &mut dictionary, "Acme Studio").unwrap();
+        assert!(!screen_words(&memory).iter().any(|row| row.word == "Acme Studio"));
+        let err = dismiss_user_word(&mut memory, &mut dictionary, "Bolo").unwrap_err();
+        assert!(err.contains("always spells"));
+        assert!(screen_words(&memory).iter().any(|row| row.word == "Bolo" && row.seed));
+        assert!(dismiss_user_word(&mut memory, &mut dictionary, "Priya").is_ok());
+        assert!(!screen_words(&memory).iter().any(|row| row.word == "Priya"));
+
+        assert!(add_my_word(&mut memory, "Northwind"));
+        let again = screen_words(&memory);
+        assert!(again.iter().any(|row| row.word == "Northwind" && !row.seed));
+        assert!(again.len() >= crate::vocab::SEED_WORDS.len());
     }
 }

@@ -274,7 +274,7 @@ pub(crate) struct Recognized {
 
 async fn recognize(bytes: Vec<u8>, env: &JobEnv) -> Result<Recognized, String> {
     let offline_model = env.settings.offline_model.clone();
-    let prompt = transcribe::whisper_prompt_with(&prompt_words(&env.settings.dictionary), &env.recent);
+    let prompt = transcribe::whisper_prompt_with(&prompt_words(&env.settings.dictionary, &env.settings.language), &env.recent);
     let model = env.settings.model.clone();
     let language = env.settings.language.clone();
     let output = env.settings.output.clone();
@@ -438,11 +438,18 @@ async fn speech_with_groq_raw(
         if let Ok(pinned) = transcribe::transcribe(client, api_key, audio.clone(), model, "ur", Some(transcribe::URDU_PROMPT.to_string()), using_builtin).await {
             crate::diag::note(format!("urdu clean pass text={}", pinned.text));
             if !pinned.text.trim().is_empty() {
-                let tries = spoken.tries.saturating_add(pinned.tries);
-                spoken = pinned;
-                spoken.tries = tries;
-                spoken.language = "ur".into();
-                flags.repass = true;
+                // The Urdu prompt has no Latin letters, so a mixed sentence can
+                // come back with the English words rewritten in Urdu script.
+                // Keep the pass that still has those English words.
+                let merged = preserve_english(&spoken.text, &pinned.text);
+                if merged.trim() != spoken.text.trim() {
+                    let tries = spoken.tries.saturating_add(pinned.tries);
+                    spoken = pinned;
+                    spoken.text = merged;
+                    spoken.tries = tries;
+                    spoken.language = "ur".into();
+                    flags.repass = true;
+                }
             }
         }
     }
@@ -516,6 +523,24 @@ async fn speech_with_groq_raw(
 
 /// Auto language, Whisper heard Urdu, and the text has Latin words in it,
 /// so the English prompt may have bent Urdu words into English ones.
+/// Prefer the Urdu-prompt redo unless it dropped Latin words the first pass heard.
+pub(crate) fn preserve_english(original: &str, redo: &str) -> String {
+    let latin = latin_words(original);
+    if latin.is_empty() {
+        return redo.to_string();
+    }
+    let redo_latin = latin_words(redo);
+    let kept = latin.iter().all(|word| redo_latin.iter().any(|other| other.eq_ignore_ascii_case(word)));
+    if kept { redo.to_string() } else { original.to_string() }
+}
+
+fn latin_words(text: &str) -> Vec<String> {
+    text.split_whitespace()
+        .map(|token| token.trim_matches(|c: char| !c.is_ascii_alphanumeric()).to_string())
+        .filter(|word| word.chars().any(|c| c.is_ascii_alphabetic()) && word.chars().all(|c| c.is_ascii_alphanumeric()))
+        .collect()
+}
+
 pub(crate) fn urdu_needs_clean_pass(setting: &str, detected: &str, _text: &str) -> bool {
     // diag.log showed the English-prompt pass spelling بہتری as بیٹری
     // ("battery") even in pure Urdu script, so any Urdu heard on auto gets
@@ -654,11 +679,17 @@ mod tests {
 
 /// The words list plus what the user's fixes taught (Fix last).
 /// My words and the built-in names come first, so they survive the prompt cap.
-pub(crate) fn prompt_words(dictionary: &[String]) -> Vec<String> {
+pub(crate) fn prompt_words(dictionary: &[String], language: &str) -> Vec<String> {
     let memory = crate::memory::snapshot();
-    let mut words = crate::vocab::protected(&memory.my_words);
+    let ranked = crate::memory::rank_my_words(&memory);
+    let mut words = crate::vocab::protected(&ranked);
     crate::vocab::set_current(words.clone());
-    for term in dictionary.iter().cloned().chain(crate::memory::prompt_terms(&memory)) {
+    for term in dictionary
+        .iter()
+        .cloned()
+        .chain(crate::memory::prompt_terms(&memory))
+        .chain(crate::hints::starter_hints(language))
+    {
         if !words.iter().any(|word| word.eq_ignore_ascii_case(&term)) {
             words.push(term);
         }

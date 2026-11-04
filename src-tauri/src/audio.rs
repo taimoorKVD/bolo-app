@@ -740,7 +740,7 @@ pub fn speech_samples(finished: &FinishedAudio) -> Result<Vec<f32>, SpeechError>
             trimmed = trim_silence_with(&mono, finished.sample_rate, threshold);
         }
     }
-    if trimmed.is_empty() {
+    if trimmed.is_empty() || noise_only(&trimmed, finished.sample_rate) {
         return Err(SpeechError::Silent);
     }
     let duration = trimmed.len() as f32 / finished.sample_rate as f32;
@@ -809,6 +809,51 @@ pub fn relative_threshold(samples: &[f32], sample_rate: u32) -> Option<f32> {
         return None;
     }
     Some((floor * 3.0).max(loud * 0.08).max(0.0002))
+}
+
+/// Steady hiss or room noise: energy with no vowel-like (low zero-crossing)
+/// frame. A tone or a spoken vowel crosses zero slowly and is kept, so a
+/// quiet mic still works. Silence and this noise never reach Whisper, which
+/// is what was inventing "thank you" and echoing the prompt.
+pub fn noise_only(samples: &[f32], sample_rate: u32) -> bool {
+    let frame = ((sample_rate as usize) * FRAME_MS as usize) / 1000;
+    if frame == 0 || samples.len() < frame * 8 {
+        return false;
+    }
+    let mut frames = 0usize;
+    let mut vowelish = 0usize;
+    let mut noisy = 0usize;
+    for chunk in samples.chunks(frame) {
+        if chunk.len() < frame / 2 {
+            break;
+        }
+        frames += 1;
+        let energy = rms(chunk);
+        if energy < 0.004 {
+            continue;
+        }
+        let rate = zero_cross_rate(chunk);
+        if rate < 0.12 {
+            vowelish += 1;
+        }
+        if rate > 0.25 {
+            noisy += 1;
+        }
+    }
+    frames >= 8 && vowelish == 0 && noisy * 2 >= frames
+}
+
+fn zero_cross_rate(chunk: &[f32]) -> f32 {
+    if chunk.len() < 2 {
+        return 0.0;
+    }
+    let mut crosses = 0usize;
+    for pair in chunk.windows(2) {
+        if (pair[0] >= 0.0 && pair[1] < 0.0) || (pair[0] < 0.0 && pair[1] >= 0.0) {
+            crosses += 1;
+        }
+    }
+    crosses as f32 / chunk.len() as f32
 }
 
 /// Drop leading and trailing silence. Pauses in the middle of a sentence stay.

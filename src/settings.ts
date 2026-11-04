@@ -14,7 +14,7 @@ import {
 } from "./characters";
 import lockupUrl from "./brand-lockup.svg";
 import { formatDuration, formatHotkey, formatWhen, modelLabel } from "./format";
-import { listenerNotice, visibleMessage } from "./notices";
+import { listenerNotice, statusBanner, visibleMessage } from "./notices";
 import type {
   ApiKeyStatus,
   AppInfo,
@@ -61,6 +61,7 @@ type SectionId =
   | "shortcut"
   | "character"
   | "languages"
+  | "words"
   | "history"
   | "learned"
   | "advanced"
@@ -78,6 +79,7 @@ const NAV: Array<[SectionId, string, string]> = [
   ["shortcut", "⌨", "Shortcut"],
   ["character", "☺", "Character & sounds"],
   ["languages", "◍", "Languages"],
+  ["words", "✎", "My words"],
   ["history", "↺", "History"],
   ["learned", "✦", "What Bolo has learned"],
 ];
@@ -87,7 +89,7 @@ const ADVANCED: Array<[SectionId, string, string]> = [
   ["key", "Your own service key", "Use your own key instead of the built-in one"],
   ["engine", "Speech quality and offline mode", "Faster or more accurate, and what happens without internet"],
   ["cleanup", "Text clean-up style", "How much Bolo tidies your words"],
-  ["dictionary", "My words list", "Names and words Bolo should spell right"],
+  ["dictionary", "Dictionary", "Extra spellings, one per line"],
   ["privacy", "Privacy", "What stays on this PC"],
   ["paste", "How text is pasted", "Paste the last take again"],
   ["diagnostics", "Help and diagnostics", "Version, status, and a report you can copy"],
@@ -213,6 +215,7 @@ function render(root: HTMLElement, draft: Draft): void {
     characterPanel(draft),
     languagePanel(draft),
     historyPanel(draft),
+    wordsPanel(draft),
     learnedPanel(draft),
     advancedPanel(draft),
     keyPanel(draft),
@@ -227,6 +230,8 @@ function render(root: HTMLElement, draft: Draft): void {
   shell.append(nav, main);
   root.append(shell);
   showSection(form, draft.section);
+  // Names load after the window is on screen. The first paint does not wait.
+  void refreshMemory(draft);
 
   void onDictation((event) => {
     draft.live = event.phase === "idle" ? null : event;
@@ -386,18 +391,12 @@ function liveBanner(draft: Draft): HTMLElement {
     banner.hidden = true;
     return banner;
   }
-  const titles: Record<string, string> = {
-    arming: "Listening",
-    recording: "Listening",
-    transcribing: "Transcribing",
-    inserting: "Inserting",
-    done: "Inserted",
-    typed: "Typed",
-    error: "Dictation failed",
-  };
-  banner.textContent = draft.live.message
-    ? `${titles[draft.live.phase] ?? "Bolo"} — ${draft.live.message}`
-    : titles[draft.live.phase] ?? "Bolo";
+  const text = statusBanner(draft.live.phase, draft.live.message);
+  if (!text) {
+    banner.hidden = true;
+    return banner;
+  }
+  banner.textContent = text;
   if (draft.live.phase === "error") banner.classList.add("bad");
   return banner;
 }
@@ -1954,7 +1953,7 @@ function normalizeKey(event: KeyboardEvent): string | null {
 
 let memoryView: MemoryView | null = null;
 
-function learnedPanel(draft: Draft): HTMLElement {
+function learnedPanel(_draft: Draft): HTMLElement {
   const panel = panelEl(
     "learned",
     "What Bolo has learned",
@@ -1965,7 +1964,26 @@ function learnedPanel(draft: Draft): HTMLElement {
   body.dataset.learned = "true";
   body.append(el("p", "field-note", "Loading…"));
   panel.append(body);
-  void refreshMemory(draft);
+  return panel;
+}
+
+function wordsPanel(_draft: Draft): HTMLElement {
+  const panel = el("section", "my-words");
+  panel.dataset.panel = "words";
+  const head = el("div", "page-head");
+  head.append(
+    el("p", "eyebrow", "Spelling"),
+    el("h2", "", "Words Bolo should get right"),
+    el(
+      "p",
+      "card-body",
+      "These are already in. Say them the way you normally would. The ones you use most are the ones Bolo listens for first.",
+    ),
+  );
+  const body = el("div", "my-words-body");
+  body.dataset.myWords = "true";
+  body.append(el("p", "field-note", "Loading…"));
+  panel.append(head, body);
   return panel;
 }
 
@@ -1973,8 +1991,9 @@ async function refreshMemory(draft: Draft, view?: MemoryView): Promise<void> {
   try {
     memoryView = view ?? (await api.getMemory());
   } catch (error) {
-    const body = document.querySelector<HTMLElement>("[data-learned]");
-    body?.replaceChildren(el("p", "field-note bad", messageOf(error)));
+    const message = el("p", "field-note bad", messageOf(error));
+    document.querySelector<HTMLElement>("[data-learned]")?.replaceChildren(message.cloneNode(true));
+    document.querySelector<HTMLElement>("[data-my-words]")?.replaceChildren(message);
     return;
   }
   // The backend already saved these. Keep the draft in step so autosave
@@ -1984,6 +2003,82 @@ async function refreshMemory(draft: Draft, view?: MemoryView): Promise<void> {
   const area = document.querySelector<HTMLTextAreaElement>('[aria-label="Custom dictionary"]');
   if (area && document.activeElement !== area) area.value = memoryView.words.join("\n");
   fillLearned(draft);
+  fillMyWords(draft);
+}
+
+function fillMyWords(draft: Draft): void {
+  const body = document.querySelector<HTMLElement>("[data-my-words]");
+  const view = memoryView;
+  if (!body || !view) return;
+  body.replaceChildren();
+  const list = document.createElement("ul");
+  list.className = "word-list";
+  const entries = view.entries ?? [];
+  if (entries.length === 0) {
+    list.append(el("li", "field-note", "Nothing here yet."));
+  }
+  for (const entry of entries) {
+    const row = document.createElement("li");
+    row.className = "word-row";
+    const name = el("span", "word-name", entry.word);
+    const side = el("span", "word-side");
+    if (!entry.seed) {
+      const remove = button("Remove", "text");
+      remove.className = "word-remove";
+      remove.setAttribute("aria-label", `Remove ${entry.word}`);
+      remove.addEventListener("click", () => {
+        myWordsAction(draft, () => api.forgetWord(entry.word));
+      });
+      side.append(remove);
+    }
+    const tag = el("span", entry.tag === "Used a lot" ? "word-tag is-hot" : "word-tag is-ready", entry.tag);
+    side.append(tag);
+    row.append(name, side);
+    list.append(row);
+  }
+  const form = el("div", "word-add");
+  const input = document.createElement("input");
+  input.type = "text";
+  input.placeholder = "Add a name or a site";
+  input.setAttribute("aria-label", "Add a word");
+  input.autocomplete = "off";
+  const add = button("Add", "primary");
+  const note = el(
+    "p",
+    "field-note",
+    "Fixing the last thing you said also adds the right spelling here. You do not have to set anything up.",
+  );
+  note.dataset.myWordsNote = "true";
+  const kept = el("p", "field-note my-words-kept", "Kept on this PC only");
+  const submit = () => {
+    const word = input.value.trim();
+    if (!word) return;
+    myWordsAction(draft, async () => {
+      const next = await api.addWord(word);
+      input.value = "";
+      return next;
+    });
+  };
+  add.addEventListener("click", submit);
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      submit();
+    }
+  });
+  form.append(input, add);
+  body.append(list, form, note, kept);
+}
+
+function myWordsAction(draft: Draft, run: () => Promise<MemoryView>): void {
+  void run()
+    .then((view) => refreshMemory(draft, view))
+    .catch((error) => {
+      const note = document.querySelector<HTMLElement>("[data-my-words-note]");
+      if (!note) return;
+      note.textContent = messageOf(error);
+      note.className = "field-note bad";
+    });
 }
 
 function memoryAction(draft: Draft, run: () => Promise<MemoryView>): void {
@@ -2049,8 +2144,9 @@ function fillLearned(draft: Draft): void {
   // Your fixes
   const fixes = el("div", "learned-section");
   fixes.append(el("h3", "", "Your fixes"), el("p", "field-note", "When Bolo hears the left side, it writes the right side."));
-  if (view.fixes.length === 0) fixes.append(el("p", "field-note", "No fixes yet. Use Fix on a History entry to teach Bolo."));
-  for (const fix of view.fixes) {
+  const shownFixes = view.fixes.filter((fix) => fix.from.trim() !== fix.to.trim());
+  if (shownFixes.length === 0) fixes.append(el("p", "field-note", "No fixes yet. Use Fix on a History entry to teach Bolo."));
+  for (const fix of shownFixes) {
     const row = el("div", "learned-row");
     const text = el("p", "fix-pair");
     text.append(el("span", "fix-from", fix.from), el("span", "fix-arrow", " → "), el("strong", "", fix.to));

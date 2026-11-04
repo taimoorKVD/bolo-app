@@ -7,6 +7,11 @@
 use std::sync::Mutex;
 
 /// Always known, even on a fresh install.
+pub fn is_seed(word: &str) -> bool {
+    let word = word.trim();
+    SEED_WORDS.iter().any(|seed| seed.eq_ignore_ascii_case(word))
+}
+
 pub const SEED_WORDS: &[&str] = &[
     "Bolo",
     "Bolo.com",
@@ -186,6 +191,11 @@ pub fn correct(text: &str, words: &[String]) -> String {
     let mut edits: Vec<(usize, usize, String)> = Vec::new();
     let mut i = 0;
     while i < toks.len() {
+        if let Some((last, core)) = spoken_email(&toks, i, &list) {
+            edits.push((i, last, core));
+            i = last + 1;
+            continue;
+        }
         if let Some((last, core)) = spoken_domain(&toks, i, &list) {
             edits.push((i, last, core));
             i = last + 1;
@@ -212,6 +222,46 @@ pub fn correct(text: &str, words: &[String]) -> String {
     }
     out.push_str(&text[at..]);
     out
+}
+
+const LOCAL_STOP: &[&str] = &[
+    "me", "you", "him", "her", "it", "us", "them", "look", "see", "the", "a", "an", "this", "that", "my",
+    "your", "our", "not", "and", "or", "but", "to", "for", "with", "from", "go", "come", "is", "was", "be",
+];
+
+/// "hello at taimoorhussain dot com" -> hello@taimoorhussain.com when the
+/// domain is on the list. "look at ..." is left as words.
+fn spoken_email(toks: &[Tok], i: usize, list: &[&String]) -> Option<(usize, String)> {
+    let at = i + 1;
+    if at >= toks.len() || !toks[at].core.eq_ignore_ascii_case("at") {
+        return None;
+    }
+    if !toks[i].tail.is_empty() || !toks[at].lead.is_empty() || !toks[at].tail.is_empty() {
+        return None;
+    }
+    let local = toks[i].core.to_lowercase();
+    if local.chars().count() < 2 || LOCAL_STOP.contains(&local.as_str()) {
+        return None;
+    }
+    if !local.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return None;
+    }
+    if at + 1 < toks.len() {
+        let direct = squash(&toks[at + 1].core);
+        if direct.contains('.') && toks[at + 1].lead.is_empty() {
+            if let Some(target) = list.iter().map(|word| squash(word)).find(|target| {
+                target.contains('.') && (target.eq_ignore_ascii_case(&direct) || close(&direct, target))
+            }) {
+                return Some((at + 1, format!("{local}@{target}")));
+            }
+        }
+    }
+    let (last, domain) = spoken_domain(toks, at + 1, list)?;
+    let on_list = list.iter().any(|word| squash(word).eq_ignore_ascii_case(&domain));
+    if !on_list {
+        return None;
+    }
+    Some((last, format!("{local}@{domain}")))
 }
 
 /// "<name> dot com" (name up to three spoken words) starting at token `i`.
@@ -354,7 +404,10 @@ mod tests {
         assert_eq!(correct("Send it to Taimur Hussain.com.", &seeds()), "Send it to taimoorhussain.com.");
         assert_eq!(correct("This is Taimur Husain from Kingdom vision.", &seeds()), "This is Taimoor Hussain from Kingdom Vision.");
         assert_eq!(correct("Tymoor Husain called", &seeds()), "Taimoor Hussain called");
-        assert_eq!(correct("Email hello at taimoorhussain dot com", &seeds()), "Email hello at taimoorhussain.com");
+        assert_eq!(correct("Email hello at taimoorhussain dot com", &seeds()), "Email hello@taimoorhussain.com");
+        assert_eq!(correct("hello at taimoorhussain dot com", &seeds()), "hello@taimoorhussain.com");
+        assert_eq!(correct("look at taimoorhussain dot com", &seeds()), "look at taimoorhussain.com");
+        assert_eq!(correct("Send it to Durmusnsusen.com", &seeds()), "Send it to Durmusnsusen.com");
         assert_eq!(correct("go to the beta website dot com now", &seeds()), "go to thebetawebsite.com now");
         assert_eq!(correct("Open bolo dot com.", &seeds()), "Open Bolo.com.");
     }

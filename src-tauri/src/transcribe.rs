@@ -171,23 +171,26 @@ pub(crate) const URDU_PROMPT: &str = "یہ اردو میں بولی گئی با�
 
 /// Dictionary terms plus the last couple of local transcripts, capped at 800 characters.
 pub fn whisper_prompt_with(words: &[String], recent: &[String]) -> Option<String> {
-    let terms: Vec<&str> = words
-        .iter()
-        .map(|word| word.trim())
-        .filter(|word| !word.is_empty())
-        .collect();
     let snippets: Vec<String> = recent
         .iter()
         .take(2)
         .map(|text| snippet(text, 140))
         .filter(|text| !text.is_empty())
         .collect();
+    let prefix = "Dictation transcript. Spell these terms exactly when spoken: ";
+    let snippet_reserve = if snippets.is_empty() {
+        0
+    } else {
+        180.min(snippets.iter().map(|s| s.chars().count() + 1).sum())
+    };
+    let term_budget = 800usize.saturating_sub(prefix.chars().count() + 1 + snippet_reserve);
+    let terms = select_terms(words, term_budget);
     if terms.is_empty() && snippets.is_empty() {
         return None;
     }
     let mut prompt = String::new();
     if !terms.is_empty() {
-        prompt.push_str("Dictation transcript. Spell these terms exactly when spoken: ");
+        prompt.push_str(prefix);
         prompt.push_str(&terms.join(", "));
         prompt.push('.');
     }
@@ -208,6 +211,57 @@ pub fn whisper_prompt_with(words: &[String], recent: &[String]) -> Option<String
         };
     }
     Some(prompt)
+}
+
+/// My words (already most-used first) stay ahead of seeds, and seeds keep a
+/// reserved slice so a long dictionary cannot push Bolo out of the prompt.
+///
+/// `prompt_words` emits ranked My words, then the built-in seeds, then the
+/// dictionary. A My word can itself be a seed ("Bolo"), so the seed block is
+/// the last contiguous run of seeds, not the first seed we see.
+fn select_terms(words: &[String], budget: usize) -> Vec<String> {
+    let cleaned: Vec<String> = words.iter().map(|word| word.trim().to_string()).filter(|word| !word.is_empty()).collect();
+    let is_seed = |term: &str| crate::vocab::SEED_WORDS.iter().any(|seed| seed.eq_ignore_ascii_case(term));
+    let mut last_run: Option<(usize, usize)> = None;
+    let mut index = 0;
+    while index < cleaned.len() {
+        if is_seed(&cleaned[index]) {
+            let start = index;
+            while index < cleaned.len() && is_seed(&cleaned[index]) {
+                index += 1;
+            }
+            last_run = Some((start, index));
+        } else {
+            index += 1;
+        }
+    }
+    let (leading, seeds, rest): (Vec<String>, Vec<String>, Vec<String>) = match last_run {
+        Some((start, end)) => (cleaned[..start].to_vec(), cleaned[start..end].to_vec(), cleaned[end..].to_vec()),
+        None => (cleaned, Vec::new(), Vec::new()),
+    };
+    let mut budget = budget;
+    let seed_cost: usize = seeds.iter().map(|term| term.chars().count() + 2).sum();
+    let reserve = if seeds.is_empty() { 0 } else { seed_cost.min(budget / 2) };
+    let mut hot = budget.saturating_sub(reserve);
+    let mut chosen = Vec::new();
+    for term in &leading {
+        let cost = term.chars().count() + 2;
+        if cost > hot {
+            continue;
+        }
+        hot -= cost;
+        budget = budget.saturating_sub(cost);
+        chosen.push(term.clone());
+    }
+    for term in seeds.iter().chain(rest.iter()) {
+        let cost = term.chars().count() + 2;
+        if cost > budget {
+            continue;
+        }
+        budget = budget.saturating_sub(cost);
+        chosen.push(term.clone());
+    }
+    chosen
 }
 
 fn snippet(text: &str, max_chars: usize) -> String {
