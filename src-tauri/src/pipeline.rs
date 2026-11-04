@@ -274,7 +274,7 @@ pub(crate) struct Recognized {
 
 async fn recognize(bytes: Vec<u8>, env: &JobEnv) -> Result<Recognized, String> {
     let offline_model = env.settings.offline_model.clone();
-    let prompt = transcribe::whisper_prompt_with(&prompt_words(&env.settings.dictionary), &env.recent);
+    let prompt = transcribe::whisper_prompt_with(&prompt_words(&env.settings.dictionary, &env.settings.language), &env.recent);
     let model = env.settings.model.clone();
     let language = env.settings.language.clone();
     let output = env.settings.output.clone();
@@ -668,12 +668,17 @@ mod tests {
 
 /// The words list plus what the user's fixes taught (Fix last).
 /// My words and the built-in names come first, so they survive the prompt cap.
-pub(crate) fn prompt_words(dictionary: &[String]) -> Vec<String> {
+pub(crate) fn prompt_words(dictionary: &[String], language: &str) -> Vec<String> {
     let memory = crate::memory::snapshot();
     let ranked = crate::memory::rank_my_words(&memory);
     let mut words = crate::vocab::protected(&ranked);
     crate::vocab::set_current(words.clone());
-    for term in dictionary.iter().cloned().chain(crate::memory::prompt_terms(&memory)) {
+    for term in dictionary
+        .iter()
+        .cloned()
+        .chain(crate::memory::prompt_terms(&memory))
+        .chain(crate::hints::starter_hints(language))
+    {
         if !words.iter().any(|word| word.eq_ignore_ascii_case(&term)) {
             words.push(term);
         }

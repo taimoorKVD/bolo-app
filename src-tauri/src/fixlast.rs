@@ -283,7 +283,7 @@ async fn relisten(app: &AppHandle, id: Option<String>) -> Result<FixResult, Stri
     let settings = lock(&state.settings).clone();
     let key = SecretKey::load().map_err(|_| "Listening again needs the internet. Type the right words instead.".to_string())?;
     let using_builtin = key.is_builtin();
-    let words = crate::pipeline::prompt_words(&settings.dictionary);
+    let words = crate::pipeline::prompt_words(&settings.dictionary, &settings.language);
     // No recent takes in the prompt: a wrong take must not steer its own redo.
     let prompt = transcribe::whisper_prompt_with(&words, &[]);
     let mut parts = Vec::new();

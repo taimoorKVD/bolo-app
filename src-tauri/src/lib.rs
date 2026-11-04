@@ -3,6 +3,9 @@ mod audio;
 mod builtin;
 mod chunk;
 mod cleanup;
+mod grammar;
+mod hints;
+mod mishear;
 mod vocab;
 mod context;
 mod credentials;
@@ -20,6 +23,7 @@ mod memory;
 mod micwatch;
 mod offline;
 mod pipeline;
+mod regression;
 mod sense;
 mod spool;
 #[cfg(windows)]

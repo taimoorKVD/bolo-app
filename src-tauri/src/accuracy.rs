@@ -12,11 +12,12 @@ use crate::vocab;
 pub fn polish_text(text: &str, corrections: &[Correction], words: &[String], homophones: bool) -> String {
     let text = memory::apply_corrections(text, corrections);
     let text = vocab::correct(&text, words);
-    if homophones {
-        sense::local_homophones(&text, words)
-    } else {
-        text
+    if !homophones {
+        return text;
     }
+    let text = crate::mishear::apply(&text);
+    let text = sense::local_homophones(&text, words);
+    crate::grammar::polish(&text)
 }
 
 /// Word error rate. Punctuation is ignored; `@` and `.` stay so an email is
@@ -73,21 +74,21 @@ mod tests {
         let cases = [
             ("Open Volo and start dictating.", "Open Bolo and start dictating."),
             ("Open Volo.com and start dictating.", "Open Bolo.com and start dictating."),
-            ("Send it to taimurhussain.com", "Send it to taimoorhussain.com"),
-            ("Send it to taimoorhussain.com", "Send it to taimoorhussain.com"),
+            ("Send it to taimurhussain.com", "Send it to taimoorhussain.com."),
+            ("Send it to taimoorhussain.com", "Send it to taimoorhussain.com."),
             ("hello at taimoorhussain dot com", "hello@taimoorhussain.com"),
             ("I roots the email yesterday.", "I wrote the email yesterday."),
-            ("their going home now", "they're going home now"),
-            ("over their", "over there"),
-            ("there cat sat there", "their cat sat there"),
-            ("I right the email", "I write the email"),
-            ("write now please", "right now please"),
-            ("send the male today", "send the mail today"),
-            ("weight for the reply", "wait for the reply"),
-            ("to much detail", "too much detail"),
-            ("for to days", "for two days"),
+            ("their going home now", "They're going home now."),
+            ("over their", "Over there."),
+            ("there cat sat there", "Their cat sat there."),
+            ("I right the email", "I write the email."),
+            ("write now please", "Right now please."),
+            ("send the male today", "Send the mail today."),
+            ("weight for the reply", "Wait for the reply."),
+            ("to much detail", "Too much detail."),
+            ("for to days", "For two days."),
             // Far from the name. A fuzzy swap here would "fix" unrelated domains.
-            ("Send it to Durmusnsusen.com", "Send it to Durmusnsusen.com"),
+            ("Send it to Durmusnsusen.com", "Send it to Durmusnsusen.com."),
         ];
         let mut wer_sum = 0.0;
         for (heard, expected) in cases {
@@ -127,7 +128,7 @@ mod tests {
         let ranked = memory::rank_my_words(&memory);
         let list = vocab::protected(&ranked);
         let again = polish_text("Send it to Durmusnsusen.com", &memory.corrections, &list, true);
-        assert_eq!(again, "Send it to taimoorhussain.com");
+        assert_eq!(again, "Send it to taimoorhussain.com.");
         assert_eq!(wer("Send it to taimoorhussain.com", &again), 0.0);
         // A second sighting is not required, and a common English fix is not a prompt term.
         assert!(!memory::add_my_word(&mut memory, "wrote"));
@@ -193,7 +194,8 @@ mod tests {
         eprintln!("ACCURACY local_polish_us={per_us} sense_budget_ms={}", sense::SENSE_TIMEOUT_MS);
         assert!(per_us < 2_000, "local polish took {per_us}us");
         assert!(sense::SENSE_TIMEOUT_MS <= 700);
-        assert!(crate::cleanup::CLEANUP_TIMEOUT_MS <= 1_200);
+        assert!(crate::grammar::cleanup_timeout_ms(24) <= 1_200);
+        assert!(crate::grammar::cleanup_timeout_ms(900) <= 2_200);
     }
 
     #[test]

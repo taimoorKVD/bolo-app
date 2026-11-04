@@ -375,7 +375,7 @@ fn allowed_swaps(candidate: &[String], original: &[String], vocab: &[String]) ->
     let mut left: Vec<&str> = original.iter().map(String::as_str).collect();
     let mut extra: Vec<&str> = Vec::new();
     for word in candidate {
-        if let Some(i) = left.iter().position(|w| *w == word.as_str()) {
+        if let Some(i) = left.iter().position(|w| *w == word.as_str() || crate::grammar::same_lexeme(w, word)) {
             left.swap_remove(i);
         } else {
             extra.push(word.as_str());
@@ -440,7 +440,7 @@ pub async fn translate_preserving(
     if original.is_empty() {
         return skipped(String::new(), "empty");
     }
-    let system = "You translate a speech-to-text transcript of someone dictating in Urdu (often mixed with English words, sometimes Roman Urdu) into the natural English they meant. The transcript comes from automatic speech recognition and may contain mis-heard words; use the surrounding context to recover the intended word (for example a word that sounds like a tech term). Common mis-hearings: بیٹری (battery) is usually بہتری (improvement, betterment) unless a real battery fits; بہتر means better. Keep English words the speaker used, especially technical and product words (animation, background, box, responsive, robot, website, app), as they are. Translate faithfully and completely: every point the speaker made, in the same order, as clear first-person English. Do not summarize, add ideas, answer questions, or explain. Return only the English text, with no preamble and no quotes.";
+    let system = "You translate a speech-to-text transcript of someone dictating in Urdu (often mixed with English words, sometimes Roman Urdu) into the natural English they meant. The transcript comes from automatic speech recognition and may contain mis-heard words; use the surrounding context to recover the intended word (for example a word that sounds like a tech term). Common mis-hearings: بیٹری (battery) is usually بہتری (improvement, betterment) unless a real battery fits; بہتر means better. Keep English words the speaker used, especially names, brands, emails, URLs, and technical words (WhatsApp, GitHub, animation, background, box, responsive, robot, website, app), spelled as they are. Write proper English: correct grammar, punctuation, and capitalization. Translate faithfully and completely: every point the speaker made, in the same order, as clear first-person English. Do not summarize, add ideas, answer questions, or explain. Return only the English text, with no preamble and no quotes.";
     let max_tokens = (original.chars().count() as u32 / 2 + 96).clamp(64, 400);
     // Urdu meaning needs the bigger model; the small one translated word by word.
     let mut models = model_order(model);
@@ -511,6 +511,9 @@ fn accept_translation(original: &str, candidate: &str) -> bool {
         || lower.starts_with("sure,")
         || lower.starts_with("translation")
     {
+        return false;
+    }
+    if !crate::hints::translation_keeps_english(original, candidate) {
         return false;
     }
     let orig = original.chars().count().max(1);
@@ -664,14 +667,20 @@ async fn request_cleanup(
         "Correct this dictation. Return only the corrected words, with no introduction and no quotes.".to_string()
     } else {
         format!(
-            "Punctuate a dictation transcript. Return only those words.\n{}\nDo not add words. Do not drop words, except standalone um or uh, and except the words a spoken correction replaces (scratch that, no wait, I mean). Do not paraphrase, explain, or wrap the result in quotes.",
+            "Fix grammar, punctuation, capitalization, and sentence structure in a dictation transcript. Return only those words.\n{}\nKeep the speaker's words and meaning. You may change a word's form for agreement (go/goes/went, is/are/was, a/an, don't/doesn't) and you may capitalize. Do not add content words, names, or ideas. Do not drop words, except standalone um or uh, and except the words a spoken correction replaces (scratch that, no wait, I mean). Do not paraphrase, explain, or wrap the result in quotes.",
             style_line(tone)
         ) + &style_samples_line()
     };
     let system = system + &vocab_line();
     let user = transcript.trim();
-    let max_tokens = (transcript.chars().count() as u32 / 2 + if plain { 96 } else { 48 }).clamp(48, 320);
-    let text = post_chat(client, api_key, model, &system, user, max_tokens, using_builtin, CLEANUP_TIMEOUT, 768).await?;
+    let chars = user.chars().count();
+    let max_tokens = (chars as u32 / 2 + if plain { 96 } else { 64 }).clamp(64, 400);
+    // Reasoning used to be a flat 768 tokens, which blew the 1.2s budget on
+    // short takes and the paste fell back to raw text. Scale the wait and the
+    // reasoning headroom with the length of this take.
+    let timeout = std::time::Duration::from_millis(crate::grammar::cleanup_timeout_ms(chars));
+    let pad = (chars as u32 / 6 + 96).clamp(96, 320);
+    let text = post_chat(client, api_key, model, &system, user, max_tokens, using_builtin, timeout, pad).await?;
     if text.trim().is_empty() {
         return Err(CleanupFail::Other("cleanup response had no text".into()));
     }
@@ -1186,6 +1195,8 @@ mod tests {
             &vocab
         ));
         assert!(accept_cleanup_with("open volo and start dictating", "Open Bolo and start dictating.", &vocab));
+        assert!(accept_cleanup_with("i goes to the store", "I go to the store.", &vocab));
+        assert!(!accept_cleanup_with("i goes to the store", "I went shopping later", &vocab));
         // Still rejected: added words, and too many swaps.
         assert!(!accept_cleanup_with("ship it tomorrow", "Ship it tomorrow, boss.", &vocab));
         assert!(!accept_cleanup_with("I roots the email", "I wrote the mail later", &vocab));
