@@ -133,6 +133,13 @@ export async function mockInvoke<T>(command: string, args?: Record<string, unkno
     case "toggle_test_recording":
       void runDemoTake();
       return undefined as T;
+    case "rating_card":
+      return null as T;
+    case "rate_bolo":
+      return { status: "opened", message: "" } as T;
+    case "rating_not_now":
+    case "rating_feedback":
+      return undefined as T;
     case "get_app_info": {
       appInfoReads += 1;
       const late =

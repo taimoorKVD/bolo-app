@@ -64,6 +64,9 @@ pub struct Settings {
     pub smart_time_of_day: bool,
     #[serde(default)]
     pub smart_holiday: bool,
+    /// Local Store-rating bookkeeping. The settings window does not edit this.
+    #[serde(default)]
+    pub rating: crate::rating::RatingState,
 }
 
 const SOUND_PACKS: [&str; 9] = [
@@ -155,6 +158,7 @@ impl Default for Settings {
             smart_time_of_day: false,
             smart_holiday: false,
             keep_learning: true,
+            rating: crate::rating::RatingState::default(),
         }
     }
 }

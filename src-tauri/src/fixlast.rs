@@ -365,6 +365,13 @@ pub async fn fix_with_text(app: AppHandle, id: Option<String>, text: String) -> 
 /// Save the fixed text and put it where the user needs it.
 async fn place(app: &AppHandle, target: &FixTarget, text: &str) -> String {
     let state = app.state::<AppState>();
+    {
+        let mut settings = lock(&state.settings);
+        crate::rating::note_fixed(&mut settings.rating);
+        if let Err(err) = crate::store::save_settings(&state.config_dir, &settings) {
+            log_line(&state.config_dir, "error", &format!("rating: {err}"));
+        }
+    }
     if !target.id.is_empty() {
         let mut history = lock(&state.history);
         if let Some(entry) = history.iter_mut().find(|e| e.id == target.id) {

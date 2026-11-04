@@ -11,6 +11,8 @@ import type {
   MemoryView,
   FixTarget,
   FixResult,
+  RatingCard,
+  RateResponse,
 } from "./types";
 
 type Handler = (event: DictationEvent) => void;
@@ -106,6 +108,10 @@ export const api = {
   fixRelisten: (id: string | null) => call<FixResult>("fix_relisten", { id }),
   fixWithText: (id: string | null, text: string) => call<FixResult>("fix_with_text", { id, text }),
   overlayFix: (action: "relisten" | "type" | "dismiss") => call<void>("overlay_fix", { action }),
+  ratingCard: () => call<RatingCard | null>("rating_card"),
+  rateBolo: () => call<RateResponse>("rate_bolo"),
+  ratingNotNow: () => call<void>("rating_not_now"),
+  ratingFeedback: () => call<void>("rating_feedback"),
   smokeFinished: (ok: boolean, detail: string | null) =>
     call<void>("smoke_finished", { ok, detail }),
 };

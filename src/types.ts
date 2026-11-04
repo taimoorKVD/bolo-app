@@ -67,6 +67,21 @@ export type ListenerStatus = {
   error: string | null;
 };
 
+export type RatingCard = {
+  title: string;
+  body: string;
+  rateLabel: string;
+  laterLabel: string;
+  feedbackLabel: string;
+  rtl: boolean;
+};
+
+export type RateResponse = {
+  /** rated, later, opened, retry, or failed */
+  status: string;
+  message: string;
+};
+
 export type AppInfo = {
   version: string;
   listenerRunning: boolean;

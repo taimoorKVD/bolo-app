@@ -35,6 +35,7 @@ mod harness;
 mod qa_tests;
 #[cfg(test)]
 mod regressions;
+mod rating;
 
 use crate::credentials::ApiKeyStatus;
 use crate::dictation::AppState;
@@ -102,7 +103,11 @@ pub fn run() {
             updater::check_for_update,
             updater::pending_update,
             updater::install_update,
-            updater::updates_enabled
+            updater::updates_enabled,
+            rating::rating_card,
+            rating::rate_bolo,
+            rating::rating_not_now,
+            rating::rating_feedback
         ])
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
@@ -130,8 +135,15 @@ pub fn run() {
             if migrated {
                 logbuf::log_line(&dir, "info", "copied settings from com.cadence.dictation");
             }
-            let settings = store::load_settings(&dir);
+            let mut settings = store::load_settings(&dir);
             let history = store::load_history(&dir);
+            let oldest = history.iter().map(|entry| entry.created_unix_ms).filter(|stamp| *stamp > 0).min();
+            let crashed = rating::session_was_unclean(&dir);
+            rating::note_startup(&mut settings.rating, env!("CARGO_PKG_VERSION"), store::now_ms(), oldest, crashed);
+            rating::session_mark_running(&dir);
+            if let Err(err) = store::save_settings(&dir, &settings) {
+                logbuf::log_line(&dir, "error", &format!("rating startup: {err}"));
+            }
             memory::init(&dir);
             let state = AppState::new(settings.clone(), history, dir.clone());
             let listener = state.listener.clone();
@@ -242,8 +254,15 @@ pub fn run() {
             offline::prefetch(dir.clone(), settings.offline_model.clone());
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running Bolo");
+        .build(tauri::generate_context!())
+        .expect("error while running Bolo")
+        .run(|app, event| {
+            if matches!(event, tauri::RunEvent::Exit) {
+                if let Some(state) = app.try_state::<AppState>() {
+                    rating::session_mark_clean(&state.config_dir);
+                }
+            }
+        });
 }
 
 fn config_dir(app: &tauri::App) -> std::path::PathBuf {
@@ -444,13 +463,15 @@ fn save_settings(
     state: tauri::State<'_, AppState>,
     settings: Settings,
 ) -> Result<(), String> {
-    let settings = prepare_settings(settings);
+    let mut settings = prepare_settings(settings);
     store::validate_settings(&settings)?;
     let previous = state
         .settings
         .lock()
         .unwrap_or_else(|err| err.into_inner())
         .clone();
+    // The Home page round-trips settings and does not own the rating counters.
+    settings.rating = previous.rating.clone();
     if previous.launch_at_startup != settings.launch_at_startup {
         apply_autostart(&app, settings.launch_at_startup)?;
     }

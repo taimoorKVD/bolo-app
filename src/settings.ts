@@ -243,7 +243,14 @@ function render(root: HTMLElement, draft: Draft): void {
       test.textContent = event.phase === "recording" ? "Stop" : test.dataset.try ?? "Try it";
       test.disabled = event.phase === "transcribing" || event.phase === "inserting";
     }
-    if (event.phase === "done" || event.phase === "idle") void refreshHistory(draft);
+    if (event.phase === "recording" || event.phase === "transcribing" || event.phase === "arming") {
+      document.querySelector("[data-rate-slot]")?.replaceChildren();
+    }
+    if (event.phase === "done" || event.phase === "idle") {
+      void refreshHistory(draft);
+      const slot = document.querySelector<HTMLElement>("[data-rate-slot]");
+      if (slot && draft.section === "home") void fillRating(slot);
+    }
     refreshPills(draft);
   });
   void onMicStatus((status) => applyDevices(draft, status.devices));
@@ -1707,7 +1714,54 @@ function homePanel(draft: Draft): HTMLElement {
     }),
   );
   panel.append(head, hero, startup);
+  const slot = el("div", "rate-slot");
+  slot.dataset.rateSlot = "true";
+  panel.prepend(slot);
+  void fillRating(slot);
   return panel;
+}
+
+async function fillRating(slot: HTMLElement): Promise<void> {
+  let card: Awaited<ReturnType<typeof api.ratingCard>> = null;
+  try {
+    card = await api.ratingCard();
+  } catch {
+    card = null;
+  }
+  slot.replaceChildren();
+  if (!card) return;
+  const box = el("section", "rate-card");
+  box.dataset.rateCard = "true";
+  if (card.rtl) box.dir = "rtl";
+  box.append(el("h3", "", card.title), el("p", "", card.body));
+  const actions = el("div", "rate-actions");
+  const rate = button(card.rateLabel, "primary");
+  const later = button(card.laterLabel, "ghost");
+  const feedback = button(card.feedbackLabel, "text");
+  feedback.classList.add("rate-feedback");
+  rate.addEventListener("click", () => {
+    rate.disabled = true;
+    later.disabled = true;
+    void api.rateBolo().then((result) => {
+      if (result.status === "rated" && result.message) {
+        box.replaceChildren(el("p", "rate-thanks", result.message));
+        return;
+      }
+      slot.replaceChildren();
+    }).catch(() => {
+      slot.replaceChildren();
+    });
+  });
+  later.addEventListener("click", () => {
+    slot.replaceChildren();
+    void api.ratingNotNow().catch(() => {});
+  });
+  feedback.addEventListener("click", () => {
+    void api.ratingFeedback().catch(() => {});
+  });
+  actions.append(rate, later);
+  box.append(actions, feedback);
+  slot.append(box);
 }
 
 function refreshHome(draft: Draft): void {

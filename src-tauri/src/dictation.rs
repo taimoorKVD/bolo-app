@@ -1095,6 +1095,13 @@ async fn deliver(app: &AppHandle, mut outcome: Outcome, generation: u64) {
         verified_paste: verified_paste && matches!(inserted.method, InsertMethod::Clipboard),
     });
     mark_idle(app);
+    {
+        let mut settings = lock(&state.settings);
+        crate::rating::note_success(&mut settings.rating, store::now_ms());
+        if let Err(err) = store::save_settings(&state.config_dir, &settings) {
+            log_line(&state.config_dir, "error", &format!("rating: {err}"));
+        }
+    }
     let (phase, fallback) = if verified_paste {
         ("done", "Inserted")
     } else {
@@ -1325,6 +1332,13 @@ fn remember(app: &AppHandle, outcome: &Outcome) -> Option<String> {
 
 fn fail(app: &AppHandle, message: &str) {
     let state = app.state::<AppState>();
+    {
+        let mut settings = lock(&state.settings);
+        crate::rating::note_error(&mut settings.rating, store::now_ms());
+        if let Err(err) = store::save_settings(&state.config_dir, &settings) {
+            log_line(&state.config_dir, "error", &format!("rating: {err}"));
+        }
+    }
     log_line(&state.config_dir, "error", message);
     *lock(&state.last_error) = Some(message.to_string());
     if let Some(tray) = app.tray_by_id("bolo") {
