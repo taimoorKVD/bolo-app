@@ -386,6 +386,7 @@ dependencies = [
  "enigo",
  "flacenc",
  "hound",
+ "image",
  "keyring",
  "open",
  "reqwest 0.12.28",

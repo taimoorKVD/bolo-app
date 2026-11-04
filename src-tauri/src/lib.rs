@@ -8,6 +8,7 @@ mod credentials;
 mod diag;
 mod dictation;
 mod fixlast;
+mod growth;
 mod unsure;
 mod health;
 mod hotkey;
@@ -107,7 +108,12 @@ pub fn run() {
             rating::rating_card,
             rating::rate_bolo,
             rating::rating_not_now,
-            rating::rating_feedback
+            rating::rating_feedback,
+            growth::home_card,
+            growth::dismiss_home_milestone,
+            growth::copy_share_message,
+            growth::open_share_whatsapp,
+            growth::save_character_card
         ])
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {

@@ -67,6 +67,23 @@ export type ListenerStatus = {
   error: string | null;
 };
 
+export type HomeCard =
+  | {
+      kind: "rating";
+      title: string;
+      body: string;
+      rateLabel: string;
+      laterLabel: string;
+      feedbackLabel: string;
+      rtl: boolean;
+    }
+  | {
+      kind: "milestone";
+      count: number;
+      title: string;
+      body: string;
+    };
+
 export type RatingCard = {
   title: string;
   body: string;

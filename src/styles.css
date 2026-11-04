@@ -517,9 +517,18 @@ body.view-settings {
   border: 1px solid var(--line);
   background: var(--bg-raised);
 }
-.rate-card h3 { margin: 0; font-size: 18px; font-weight: 600; }
+.rate-card h3, .share-card h3 {
+  margin: 0;
+  font-family: Fraunces, "Iowan Old Style", Georgia, serif;
+  font-size: 22px;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+}
+.share-card { display: grid; gap: 10px; }
+.share-card p { margin: 0; color: var(--mut); line-height: 1.45; }
+.share-actions, .rate-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.share-status { min-height: 1.2em; font-size: 13px; color: var(--gold); }
 .rate-card p { margin: 0; line-height: 1.45; white-space: pre-line; }
-.rate-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .rate-feedback { justify-self: start; padding: 0; }
 .rate-thanks { font-weight: 600; }
 .home .page-head, .advanced .page-head { margin-bottom: 0; }

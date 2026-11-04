@@ -133,8 +133,14 @@ export async function mockInvoke<T>(command: string, args?: Record<string, unkno
     case "toggle_test_recording":
       void runDemoTake();
       return undefined as T;
+    case "home_card":
     case "rating_card":
       return null as T;
+    case "dismiss_home_milestone":
+    case "copy_share_message":
+    case "open_share_whatsapp":
+    case "save_character_card":
+      return false as T;
     case "rate_bolo":
       return { status: "opened", message: "" } as T;
     case "rating_not_now":

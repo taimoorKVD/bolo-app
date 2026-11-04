@@ -38,6 +38,7 @@ open = "5"
 zeroize = { version = "1", features = ["derive"] }
 flacenc = "0.5.1"
 zip = { version = "2.2", default-features = false, features = ["deflate"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 [target.'cfg(windows)'.dependencies]
 tauri-plugin-single-instance = "2"

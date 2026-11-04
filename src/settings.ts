@@ -249,7 +249,7 @@ function render(root: HTMLElement, draft: Draft): void {
     if (event.phase === "done" || event.phase === "idle") {
       void refreshHistory(draft);
       const slot = document.querySelector<HTMLElement>("[data-rate-slot]");
-      if (slot && draft.section === "home") void fillRating(slot);
+      if (slot && draft.section === "home") void fillHome(slot);
     }
     refreshPills(draft);
   });
@@ -1706,6 +1706,39 @@ function homePanel(draft: Draft): HTMLElement {
   line.append("Hold ", keys, " and talk");
   copy.append(ok, line, tryButton(draft, "Try it now", "primary"));
   hero.append(video, copy);
+  const share = el("div", "card share-card");
+  share.append(
+    el("h3", "", "Share Bolo"),
+    el("p", "", "A short note in Urdu and English, with the Store link. Nothing is added to what you dictate."),
+  );
+  const shareActions = el("div", "share-actions");
+  const whatsapp = button("WhatsApp", "primary");
+  const copyMessage = button("Copy message", "ghost");
+  const shareCharacter = button("Share my character", "ghost");
+  const shareStatus = el("p", "share-status");
+  shareStatus.dataset.shareStatus = "true";
+  whatsapp.addEventListener("click", () => {
+    shareStatus.textContent = "";
+    void api.openShareWhatsapp().then(() => {
+      shareStatus.textContent = "Opening WhatsApp.";
+    }).catch(() => {
+      shareStatus.textContent = "Couldn't open WhatsApp. The message is copied instead.";
+      void api.copyShareMessage().catch(() => {});
+    });
+  });
+  copyMessage.addEventListener("click", () => {
+    void api.copyShareMessage().then(() => {
+      shareStatus.textContent = "Copied.";
+    }).catch(() => {
+      shareStatus.textContent = "Couldn't copy the message.";
+    });
+  });
+  shareCharacter.addEventListener("click", () => {
+    shareStatus.textContent = "";
+    void saveCharacterPicture(draft, shareStatus);
+  });
+  shareActions.append(whatsapp, copyMessage, shareCharacter);
+  share.append(shareActions, shareStatus);
   const startup = el("div", "card rows");
   startup.append(
     switchRow("Start Bolo when my PC turns on", "", draft.settings.launchAtStartup, (on) => {
@@ -1713,31 +1746,72 @@ function homePanel(draft: Draft): HTMLElement {
       markDirty(draft);
     }),
   );
-  panel.append(head, hero, startup);
+  panel.append(head, hero, share, startup);
   const slot = el("div", "rate-slot");
   slot.dataset.rateSlot = "true";
   panel.prepend(slot);
-  void fillRating(slot);
+  void fillHome(slot);
   return panel;
 }
 
-async function fillRating(slot: HTMLElement): Promise<void> {
-  let card: Awaited<ReturnType<typeof api.ratingCard>> = null;
+async function saveCharacterPicture(draft: Draft, status: HTMLElement): Promise<void> {
+  const thumb = clipUrls(activeCharacter(draft.settings)).thumb;
+  if (!thumb) {
+    status.textContent = "This character doesn't have a picture yet.";
+    return;
+  }
   try {
-    card = await api.ratingCard();
+    const response = await fetch(thumb);
+    const bytes = Array.from(new Uint8Array(await response.arrayBuffer()));
+    const saved = await api.saveCharacterCard(bytes);
+    status.textContent = saved ? "Saved, with bolo.thebetawebsite.com on the picture." : "";
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "";
+    status.textContent = message && !message.includes("canceled") ? message : "The picture wasn't saved.";
+  }
+}
+
+async function fillHome(slot: HTMLElement): Promise<void> {
+  let card: Awaited<ReturnType<typeof api.homeCard>> = null;
+  try {
+    card = await api.homeCard();
   } catch {
     card = null;
   }
   slot.replaceChildren();
   if (!card) return;
+  if (card.kind === "milestone") {
+    const box = el("section", "rate-card");
+    box.append(el("h3", "", card.title), el("p", "", card.body));
+    const actions = el("div", "rate-actions");
+    const whatsapp = button("WhatsApp", "primary");
+    const copyMessage = button("Copy message", "ghost");
+    const dismiss = button("Dismiss", "ghost");
+    const count = card.count;
+    whatsapp.addEventListener("click", () => {
+      void api.openShareWhatsapp().catch(() => api.copyShareMessage().catch(() => {}));
+    });
+    copyMessage.addEventListener("click", () => {
+      void api.copyShareMessage().catch(() => {});
+    });
+    dismiss.addEventListener("click", () => {
+      slot.replaceChildren();
+      void api.dismissMilestone(count).catch(() => {});
+    });
+    actions.append(whatsapp, copyMessage, dismiss);
+    box.append(actions);
+    slot.append(box);
+    return;
+  }
+  const rating = card;
   const box = el("section", "rate-card");
   box.dataset.rateCard = "true";
-  if (card.rtl) box.dir = "rtl";
-  box.append(el("h3", "", card.title), el("p", "", card.body));
+  if (rating.rtl) box.dir = "rtl";
+  box.append(el("h3", "", rating.title), el("p", "", rating.body));
   const actions = el("div", "rate-actions");
-  const rate = button(card.rateLabel, "primary");
-  const later = button(card.laterLabel, "ghost");
-  const feedback = button(card.feedbackLabel, "text");
+  const rate = button(rating.rateLabel, "primary");
+  const later = button(rating.laterLabel, "ghost");
+  const feedback = button(rating.feedbackLabel, "text");
   feedback.classList.add("rate-feedback");
   rate.addEventListener("click", () => {
     rate.disabled = true;

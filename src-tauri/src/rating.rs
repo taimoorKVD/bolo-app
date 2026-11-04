@@ -47,6 +47,9 @@ pub struct RatingState {
     pub last_crash_unix_ms: u64,
     pub last_network_unix_ms: u64,
     pub last_seen_version: String,
+    /// Milestone thank-yous already dismissed (100, 500, 1000).
+    #[serde(default)]
+    pub dismissed_milestones: Vec<u32>,
 }
 
 impl Default for RatingState {
@@ -67,8 +70,13 @@ impl Default for RatingState {
             last_crash_unix_ms: 0,
             last_network_unix_ms: 0,
             last_seen_version: String::new(),
+            dismissed_milestones: Vec::new(),
         }
     }
+}
+
+pub fn prompt_is_open(state: &RatingState, version: &str) -> bool {
+    !version.is_empty() && state.open_prompt_version == version
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
