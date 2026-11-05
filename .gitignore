@@ -36,3 +36,15 @@ _secrets/
 
 # Leftover output of the removed build-website.ps1
 website/
+
+# Phase 3 local backend
+backend/node_modules/
+backend/.wrangler/
+backend/.dev.vars
+backend/coverage/
+backend/dist/
+
+
+# Live backend env (example stays tracked)
+backend/.env
+backend/node/.env

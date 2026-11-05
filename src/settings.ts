@@ -1,3 +1,4 @@
+import { mountManagedStatus } from "./managed-status";
 import { api, onDictation, onHistoryChanged, onListenerStatus, onMicStatus, onOpenFix } from "./api";
 import type { MemoryView } from "./types";
 import {
@@ -364,6 +365,7 @@ async function watchListener(draft: Draft, form: HTMLElement): Promise<void> {
     if (current) current.replaceWith(next);
   };
   await onListenerStatus((status) => apply(status.running, status.error));
+  void mountManagedStatus(document.body);
   let attempts = 0;
   const poll = async (): Promise<boolean> => {
     try {

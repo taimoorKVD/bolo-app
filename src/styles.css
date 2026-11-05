@@ -774,3 +774,24 @@ button.danger { border-color: rgba(225, 90, 74, 0.6); color: #f0a196; }
 }
 .fix-label { font-size: 13px; color: var(--muted); margin-top: 6px; }
 .fix-dialog textarea { width: 100%; box-sizing: border-box; }
+
+/* Managed Bolo connection pill: quiet black/gold, never shows codes. */
+.managed-status {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 50;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: #0b0a08;
+  border: 1px solid rgba(198, 161, 90, 0.45);
+  color: var(--accent, #c6a15a);
+  font-size: 12px;
+  letter-spacing: 0.02em;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35);
+  pointer-events: auto;
+}
+.managed-status[hidden] { display: none; }
+.managed-status[data-tone="backup"] { color: rgba(198, 161, 90, 0.8); border-color: rgba(198, 161, 90, 0.25); }
+.managed-status[data-tone="action"] { background: var(--accent, #c6a15a); color: #0b0a08; border-color: transparent; font-weight: 600; }
+
