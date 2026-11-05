@@ -938,6 +938,32 @@ async fn process(
     }
     let tone = context::foreground_tone();
     staged.tone = tone.as_str().into();
+    let cleanup_wanted = settings.cleanup_enabled && !settings.verbatim && !matches!(tone, cleanup::Tone::Verbatim);
+    if cleanup_wanted && crate::managed::is_configured() {
+        let started = Instant::now();
+        if let Some(text) = crate::managed::cleanup(&stitched, tone.as_str()).await {
+            staged.cleanup_ms = started.elapsed().as_millis() as u64;
+            staged.cleanup_why = "managed".into();
+            let text = text.trim().to_string();
+            let unsure = crate::unsure::reason(&crate::unsure::Signals {
+                cleanup_wanted: true,
+                cleanup_why: staged.cleanup_why.clone(),
+                pasted: text.clone(),
+                ..take_signals(&products, partial_note.is_some(), &stitched)
+            });
+            return Ok(Outcome {
+                unsure,
+                text,
+                cleaned: true,
+                note: partial_note,
+                duration_ms: clock.held_ms,
+                model: "bolo".into(),
+                staged,
+                spool_id,
+                engine: pipeline::engine_label(&products),
+            });
+        }
+    }
     let key = match SecretKey::load() {
         Ok(key) => key,
         Err(err) => {

@@ -5,7 +5,7 @@
 //! a rejected key, a server error, or a network failure. The following take tries Groq again.
 
 use crate::audio::{self, FinishedAudio, SpeechError};
-use crate::credentials::SecretKey;
+use crate::provider::{self, RouterAction};
 use crate::offline;
 use crate::spool;
 use crate::store::Settings;
@@ -241,7 +241,7 @@ fn transcribe_one(index: usize, audio: FinishedAudio, env: &JobEnv) -> Product {
     product.format = encoded.format.to_string();
     spool::write_audio(&env.config_dir, &env.spool_id, index, &encoded.bytes);
     let remote_started = Instant::now();
-    match tauri::async_runtime::block_on(recognize(encoded.bytes, env)) {
+    match tauri::async_runtime::block_on(recognize(encoded.bytes, env, crate::managed::audio_minutes(audio.interleaved.len(), audio.channels, audio.sample_rate), encoded.format)) {
         Ok(recognized) => {
             product.text = recognized.text;
             product.tries = recognized.tries;
@@ -272,51 +272,97 @@ pub(crate) struct Recognized {
     pub(crate) path: String,
 }
 
-async fn recognize(bytes: Vec<u8>, env: &JobEnv) -> Result<Recognized, String> {
+async fn recognize(bytes: Vec<u8>, env: &JobEnv, minutes: f64, _format: &str) -> Result<Recognized, String> {
     let offline_model = env.settings.offline_model.clone();
     let prompt = transcribe::whisper_prompt_with(&prompt_words(&env.settings.dictionary, &env.settings.language), &env.recent);
     let model = env.settings.model.clone();
     let language = env.settings.language.clone();
     let output = env.settings.output.clone();
     let cleanup_model = env.settings.cleanup_model.clone();
-    match SecretKey::load() {
-        Ok(key) => {
-            let using_builtin = key.is_builtin();
-            let groq = speech_with_groq(
-                transcribe::http_client(),
-                key.expose(),
-                bytes.clone(),
-                &model,
-                &language,
-                &output,
-                prompt.as_deref(),
-                &cleanup_model,
-                using_builtin,
-            )
-            .await;
-            drop(key);
-            match groq {
-                Ok(recognized) => {
-                    log_speech(env, &recognized.language, &recognized.path);
-                    Ok(recognized)
-                }
-                Err(err) if should_fallback(&err) && offline::normalize_model(&offline_model) != "off" => {
-                    match offline::transcribe_encoded(&env.config_dir, &offline_model, &bytes).await {
-                        Ok(text) => {
-                            log_speech(env, "offline", "transcribe");
-                            Ok(Recognized {
-                                text,
-                                tries: 1,
-                                engine: "On this PC".into(),
-                                language: "offline".into(),
-                                path: "transcribe".into(),
-                            })
+    // Managed Bolo first, once an account is configured. It runs the same
+    // routing as the Groq path (vocabulary prompt, Urdu clean pass, Mixed
+    // translation). Any failure falls through to the user's own key, then
+    // on-device, exactly as before.
+    if crate::managed::is_configured() {
+        let via = Via::Managed { minutes };
+        if let Ok(recognized) = speech_via(&via, bytes.clone(), &model, &language, &output, prompt.as_deref(), &cleanup_model).await {
+            if !recognized.text.trim().is_empty() {
+                log_speech(env, &recognized.language, &format!("managed-{}", recognized.path));
+                return Ok(recognized);
+            }
+        }
+    }
+    match provider::load_ready_keys(&env.config_dir) {
+
+        Ok((mut store, keys)) => {
+            let mut last_err: Option<anyhow::Error> = None;
+            let mut saw_outage = false;
+            let mut force_offline = false;
+            for key in keys {
+                let using_builtin = key.builtin;
+                let groq = speech_with_groq(
+                    transcribe::http_client(),
+                    key.expose(),
+                    bytes.clone(),
+                    &model,
+                    &language,
+                    &output,
+                    prompt.as_deref(),
+                    &cleanup_model,
+                    using_builtin,
+                )
+                .await;
+                match groq {
+                    Ok(recognized) => {
+                        store.record_success(&key.id);
+                        provider::save_store(&env.config_dir, &store);
+                        log_speech(env, &recognized.language, &recognized.path);
+                        return Ok(recognized);
+                    }
+                    Err(err) => {
+                        let action = match transcribe::failure_details(&err) {
+                            Some(failure) => store.record_failure(&key.id, failure),
+                            None => RouterAction::Switch,
+                        };
+                        provider::save_store(&env.config_dir, &store);
+                        last_err = Some(err);
+                        match action {
+                            RouterAction::RetrySame => {
+                                // speech_with_groq already retried burst limits; try next key.
+                                continue;
+                            }
+                            RouterAction::Switch => continue,
+                            RouterAction::Outage => {
+                                saw_outage = true;
+                                continue;
+                            }
+                            RouterAction::Offline => {
+                                force_offline = true;
+                                break;
+                            }
                         }
-                        Err(local) => Err(format!("{err} {local}")),
                     }
                 }
-                Err(err) => Err(err.to_string()),
             }
+            let err = last_err.unwrap_or_else(|| anyhow::anyhow!("No Groq API key is ready."));
+            let offline_ok = offline::normalize_model(&offline_model) != "off"
+                && (force_offline || saw_outage || should_fallback(&err));
+            if offline_ok {
+                match offline::transcribe_encoded(&env.config_dir, &offline_model, &bytes).await {
+                    Ok(text) => {
+                        log_speech(env, "offline", "transcribe");
+                        return Ok(Recognized {
+                            text,
+                            tries: 1,
+                            engine: "On this PC".into(),
+                            language: "offline".into(),
+                            path: "transcribe".into(),
+                        });
+                    }
+                    Err(local) => return Err(format!("{err} {local}")),
+                }
+            }
+            Err(err.to_string())
         }
         Err(err) => {
             if offline::normalize_model(&offline_model) == "off" {
@@ -362,8 +408,79 @@ pub(crate) async fn speech_with_groq(
     cleanup_model: &str,
     using_builtin: bool,
 ) -> anyhow::Result<Recognized> {
+    let via = Via::Groq { client, api_key, using_builtin };
+    speech_via(&via, audio, model, language, output, prompt, cleanup_model).await
+}
+
+/// Where speech goes. The user's Groq key and managed Bolo share one routing
+/// path, so the vocabulary prompt, language pins, the Urdu clean pass and the
+/// Mixed (LLM) translation behave the same on both.
+pub(crate) enum Via<'a> {
+    Groq { client: &'a reqwest::Client, api_key: &'a str, using_builtin: bool },
+    Managed { minutes: f64 },
+    #[cfg(test)]
+    Fake(&'a fake::FakeVia),
+}
+
+impl Via<'_> {
+    fn engine(&self) -> &'static str {
+        match self {
+            Via::Groq { .. } => "Groq",
+            Via::Managed { .. } => "Bolo",
+            #[cfg(test)]
+            Via::Fake(_) => "Fake",
+        }
+    }
+
+    async fn transcribe(&self, audio: Vec<u8>, model: &str, language: &str, prompt: Option<String>) -> anyhow::Result<transcribe::Transcript> {
+        match self {
+            Via::Groq { client, api_key, using_builtin } => {
+                transcribe::transcribe(client, api_key, audio, model, language, prompt, *using_builtin).await
+            }
+            Via::Managed { minutes } => crate::managed::whisper(&audio, *minutes, "transcribe", language, prompt.as_deref())
+                .await
+                .ok_or_else(|| anyhow::anyhow!("managed speech unavailable")),
+            #[cfg(test)]
+            Via::Fake(fake) => fake.transcribe(model, language, prompt),
+        }
+    }
+
+    async fn translate_audio(&self, audio: Vec<u8>, prompt: Option<&str>) -> anyhow::Result<transcribe::Transcript> {
+        match self {
+            Via::Groq { client, api_key, using_builtin } => {
+                transcribe::translate_audio(client, api_key, audio, prompt, *using_builtin).await
+            }
+            Via::Managed { minutes } => crate::managed::whisper(&audio, *minutes, "translate", "", prompt)
+                .await
+                .ok_or_else(|| anyhow::anyhow!("managed speech unavailable")),
+            #[cfg(test)]
+            Via::Fake(fake) => fake.translate(prompt),
+        }
+    }
+
+    async fn translate_text(&self, text: &str, cleanup_model: &str) -> cleanup::CleanOutcome {
+        match self {
+            Via::Groq { client, api_key, using_builtin } => {
+                cleanup::translate_preserving(client, api_key, text, cleanup_model, *using_builtin).await
+            }
+            Via::Managed { .. } => crate::managed::translate_text(text).await,
+            #[cfg(test)]
+            Via::Fake(fake) => fake.translate_text(text),
+        }
+    }
+}
+
+pub(crate) async fn speech_via(
+    via: &Via<'_>,
+    audio: Vec<u8>,
+    model: &str,
+    language: &str,
+    output: &str,
+    prompt: Option<&str>,
+    cleanup_model: &str,
+) -> anyhow::Result<Recognized> {
     let mut flags = SpeechFlags::default();
-    let mut got = speech_with_groq_raw(client, api_key, audio, model, language, output, prompt, cleanup_model, using_builtin, &mut flags).await?;
+    let mut got = speech_raw(via, audio, model, language, output, prompt, cleanup_model, &mut flags).await?;
     if flags.repass {
         got.path.push_str("-repass");
     }
@@ -381,26 +498,24 @@ pub(crate) async fn speech_with_groq(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn speech_with_groq_raw(
-    client: &reqwest::Client,
-    api_key: &str,
+async fn speech_raw(
+    via: &Via<'_>,
     audio: Vec<u8>,
     model: &str,
     language: &str,
     output: &str,
     prompt: Option<&str>,
     cleanup_model: &str,
-    using_builtin: bool,
     flags: &mut SpeechFlags,
 ) -> anyhow::Result<Recognized> {
     if transcribe::direct_translate(output, language) {
-        let translated = transcribe::translate_audio(client, api_key, audio, prompt, using_builtin).await?;
+        let translated = via.translate_audio(audio, prompt).await?;
         flags.doubtful |= translated.doubtful;
         let code = transcribe::normalize_language(language).unwrap_or_else(|| "unknown".into());
         return Ok(Recognized {
             text: translated.text,
             tries: translated.tries,
-            engine: "Groq".into(),
+            engine: via.engine().into(),
             language: code,
             path: "translate".into(),
         });
@@ -409,7 +524,7 @@ async fn speech_with_groq_raw(
     let urdu_set = transcribe::normalize_language(language).as_deref() == Some("ur");
     let first_prompt = if urdu_set { Some(transcribe::URDU_PROMPT.to_string()) } else { prompt.map(str::to_string) };
     crate::diag::note(format!("whisper#1 model={model} lang={language} prompt={:?}", first_prompt));
-    let mut spoken = transcribe::transcribe(client, api_key, audio.clone(), model, language, first_prompt, using_builtin).await?;
+    let mut spoken = via.transcribe(audio.clone(), model, language, first_prompt).await?;
     crate::diag::note(format!("whisper#1 detected={} text={}", spoken.language, spoken.text));
     if unlikely_language(language, &spoken.language) {
         // Short or accented English is sometimes detected as Spanish, Welsh,
@@ -420,7 +535,7 @@ async fn speech_with_groq_raw(
         let pin = if hindi_like(&spoken.language, &spoken.text) { "ur" } else { "en" };
         let pin_prompt = if pin == "ur" { Some(transcribe::URDU_PROMPT.to_string()) } else { prompt.map(str::to_string) };
         crate::diag::note(format!("repin lang={pin} prompt={:?}", pin_prompt));
-        if let Ok(pinned) = transcribe::transcribe(client, api_key, audio.clone(), model, pin, pin_prompt, using_builtin).await {
+        if let Ok(pinned) = via.transcribe(audio.clone(), model, pin, pin_prompt).await {
             crate::diag::note(format!("repin text={}", pinned.text));
             if !pinned.text.trim().is_empty() {
                 let tries = spoken.tries.saturating_add(pinned.tries);
@@ -435,7 +550,7 @@ async fn speech_with_groq_raw(
         // Auto-detect heard Urdu but the English prompt leaked English
         // look-alike words in. Transcribe again as Urdu with an Urdu prompt.
         crate::diag::note("urdu clean pass (auto heard Urdu; redo with the Urdu prompt)");
-        if let Ok(pinned) = transcribe::transcribe(client, api_key, audio.clone(), model, "ur", Some(transcribe::URDU_PROMPT.to_string()), using_builtin).await {
+        if let Ok(pinned) = via.transcribe(audio.clone(), model, "ur", Some(transcribe::URDU_PROMPT.to_string())).await {
             crate::diag::note(format!("urdu clean pass text={}", pinned.text));
             if !pinned.text.trim().is_empty() {
                 // The Urdu prompt has no Latin letters, so a mixed sentence can
@@ -465,53 +580,53 @@ async fn speech_with_groq_raw(
         SpeechRoute::Transcribe => Ok(Recognized {
             text: spoken.text,
             tries: spoken.tries,
-            engine: "Groq".into(),
+            engine: via.engine().into(),
             language: source_language(language, &detected),
             path: "transcribe".into(),
         }),
         SpeechRoute::Translate => {
-            let translated = transcribe::translate_audio(client, api_key, audio, prompt, using_builtin).await?;
+            let translated = via.translate_audio(audio, prompt).await?;
             flags.doubtful |= translated.doubtful;
             Ok(Recognized {
                 text: translated.text,
                 tries: spoken.tries.saturating_add(translated.tries),
-                engine: "Groq".into(),
+                engine: via.engine().into(),
                 language: source_language(language, &detected),
                 path: "translate".into(),
             })
         }
         SpeechRoute::Mixed => {
             crate::diag::note(format!("llm translate input={}", spoken.text));
-            let outcome = cleanup::translate_preserving(client, api_key, &spoken.text, cleanup_model, using_builtin).await;
+            let outcome = via.translate_text(&spoken.text, cleanup_model).await;
             crate::diag::note(format!("llm translate used={} why={} loop={} output={}", outcome.used_model, outcome.why, transcribe::repetitive(&outcome.text), outcome.text));
             if outcome.used_model && !transcribe::repetitive(&outcome.text) {
                 return Ok(Recognized {
                     text: outcome.text,
                     tries: spoken.tries,
-                    engine: "Groq".into(),
+                    engine: via.engine().into(),
                     language: source_language(language, &detected),
                     path: "mixed-llama".into(),
                 });
             }
-            match transcribe::translate_audio(client, api_key, audio, None, using_builtin).await {
+            match via.translate_audio(audio, None).await {
                 Ok(translated) if !transcribe::repetitive(&translated.text) || spoken.text.trim().is_empty() => Ok(Recognized {
                     text: translated.text,
                     tries: spoken.tries.saturating_add(translated.tries),
-                    engine: "Groq".into(),
+                    engine: via.engine().into(),
                     language: source_language(language, &detected),
                     path: "translate".into(),
                 }),
                 Ok(_) | Err(_) if !spoken.text.trim().is_empty() => Ok(Recognized {
                     text: spoken.text,
                     tries: spoken.tries,
-                    engine: "Groq".into(),
+                    engine: via.engine().into(),
                     language: source_language(language, &detected),
                     path: "transcribe".into(),
                 }),
                 Ok(translated) => Ok(Recognized {
                     text: translated.text,
                     tries: translated.tries,
-                    engine: "Groq".into(),
+                    engine: via.engine().into(),
                     language: source_language(language, &detected),
                     path: "translate".into(),
                 }),
@@ -581,7 +696,7 @@ fn log_speech(env: &JobEnv, language: &str, path: &str) {
 fn should_fallback(err: &anyhow::Error) -> bool {
     matches!(
         transcribe::failure_kind(err),
-        Some(FailKind::RateLimit | FailKind::Unavailable | FailKind::Rejected)
+        Some(FailKind::RateLimit | FailKind::QuotaExhausted | FailKind::Unavailable | FailKind::Rejected)
     )
 }
 
@@ -625,6 +740,9 @@ mod tests {
         let err = anyhow::Error::from(transcribe::GroqFailure {
             message: transcribe::REJECTED_KEY_MESSAGE.into(),
             kind: FailKind::Rejected,
+            explicit_quota: false,
+            retry_after_ms: None,
+            offline_hint: false,
         });
         assert!(should_fallback(&err));
         let other = anyhow::Error::msg("not a groq failure");
@@ -695,4 +813,122 @@ pub(crate) fn prompt_words(dictionary: &[String], language: &str) -> Vec<String>
         }
     }
     words
+}
+
+#[cfg(test)]
+pub(crate) mod fake {
+    use crate::cleanup::CleanOutcome;
+    use crate::transcribe::Transcript;
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+
+    /// Scripted speech backend that records every call (kind, language, prompt).
+    #[derive(Default)]
+    pub struct FakeVia {
+        pub calls: Mutex<Vec<(String, String, Option<String>)>>,
+        replies: Mutex<VecDeque<(String, String)>>,
+        translation: Option<String>,
+    }
+
+    impl FakeVia {
+        pub fn new(replies: &[(&str, &str)], translation: Option<&str>) -> Self {
+            Self {
+                calls: Mutex::new(Vec::new()),
+                replies: Mutex::new(replies.iter().map(|(t, l)| (t.to_string(), l.to_string())).collect()),
+                translation: translation.map(str::to_string),
+            }
+        }
+        fn push(&self, kind: String, language: &str, prompt: Option<String>) {
+            self.calls.lock().unwrap().push((kind, language.to_string(), prompt));
+        }
+        pub fn transcribe(&self, model: &str, language: &str, prompt: Option<String>) -> anyhow::Result<Transcript> {
+            self.push(format!("transcribe:{model}"), language, prompt);
+            let (text, language) = self.replies.lock().unwrap().pop_front().ok_or_else(|| anyhow::anyhow!("no reply"))?;
+            Ok(Transcript { text, tries: 1, language, doubtful: false })
+        }
+        pub fn translate(&self, prompt: Option<&str>) -> anyhow::Result<Transcript> {
+            self.push("translate".into(), "", prompt.map(str::to_string));
+            Ok(Transcript { text: "translated audio".into(), tries: 1, language: "en".into(), doubtful: false })
+        }
+        pub fn translate_text(&self, text: &str) -> CleanOutcome {
+            self.push("translate_text".into(), "", Some(text.to_string()));
+            match &self.translation {
+                Some(t) => CleanOutcome { text: t.clone(), used_model: true, note: None, why: "fake".into() },
+                None => CleanOutcome { text: text.to_string(), used_model: false, note: None, why: "fake".into() },
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod via_tests {
+    use super::fake::FakeVia;
+    use super::*;
+
+    fn run(fake: &FakeVia, language: &str, output: &str, prompt: Option<&str>) -> Recognized {
+        tauri::async_runtime::block_on(speech_via(
+            &Via::Fake(fake),
+            vec![1, 2, 3],
+            transcribe::WHISPER_TURBO,
+            language,
+            output,
+            prompt,
+            "cleanup-model",
+        ))
+        .expect("speech")
+    }
+
+    #[test]
+    fn vocabulary_prompt_and_pinned_language_reach_the_backend() {
+        let fake = FakeVia::new(&[("Deploy to Supabase today", "en")], None);
+        let got = run(&fake, "en", "same", Some("Supabase, Taimoor"));
+        let calls = fake.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].1, "en");
+        assert_eq!(calls[0].2.as_deref(), Some("Supabase, Taimoor"));
+        assert_eq!(got.engine, "Fake");
+        assert_eq!(got.path, "transcribe");
+    }
+
+    #[test]
+    fn auto_urdu_gets_the_urdu_prompt_clean_pass() {
+        // The redo drops the Latin word the first pass heard, so that word stays.
+        // The Urdu-prompt pass still runs.
+        let fake = FakeVia::new(&[("آج battery ختم", "ur"), ("آج بیٹری ختم", "ur")], None);
+        let got = run(&fake, "auto", "same", Some("Bolo"));
+        let calls = fake.calls.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].2.as_deref(), Some("Bolo"));
+        assert_eq!(calls[1].1, "ur");
+        assert_eq!(calls[1].2.as_deref(), Some(transcribe::URDU_PROMPT));
+        assert!(calls[1].0.contains(transcribe::WHISPER_LARGE), "Urdu uses the large model: {:?}", calls[1]);
+        assert_eq!(got.text, "آج battery ختم");
+        assert!(!got.path.contains("repass"));
+    }
+
+    #[test]
+    fn urdu_clean_pass_is_kept_when_english_words_survive() {
+        let fake = FakeVia::new(&[("آج battery ختم", "ur"), ("آج battery ٹھیک", "ur")], None);
+        let got = run(&fake, "auto", "same", Some("Bolo"));
+        assert_eq!(got.text, "آج battery ٹھیک");
+        assert!(got.path.ends_with("-repass"));
+    }
+
+    #[test]
+    fn urdu_to_english_uses_llm_translation_of_the_urdu_text() {
+        let fake = FakeVia::new(&[("آج meeting ہے", "ur"), ("آج meeting ہے", "ur")], Some("There is a meeting today."));
+        let got = run(&fake, "auto", "english", None);
+        let calls = fake.calls.lock().unwrap();
+        assert!(calls.iter().any(|c| c.0 == "translate_text" && c.2.as_deref() == Some("آج meeting ہے")));
+        assert_eq!(got.text, "There is a meeting today.");
+        assert!(got.path.starts_with("mixed-llama"));
+    }
+
+    #[test]
+    fn pinned_urdu_setting_uses_urdu_prompt_first() {
+        let fake = FakeVia::new(&[("سلام", "ur")], None);
+        run(&fake, "ur", "same", Some("vocab"));
+        let calls = fake.calls.lock().unwrap();
+        assert_eq!(calls[0].2.as_deref(), Some(transcribe::URDU_PROMPT));
+    }
 }

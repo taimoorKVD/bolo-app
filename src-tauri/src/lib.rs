@@ -9,6 +9,9 @@ mod mishear;
 mod vocab;
 mod context;
 mod credentials;
+#[allow(dead_code)] // phase 3 scaffolding
+mod account;
+mod managed;
 mod diag;
 mod dictation;
 mod fixlast;
@@ -23,6 +26,7 @@ mod logbuf;
 mod memory;
 mod micwatch;
 mod offline;
+mod provider;
 mod pipeline;
 mod isolate;
 mod regression;
@@ -157,6 +161,7 @@ pub fn run() {
                 logbuf::log_line(&dir, "error", &format!("rating startup: {err}"));
             }
             memory::init(&dir);
+            managed::init(&dir);
             let state = AppState::new(settings.clone(), history, dir.clone());
             let listener = state.listener.clone();
             if !app.manage(state) {
@@ -256,6 +261,9 @@ pub fn run() {
             logbuf::log_line(&dir, "info", &format!("startup setup_ms={}", boot.elapsed().as_millis()));
             micwatch::spawn(app.handle().clone());
             health::spawn(app.handle().clone());
+            if !smoke {
+                managed::spawn(app.handle().clone());
+            }
             updater::spawn(app.handle());
             #[cfg(windows)]
             {
@@ -525,12 +533,15 @@ fn set_api_key(state: tauri::State<'_, AppState>, mut key: String) -> Result<Api
             .unwrap_or_else(|| "The API key was not stored.".into()));
     }
     logbuf::log_line(&state.config_dir, "info", "Groq API key stored");
+    provider::sync_primary_key(&state.config_dir, status.configured, status.hint.clone());
     Ok(status)
 }
 
 #[tauri::command]
-fn clear_api_key() -> Result<(), String> {
-    credentials::clear_api_key().map_err(|err| err.to_string())
+fn clear_api_key(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    credentials::clear_api_key().map_err(|err| err.to_string())?;
+    provider::sync_primary_key(&state.config_dir, false, None);
+    Ok(())
 }
 
 #[tauri::command]

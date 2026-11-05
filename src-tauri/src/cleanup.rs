@@ -500,7 +500,7 @@ pub async fn translate_preserving(
     }
 }
 
-fn accept_translation(original: &str, candidate: &str) -> bool {
+pub(crate) fn accept_translation(original: &str, candidate: &str) -> bool {
     let candidate = candidate.trim();
     if candidate.is_empty() {
         return false;
@@ -761,7 +761,10 @@ async fn post_chat(
         .await
     {
         Ok(response) => response,
-        Err(err) => return Err(CleanupFail::Other(format!("couldn't reach Groq: {}", crate::transcribe::error_chain(&err)))),
+        Err(err) => {
+            let failure = crate::provider::network_to_failure(crate::transcribe::error_chain(&err));
+            return Err(CleanupFail::Other(failure.message));
+        }
     };
     let status = response.status();
     let bytes = match response.text().await {
@@ -769,10 +772,12 @@ async fn post_chat(
         Err(err) => return Err(CleanupFail::Other(format!("empty cleanup response: {err}"))),
     };
     if !status.is_success() {
-        if is_missing_model(status.as_u16(), &bytes) {
+        let code = status.as_u16();
+        if is_missing_model(code, &bytes) {
             return Err(CleanupFail::Missing);
         }
-        return Err(CleanupFail::Other(groq_error_message(status.as_u16(), &bytes, using_builtin)));
+        let failure = crate::provider::classify_to_failure(code, &bytes, using_builtin);
+        return Err(CleanupFail::Other(failure.message));
     }
     let parsed: ChatResponse = match serde_json::from_str(&bytes) {
         Ok(parsed) => parsed,

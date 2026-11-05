@@ -1,0 +1,37 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ES2022",
+    "moduleResolution": "Bundler",
+    "lib": [
+      "ES2022",
+      "DOM"
+    ],
+    "types": [
+      "@cloudflare/workers-types",
+      "node",
+      "vitest/globals"
+    ],
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "baseUrl": ".",
+    "paths": {
+      "@worker/*": [
+        "worker/src/*"
+      ],
+      "@mock/*": [
+        "worker/mock/*"
+      ]
+    }
+  },
+  "include": [
+    "worker/**/*.ts",
+    "node/**/*.ts",
+    "vitest.config.ts"
+  ]
+}

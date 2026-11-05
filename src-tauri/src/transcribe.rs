@@ -1,6 +1,5 @@
 //! Groq Whisper transcription. Audio is sent only to api.groq.com.
 
-use crate::cleanup::groq_error_message;
 use anyhow::Context;
 use serde::Deserialize;
 use std::sync::OnceLock;
@@ -11,9 +10,12 @@ pub const WHISPER_LARGE: &str = "whisper-large-v3";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FailKind {
-    /// HTTP 429. One backoff, then the on-device model may take the chunk.
+    /// HTTP 429 with a short retry-after. Retry the same key, then maybe on-device.
     RateLimit,
+    /// Daily / tokens-per-day limit (or a long retry-after). Cool the key down.
+    QuotaExhausted,
     /// Network failure or HTTP 5xx. A few backoffs, then the on-device model.
+    /// Never mark the key exhausted for this.
     Unavailable,
     /// The key was rejected. Retry once, then the on-device model may take the chunk.
     Rejected,
@@ -24,6 +26,12 @@ pub enum FailKind {
 pub struct GroqFailure {
     pub message: String,
     pub kind: FailKind,
+    /// True when the body named a daily / TPD / quota limit explicitly.
+    pub explicit_quota: bool,
+    /// Parsed retry-after from the provider message, when present.
+    pub retry_after_ms: Option<u64>,
+    /// Transport wording that points at local offline (DNS and similar).
+    pub offline_hint: bool,
 }
 
 impl std::fmt::Display for GroqFailure {
@@ -36,6 +44,10 @@ impl std::error::Error for GroqFailure {}
 
 pub fn failure_kind(err: &anyhow::Error) -> Option<FailKind> {
     err.downcast_ref::<GroqFailure>().map(|failure| failure.kind)
+}
+
+pub fn failure_details(err: &anyhow::Error) -> Option<&GroqFailure> {
+    err.downcast_ref::<GroqFailure>()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,6 +76,9 @@ pub fn retry_plan(kind: FailKind, attempt: u32) -> RetryPlan {
             }
         }
         FailKind::Other => RetryPlan::Stop { fallback: false },
+        // Daily quota: stop this key immediately and let the provider router
+        // switch or fall back. Do not burn retries on a spent key.
+        FailKind::QuotaExhausted => RetryPlan::Stop { fallback: true },
         FailKind::RateLimit => {
             if attempt == 0 {
                 RetryPlan::Backoff { ms: 700 }
@@ -582,6 +597,9 @@ async fn request_audio_once(
             return Err(GroqFailure {
                 message: err.to_string(),
                 kind: FailKind::Other,
+                explicit_quota: false,
+                retry_after_ms: None,
+                offline_hint: false,
             })
         }
     };
@@ -607,10 +625,7 @@ async fn request_audio_once(
     {
         Ok(response) => response,
         Err(err) => {
-            return Err(GroqFailure {
-                message: format!("couldn't reach Groq: {}", error_chain(&err)),
-                kind: FailKind::Unavailable,
-            })
+            return Err(crate::provider::network_to_failure(error_chain(&err)))
         }
     };
     let status = response.status();
@@ -624,25 +639,22 @@ async fn request_audio_once(
                 } else {
                     FailKind::Other
                 },
+                explicit_quota: false,
+                retry_after_ms: None,
+                offline_hint: false,
             })
         }
     };
     if !status.is_success() {
         let code = status.as_u16();
-        let kind = match code {
-            401 | 403 => FailKind::Rejected,
-            429 => FailKind::RateLimit,
-            500..=599 => FailKind::Unavailable,
-            _ => FailKind::Other,
-        };
-        return Err(GroqFailure {
-            message: groq_error_message(code, &body, using_builtin),
-            kind,
-        });
+        return Err(crate::provider::classify_to_failure(code, &body, using_builtin));
     }
     parse_attempt(&body).map_err(|err| GroqFailure {
         message: err.to_string(),
         kind: FailKind::Other,
+        explicit_quota: false,
+        retry_after_ms: None,
+        offline_hint: false,
     })
 }
 
@@ -990,7 +1002,11 @@ mod tests {
         let failure = GroqFailure {
             message: "Groq is rate limiting requests right now".into(),
             kind: FailKind::RateLimit,
+            explicit_quota: false,
+            retry_after_ms: None,
+            offline_hint: false,
         };
+        assert_eq!(retry_plan(FailKind::QuotaExhausted, 0), RetryPlan::Stop { fallback: true });
         let wrapped = anyhow::Error::from(failure);
         assert_eq!(failure_kind(&wrapped), Some(FailKind::RateLimit));
         assert!(plain.avg_logprob.is_none());

@@ -31,12 +31,28 @@ pub(crate) const LEGACY_TARGET: &str = "groq-api-key.com.cadence.dictation";
 /// the target string itself; this mapping is for the non-Windows store and tests.
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn service_for_target(target: &str) -> Option<&'static str> {
-    if target == TARGET {
+    if target == TARGET
+        || target.starts_with("com.bolo.dictation/provider/")
+        || target.starts_with("com.bolo.dictation/account/")
+    {
         Some("com.bolo.dictation")
     } else if target == CADENCE_TARGET || target == LEGACY_TARGET {
         Some("com.cadence.dictation")
     } else {
         None
+    }
+}
+
+/// Account name inside the keyring service for a target. Windows uses the
+/// target string itself and ignores this.
+#[cfg(not(windows))]
+fn account_for_target(target: &str) -> &str {
+    if let Some(rest) = target.strip_prefix("com.bolo.dictation/provider/") {
+        rest
+    } else if let Some(rest) = target.strip_prefix("com.bolo.dictation/account/") {
+        rest
+    } else {
+        ACCOUNT
     }
 }
 
@@ -83,6 +99,55 @@ pub fn clear_api_key() -> anyhow::Result<()> {
     delete_target(CADENCE_TARGET)?;
     delete_target(LEGACY_TARGET)?;
     Ok(())
+}
+
+/// Credential Manager target for an extra provider key id (not the primary).
+pub(crate) fn provider_target(id: &str) -> String {
+    format!("com.bolo.dictation/provider/{id}")
+}
+
+pub fn load_provider_key(id: &str) -> anyhow::Result<Option<String>> {
+    if id == "default" {
+        return load_api_key();
+    }
+    if id == "builtin" || id.is_empty() || id.chars().any(|c| !(c.is_ascii_alphanumeric() || c == '-' || c == '_')) {
+        return Ok(None);
+    }
+    read_target(&provider_target(id))
+}
+
+#[allow(dead_code)]
+pub fn set_provider_key(id: &str, key: &str) -> anyhow::Result<()> {
+    if id == "default" {
+        return set_api_key(key);
+    }
+    if id == "builtin" || id.is_empty() || id.chars().any(|c| !(c.is_ascii_alphanumeric() || c == '-' || c == '_')) {
+        anyhow::bail!("invalid provider key id");
+    }
+    let key = key.trim();
+    validate_key(key).map_err(|err| anyhow!(err))?;
+    let target = provider_target(id);
+    write_target(&target, key)?;
+    match read_target(&target)? {
+        Some(saved) if saved == key => Ok(()),
+        Some(_) => Err(anyhow!(
+            "Credential Manager returned a different API key than the one just saved. It was not kept."
+        )),
+        None => Err(anyhow!(
+            "The API key could not be read back from Credential Manager. Nothing was kept."
+        )),
+    }
+}
+
+#[allow(dead_code)]
+pub fn clear_provider_key(id: &str) -> anyhow::Result<()> {
+    if id == "default" {
+        return clear_api_key();
+    }
+    if id == "builtin" || id.is_empty() {
+        return Ok(());
+    }
+    delete_target(&provider_target(id))
 }
 
 pub fn load_api_key() -> anyhow::Result<Option<String>> {
@@ -408,7 +473,7 @@ fn platform_write_blob(target: &str, secret: &[u8]) -> anyhow::Result<()> {
     refuse_real_store_from_tests()?;
     let secret = std::str::from_utf8(secret).context("credential blob was not utf-8")?;
     let service = service_for_target(target).unwrap_or(SERVICE);
-    let entry = keyring::Entry::new(service, ACCOUNT).context("couldn't open the credential store")?;
+    let entry = keyring::Entry::new(service, account_for_target(target)).context("couldn't open the credential store")?;
     entry
         .set_password(secret)
         .context("couldn't save the API key to the credential store")?;
@@ -423,7 +488,7 @@ fn platform_read_target(target: &str) -> anyhow::Result<Option<String>> {
     };
     // Silence the unused const when both services are referenced via service_for_target.
     let _ = (SERVICE, SERVICE_CADENCE);
-    let entry = keyring::Entry::new(service, ACCOUNT).context("couldn't open the credential store")?;
+    let entry = keyring::Entry::new(service, account_for_target(target)).context("couldn't open the credential store")?;
     match entry.get_password() {
         Ok(key) if key.trim().is_empty() => Ok(None),
         Ok(key) => Ok(Some(key)),
@@ -438,12 +503,61 @@ fn platform_delete_target(target: &str) -> anyhow::Result<()> {
     let Some(service) = service_for_target(target) else {
         return Ok(());
     };
-    let entry = keyring::Entry::new(service, ACCOUNT).context("couldn't open the credential store")?;
+    let entry = keyring::Entry::new(service, account_for_target(target)).context("couldn't open the credential store")?;
     match entry.delete_credential() {
         Ok(()) => Ok(()),
         Err(keyring::Error::NoEntry) => Ok(()),
         Err(err) => Err(err).context("couldn't remove the API key"),
     }
+}
+
+
+/// Validate a Credential Manager target under the Bolo account namespace.
+pub(crate) fn account_target_ok(target: &str) -> bool {
+    const ALLOWED: &[&str] = &[
+        "com.bolo.dictation/account/device-key",
+        "com.bolo.dictation/account/access-token",
+        "com.bolo.dictation/account/refresh-token",
+    ];
+    ALLOWED.contains(&target)
+}
+
+/// Store an account secret (device key / access / refresh). Not for Groq keys.
+#[allow(dead_code)]
+pub fn set_account_secret(target: &str, secret: &str) -> anyhow::Result<()> {
+    if !account_target_ok(target) {
+        anyhow::bail!("invalid account credential target");
+    }
+    let secret = secret.trim();
+    if secret.is_empty() || secret.len() > 4096 {
+        anyhow::bail!("invalid account secret length");
+    }
+    write_target(target, secret)?;
+    match read_target(target)? {
+        Some(saved) if saved == secret => Ok(()),
+        Some(_) => Err(anyhow!(
+            "Credential Manager returned a different account secret than the one just saved."
+        )),
+        None => Err(anyhow!(
+            "The account secret could not be read back from Credential Manager."
+        )),
+    }
+}
+
+#[allow(dead_code)]
+pub fn load_account_secret(target: &str) -> anyhow::Result<Option<String>> {
+    if !account_target_ok(target) {
+        anyhow::bail!("invalid account credential target");
+    }
+    read_target(target)
+}
+
+#[allow(dead_code)]
+pub fn clear_account_secret(target: &str) -> anyhow::Result<()> {
+    if !account_target_ok(target) {
+        anyhow::bail!("invalid account credential target");
+    }
+    delete_target(target)
 }
 
 #[cfg(test)]
@@ -460,6 +574,26 @@ mod tests {
         assert!(validate_key("gsk_short").is_err());
         assert!(validate_key("gsk_has a space in the token!!").is_err());
         assert!(validate_key("gsk_12345678901234567890").is_ok());
+    }
+
+    #[test]
+    fn provider_targets_are_namespaced() {
+        assert_eq!(provider_target("backup"), "com.bolo.dictation/provider/backup");
+        assert_eq!(provider_target("slot-2"), "com.bolo.dictation/provider/slot-2");
+    }
+
+    #[test]
+    fn account_targets_are_namespaced() {
+        assert!(account_target_ok("com.bolo.dictation/account/device-key"));
+        assert!(account_target_ok("com.bolo.dictation/account/access-token"));
+        assert!(account_target_ok("com.bolo.dictation/account/refresh-token"));
+        assert!(!account_target_ok("com.bolo.dictation/provider/backup"));
+        assert!(!account_target_ok("com.bolo.dictation/account/../escape"));
+        assert!(!account_target_ok("com.bolo.dictation/account/other"));
+        assert_eq!(
+            service_for_target("com.bolo.dictation/account/device-key"),
+            Some("com.bolo.dictation")
+        );
     }
 
     #[test]

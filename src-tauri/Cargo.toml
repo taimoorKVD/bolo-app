@@ -36,6 +36,9 @@ hound = "3.5"
 arboard = "3"
 open = "5"
 zeroize = { version = "1", features = ["derive"] }
+sha2 = "0.10"
+ring = "0.17"
+getrandom = "0.2"
 flacenc = "0.5.1"
 zip = { version = "2.2", default-features = false, features = ["deflate"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
