@@ -241,7 +241,7 @@ export async function mockInvoke<T>(command: string, args?: Record<string, unkno
           ? null
           : "Global hook preview is Windows-only in this browser session.";
       return {
-        version: "0.1.10",
+        version: "0.1.11",
         listenerRunning,
         listenerError,
         platform: "linux",
