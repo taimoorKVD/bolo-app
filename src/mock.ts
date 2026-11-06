@@ -5,6 +5,8 @@ import type {
   HistoryEntry,
   MicInfo,
   MemoryView,
+  ProviderKeyRow,
+  ProviderKeyStatus,
   Settings,
 } from "./types";
 
@@ -35,6 +37,7 @@ const settings: Settings = {
   smartTimeOfDay: false,
   smartHoliday: false,
   keepLearning: true,
+  keepRecordings: false,
 };
 
 let apiKey: string | null = null;
@@ -112,6 +115,22 @@ function builtinPreview(): boolean {
   return flag !== "0" && flag !== "false";
 }
 
+const ORDINARY = new Set(["the", "a", "to", "there", "their", "easy", "invoice", "deadline", "roadmap", "that"]);
+
+const backupKeys: ProviderKeyRow[] = [];
+
+function providerStatus(): ProviderKeyStatus {
+  const keys: ProviderKeyRow[] = [];
+  if (apiKey) {
+    keys.push({ id: "default", hint: `····${apiKey.slice(-4)}`, state: "ok", kind: "user", preferred: true, lastError: null });
+  }
+  keys.push(...backupKeys);
+  if (builtinPreview()) {
+    keys.push({ id: "builtin", hint: null, state: "ok", kind: "builtin", preferred: !apiKey, lastError: null });
+  }
+  return { keys, note: null };
+}
+
 function keyStatus(): ApiKeyStatus {
   const builtin = builtinPreview();
   if (!apiKey) return { configured: false, hint: null, error: null, builtin };
@@ -141,6 +160,48 @@ export async function mockInvoke<T>(command: string, args?: Record<string, unkno
     case "clear_api_key":
       apiKey = null;
       return undefined as T;
+    case "provider_keys":
+      return providerStatus() as T;
+    case "save_provider_key": {
+      const key = String(args?.key ?? "").trim();
+      const id = String(args?.id ?? "new");
+      if (key.length < 20 || /\s/.test(key)) throw new Error("That doesn't look like a Groq API key.");
+      if (key.includes("reject")) throw new Error("Groq did not accept that key. Check it and paste it again.");
+      if (id === "default") apiKey = key;
+      else {
+        const slot = id === "new" ? `backup-${backupKeys.length + 1}` : id;
+        if (backupKeys.length >= 3 && id === "new") throw new Error("You already have three backup keys. Remove one to add another.");
+        const row: ProviderKeyRow = { id: slot, hint: `····${key.slice(-4)}`, state: "ok", kind: "user", preferred: false, lastError: null };
+        const index = backupKeys.findIndex((item) => item.id === slot);
+        if (index >= 0) backupKeys[index] = row;
+        else backupKeys.push(row);
+      }
+      return { ...providerStatus(), note: null } as T;
+    }
+    case "revoke_provider_key": {
+      const id = String(args?.id ?? "");
+      if (id === "builtin") throw new Error("That one belongs to Bolo. Remove a key you added.");
+      if (id === "default") apiKey = null;
+      else {
+        const index = backupKeys.findIndex((item) => item.id === id);
+        if (index >= 0) backupKeys.splice(index, 1);
+      }
+      return providerStatus() as T;
+    }
+    case "teach_spelling": {
+      const from = String(args?.from ?? "").trim();
+      const to = String(args?.to ?? "").trim();
+      if (!from || !to) throw new Error("Type what Bolo heard, and what you meant.");
+      if (from.toLowerCase() === to.toLowerCase()) {
+        throw new Error("Those are the same word. A capital letter does not make an ordinary word into a name.");
+      }
+      const fromWord = from.split(/\s+/);
+      if (fromWord.length === 1 && ORDINARY.has(fromWord[0].toLowerCase())) {
+        throw new Error("That would change an ordinary word in every sentence. Teach a short phrase instead, such as “easy ssh” to EasySSH.");
+      }
+      memory.fixes = [{ from, to, createdUnixMs: Date.now() }, ...memory.fixes.filter((fix) => fix.from.toLowerCase() !== from.toLowerCase())];
+      return memoryView() as T;
+    }
     case "list_microphones":
       return structuredClone(mics) as T;
     case "get_history":

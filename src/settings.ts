@@ -18,6 +18,7 @@ import { formatDuration, formatHotkey, formatWhen, modelLabel } from "./format";
 import { listenerNotice, statusBanner, visibleMessage } from "./notices";
 import type {
   ApiKeyStatus,
+  ProviderKeyRow,
   AppInfo,
   DictationEvent,
   HistoryEntry,
@@ -117,6 +118,7 @@ function normalizeSettings(settings: Settings): Settings {
     smartTimeOfDay: settings.smartTimeOfDay === true,
     smartHoliday: settings.smartHoliday === true,
     keepLearning: settings.keepLearning !== false,
+    keepRecordings: settings.keepRecordings === true,
   };
 }
 
@@ -437,8 +439,17 @@ function keyPanel(draft: Draft): HTMLElement {
   const panel = panelEl(
     "key",
     "Your own service key",
-    "Bolo works without this. If you have your own Groq key, paste it here. It stays in Windows Credential Manager and is never written into the settings file.",
+    "Bolo works without this. A key is optional. Paste one only if you want dictation to use your own Groq account when the built-in path is busy.",
   );
+  const steps = el("ol", "key-steps");
+  for (const step of [
+    "Open Groq and create a key. You do not need to change any microphone setting for this.",
+    "Paste it below. Bolo asks Groq whether the key is accepted, then stores it in Windows Credential Manager. It is not written into settings or the log.",
+    "Optional: add a backup key. If one key hits its daily limit, Bolo uses the next key you saved. This does not turn on a paid fallback.",
+  ]) {
+    steps.append(el("li", "", step));
+  }
+  panel.append(steps);
   const ownLabel = el("p", "own-key-label", "Use my own Groq API key");
   ownLabel.dataset.ownKeyLabel = "true";
   ownLabel.hidden = !draft.keyStatus.builtin;
@@ -465,9 +476,13 @@ function keyPanel(draft: Draft): HTMLElement {
     void (async () => {
       saveKey.disabled = true;
       try {
-        draft.keyStatus = await api.setApiKey(input.value);
+        const saved = await api.saveProviderKey("default", input.value);
         input.value = "";
+        draft.keyStatus = await api.apiKeyStatus();
+        note.textContent = saved.note ?? keyNote(draft.keyStatus);
+        note.className = saved.note ? "field-note" : "field-note";
         syncKeyControls(draft);
+        paintProviderKeys(saved.keys, note);
       } catch (error) {
         note.textContent = messageOf(error);
         note.className = "field-note bad";
@@ -479,10 +494,12 @@ function keyPanel(draft: Draft): HTMLElement {
   remove.addEventListener("click", () => {
     void (async () => {
       try {
-        await api.clearApiKey();
+        await api.revokeProviderKey("default");
         draft.keyStatus = await api.apiKeyStatus();
         input.value = "";
         syncKeyControls(draft);
+        const listed = await api.providerKeys();
+        paintProviderKeys(listed.keys, note);
       } catch (error) {
         note.textContent = messageOf(error);
         note.className = "field-note bad";
@@ -497,13 +514,83 @@ function keyPanel(draft: Draft): HTMLElement {
     }),
   );
   row.append(input, saveKey, remove);
-  panel.append(
-    note,
-    ownLabel,
-    row,
-    link,
-  );
+  const backups = el("div", "provider-keys");
+  backups.dataset.providerKeys = "true";
+  const backupInput = document.createElement("input");
+  backupInput.type = "password";
+  backupInput.autocomplete = "off";
+  backupInput.spellcheck = false;
+  backupInput.placeholder = "Backup key";
+  backupInput.setAttribute("aria-label", "Backup Groq API key");
+  const addBackup = button("Add backup key", "ghost");
+  addBackup.addEventListener("click", () => {
+    void (async () => {
+      addBackup.disabled = true;
+      try {
+        const saved = await api.saveProviderKey("new", backupInput.value);
+        backupInput.value = "";
+        note.textContent = saved.note ?? "Backup key saved on this PC.";
+        note.className = "field-note";
+        paintProviderKeys(saved.keys, note);
+      } catch (error) {
+        note.textContent = messageOf(error);
+        note.className = "field-note bad";
+      } finally {
+        addBackup.disabled = false;
+      }
+    })();
+  });
+  const backupRow = el("div", "key-row");
+  backupRow.append(backupInput, addBackup);
+  panel.append(ownLabel, row, link, el("h3", "key-sub", "Backup keys"), backups, backupRow, note);
+  void api.providerKeys().then((listed) => paintProviderKeys(listed.keys, note)).catch(() => {});
   return panel;
+}
+
+function providerStateLabel(row: ProviderKeyRow): string {
+  if (row.kind === "builtin") return "Bolo's key";
+  if (row.state === "cooling") return "Waiting for its daily limit to reset";
+  if (row.state === "dead") return "Groq rejected it";
+  if (row.id === "default") return "Your key";
+  return "Backup";
+}
+
+function paintProviderKeys(rows: ProviderKeyRow[], note: HTMLElement): void {
+  const host = document.querySelector<HTMLElement>("[data-provider-keys]");
+  if (!host) return;
+  host.replaceChildren();
+  const shown = rows.filter((row) => row.kind !== "builtin");
+  if (shown.length === 0) {
+    host.append(el("p", "field-note", "No key of yours is saved. Bolo keeps working without one."));
+    return;
+  }
+  for (const row of shown) {
+    const line = el("div", "learned-row");
+    const text = el("p", "");
+    const hint = row.hint ?? "saved";
+    text.append(el("strong", "", providerStateLabel(row)), el("span", "", ` ${hint}`));
+    if (row.lastError) text.append(el("span", "field-note", ` ${row.lastError}`));
+    const remove = button(row.id === "default" ? "Remove" : "Remove backup", "text");
+    remove.addEventListener("click", () => {
+      void (async () => {
+        try {
+          const saved = await api.revokeProviderKey(row.id);
+          paintProviderKeys(saved.keys, note);
+          if (row.id === "default" && currentDraft) {
+            currentDraft.keyStatus = await api.apiKeyStatus();
+            syncKeyControls(currentDraft);
+          }
+          note.textContent = "Removed from this PC.";
+          note.className = "field-note";
+        } catch (error) {
+          note.textContent = messageOf(error);
+          note.className = "field-note bad";
+        }
+      })();
+    });
+    line.append(text, remove);
+    host.append(line);
+  }
 }
 
 function hotkeyPanel(draft: Draft): HTMLElement {
@@ -1374,7 +1461,7 @@ function privacyPanel(draft: Draft): HTMLElement {
   const panel = panelEl(
     "privacy",
     "Privacy",
-    "Audio and the transcript go to Groq, using the key stored on this PC, unless Groq can't take the request. Then the same audio stays on this PC and whisper.cpp transcribes it. Bolo does not store audio or text on a server of its own. A take's audio stays in the local spool until the paste is confirmed. There is no telemetry.",
+    "Audio and the transcript go to Groq, using a key stored on this PC, unless Groq can't take the request. Then the same audio stays on this PC and whisper.cpp transcribes it. Bolo does not store audio or text on a server of its own, and it does not train a voice model. Recordings are deleted after a paste unless you turn the switch below on. There is no telemetry.",
   );
   const list = el("div", "history-list");
   list.dataset.historyPrivacy = "true";
@@ -1396,6 +1483,17 @@ function privacyPanel(draft: Draft): HTMLElement {
     const list = document.querySelector<HTMLElement>("[data-history]");
     if (list) void clearHistory(draft, list, panel);
   });
+  panel.append(
+    switchRow(
+      "Keep recordings on this PC",
+      "Off unless you turn it on. Bolo then keeps the last few takes so Listen again can play them. They are never uploaded.",
+      draft.settings.keepRecordings,
+      (checked) => {
+        draft.settings.keepRecordings = checked;
+        markDirty(draft);
+      },
+    ),
+  );
   panel.append(clear, el("p", "field-note", "Clear removes every saved transcript from this computer. It does not contact Groq."));
   list.hidden = true;
   return panel;
@@ -1959,7 +2057,7 @@ function learnedPanel(_draft: Draft): HTMLElement {
   const panel = panelEl(
     "learned",
     "What Bolo has learned",
-    "Bolo learns names, your fixes and how you write. All of it stays on this PC.",
+    "Spellings you correct stay on this PC. Bolo does not train on your voice, and it does not read other apps.",
   );
   panel.classList.add("learned-panel");
   const body = el("div", "learned-body");
@@ -2101,7 +2199,7 @@ function fillLearned(draft: Draft): void {
   body.append(
     switchRow(
       "Keep learning",
-      "Learn new names, fixes and style from what you say.",
+      "Remember names and spellings you correct. This does not record or train a voice.",
       view.keepLearning,
       (on) => memoryAction(draft, () => api.setKeepLearning(on)),
     ),
@@ -2145,7 +2243,44 @@ function fillLearned(draft: Draft): void {
 
   // Your fixes
   const fixes = el("div", "learned-section");
-  fixes.append(el("h3", "", "Your fixes"), el("p", "field-note", "When Bolo hears the left side, it writes the right side."));
+  fixes.append(
+    el("h3", "", "Your fixes"),
+    el("p", "field-note", "When Bolo hears the left side, it writes the right side. Ordinary words such as invoice are left alone."),
+  );
+  const teach = el("div", "word-add");
+  const heard = document.createElement("input");
+  heard.type = "text";
+  heard.placeholder = "Bolo heard";
+  heard.setAttribute("aria-label", "What Bolo heard");
+  heard.autocomplete = "off";
+  const meant = document.createElement("input");
+  meant.type = "text";
+  meant.placeholder = "You meant";
+  meant.setAttribute("aria-label", "What you meant");
+  meant.autocomplete = "off";
+  const teachButton = button("Teach this spelling", "ghost");
+  const teachNote = el("p", "field-note", "Example: easy ssh → EasySSH. This is a spelling, not voice training.");
+  teachNote.dataset.teachNote = "true";
+  teachButton.addEventListener("click", () => {
+    const from = heard.value.trim();
+    const to = meant.value.trim();
+    if (!from || !to) return;
+    void api
+      .teachSpelling(from, to)
+      .then((view) => {
+        heard.value = "";
+        meant.value = "";
+        return refreshMemory(draft, view);
+      })
+      .catch((error) => {
+        const slot = document.querySelector<HTMLElement>("[data-teach-note]");
+        if (!slot) return;
+        slot.textContent = messageOf(error);
+        slot.className = "field-note bad";
+      });
+  });
+  teach.append(heard, meant, teachButton);
+  fixes.append(teach, teachNote);
   const shownFixes = view.fixes.filter((fix) => fix.from.trim() !== fix.to.trim());
   if (shownFixes.length === 0) fixes.append(el("p", "field-note", "No fixes yet. Use Fix on a History entry to teach Bolo."));
   for (const fix of shownFixes) {
@@ -2160,7 +2295,7 @@ function fillLearned(draft: Draft): void {
 
   // Your style
   const style = el("div", "learned-section");
-  style.append(el("h3", "", "Your style"), el("p", "field-note", "Short examples so clean-up sounds like you. Never pasted as-is."));
+  style.append(el("h3", "", "Your style"), el("p", "field-note", "Short examples of punctuation you like. They are never pasted as-is, and they are not a voice sample."));
   if (view.style.length === 0) style.append(el("p", "field-note", "Nothing yet."));
   view.style.forEach((sample, index) => {
     const row = el("div", "learned-row");

@@ -842,6 +842,23 @@ pub fn speech_threshold(noise_rms: f32) -> f32 {
     (noise_rms.max(0.0) * 3.2 + 0.004).clamp(0.004, 0.018)
 }
 
+/// Energy that is still a quiet consonant, not a pause.
+///
+/// Chunking used the vowel floor, so a soft ending counted as silence and a
+/// long take could cut the last sound off. A real pause sits under this.
+pub fn soft_speech_floor(threshold: f32) -> f32 {
+    (threshold * 0.35).clamp(0.0016, 0.008)
+}
+
+/// Advance the pause clock. Soft speech resets it so a quiet ending is not a boundary.
+pub fn advance_pause_ms(previous_ms: u32, energy: f32, threshold: f32, frame_ms: u32) -> u32 {
+    if energy >= soft_speech_floor(threshold) {
+        0
+    } else {
+        previous_ms.saturating_add(frame_ms.max(1))
+    }
+}
+
 /// Speech floor taken from the take itself: frames clearly above the quiet
 /// 20th percentile count as speech. `None` when the take is flat (digital
 /// silence or steady noise), so silence never reaches the transcriber.
@@ -959,6 +976,9 @@ pub fn trim_silence_with(samples: &[f32], sample_rate: u32, threshold: f32) -> V
     let Some((first, last)) = speech_bounds(&voiced) else {
         return Vec::new();
     };
+    // A quiet consonant after the last loud frame is still the word. Two
+    // silent frames end it, so a real pause in the middle is not filled in.
+    let last = extend_quiet_tail(samples, frame, threshold, last);
     const HANGOVER_FRAMES: usize = 3;
     let last = (last + HANGOVER_FRAMES).min(voiced.len().saturating_sub(1));
     let pad = ((sample_rate as usize) * PAD_MS as usize) / 1000;
@@ -1005,6 +1025,45 @@ fn speech_bounds(voiced: &[bool]) -> Option<(usize, usize)> {
     }
     let end = end?;
     if end < start { None } else { Some((start, end)) }
+}
+
+/// How far a decaying consonant may run past the last loud frame (20 ms frames).
+const QUIET_TAIL_FRAMES: usize = 12;
+
+fn extend_quiet_tail(samples: &[f32], frame: usize, threshold: f32, last: usize) -> usize {
+    if frame == 0 {
+        return last;
+    }
+    let mut end = last;
+    let mut missed = 0usize;
+    let limit = (last + QUIET_TAIL_FRAMES).min(samples.len() / frame);
+    let mut index = last + 1;
+    while index < limit {
+        let start = index * frame;
+        let stop = ((index + 1) * frame).min(samples.len());
+        if start >= stop {
+            break;
+        }
+        if soft_frame(&samples[start..stop], threshold) {
+            end = index;
+            missed = 0;
+        } else {
+            missed += 1;
+            if missed >= 2 {
+                break;
+            }
+        }
+        index += 1;
+    }
+    end
+}
+
+fn soft_frame(chunk: &[f32], threshold: f32) -> bool {
+    let energy = rms(chunk);
+    if energy < soft_speech_floor(threshold) {
+        return false;
+    }
+    energy >= threshold * 0.45 || zero_cross_rate(chunk) >= 0.11
 }
 
 pub fn resample(input: &[f32], in_rate: u32, out_rate: u32) -> Vec<f32> {
@@ -1497,6 +1556,51 @@ mod tests {
     #[test]
     fn pure_silence_trims_to_nothing() {
         assert!(trim_silence(&vec![0.0; 16_000], 16_000).is_empty());
+    }
+
+    /// Synthetic fixture: a loud vowel, a quiet consonant under the vowel floor,
+    /// then silence. Not a recording of a person.
+    #[test]
+    fn a_quiet_ending_stays_and_a_pause_does_not_fill_in() {
+        let rate = 16_000u32;
+        let mut samples = vec![0.0; rate as usize / 5];
+        samples.extend(tone(rate, 200, 0.25));
+        let mut state = 0x00C0_FFEEu32;
+        let quiet: Vec<f32> = (0..(rate as usize * 160 / 1000))
+            .map(|_| {
+                state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+                (state as f32 / u32::MAX as f32 - 0.5) * 0.012
+            })
+            .collect();
+        let quiet_rms = rms(&quiet);
+        let threshold = speech_threshold(0.0);
+        assert!(quiet_rms < threshold, "fixture must sit under the vowel floor, rms {quiet_rms}");
+        assert!(
+            quiet_rms >= soft_speech_floor(threshold),
+            "fixture must still be a consonant, rms {quiet_rms}"
+        );
+        samples.extend(quiet);
+        samples.extend(vec![0.0; rate as usize / 5]);
+        let trimmed = trim_silence_with(&samples, rate, threshold);
+        let secs = trimmed.len() as f32 / rate as f32;
+        assert!(secs > 0.30, "the quiet ending should stay on the clip, got {secs:.3}s");
+
+        let mut paused = tone(rate, 200, 0.25);
+        paused.extend(vec![0.0; rate as usize / 5]);
+        paused.extend(tone(rate, 200, 0.25));
+        let kept = trim_silence_with(&paused, rate, threshold);
+        assert!(kept.len() > rate as usize * 400 / 1000, "a middle pause stays between the words");
+
+        let threshold = speech_threshold(0.0);
+        assert_eq!(advance_pause_ms(200, 0.02, threshold, 20), 0, "a vowel is not a pause");
+        assert_eq!(
+            advance_pause_ms(200, quiet_rms, threshold, 20),
+            0,
+            "a quiet ending must not open a chunk boundary"
+        );
+        assert!(advance_pause_ms(260, 0.0002, threshold, 20) >= 280);
+        assert!(!crate::chunk::should_cut(20_000, advance_pause_ms(0, quiet_rms, threshold, 280)));
+        assert!(crate::chunk::should_cut(20_000, advance_pause_ms(260, 0.0002, threshold, 20)));
     }
 
     #[test]

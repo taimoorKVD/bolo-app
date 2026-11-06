@@ -1115,8 +1115,12 @@ async fn deliver(app: &AppHandle, mut outcome: Outcome, generation: u64) {
     let verified_paste = word == "Inserted";
     let partial = outcome.note.as_deref() == Some(pipeline::PARTIAL_NOTE);
     if verified_paste && !partial {
-        // Keep the audio for Fix last; it is no longer a take to recover.
+        // The take is no longer recovered after a crash. Audio stays only
+        // when the user turned on "Keep recordings" for Listen again.
         spool::mark_pasted(&state.config_dir, &outcome.spool_id);
+        if !lock(&state.settings).keep_recordings {
+            spool::discard_audio(&state.config_dir, &outcome.spool_id);
+        }
     }
     // Paste-again only ever uses the newest take, so a few is plenty.
     spool::prune(&state.config_dir, &outcome.spool_id, 3);

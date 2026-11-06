@@ -1158,7 +1158,9 @@ const COMMON_WORDS: &[&str] = &[
     "while", "will", "with", "within", "without", "work", "would", "wrong", "yeah", "year", "years", "your",
     "hello", "okay", "alright", "actually", "basically", "literally", "anyway", "also", "maybe", "english", "urdu", "hindi",
     "arabic", "project", "software", "architect", "system", "update", "version", "design", "section", "product", "page", "button",
-    "settings", "website", "application", "issue", "problem", "testing", "working", "words"
+    "settings", "website", "application", "issue", "problem", "testing", "working", "words",
+    // Ordinary words that must not be promoted into names.
+    "invoice", "deadline", "roadmap"
 ];
 
 /// Test helper: `learn_terms_with` with a per-thread pending list.

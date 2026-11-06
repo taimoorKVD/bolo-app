@@ -28,6 +28,8 @@ mod micwatch;
 mod offline;
 mod provider;
 mod pipeline;
+#[cfg_attr(not(test), allow(dead_code))]
+mod gemini_eval;
 mod isolate;
 mod regression;
 mod sense;
@@ -109,6 +111,10 @@ pub fn run() {
             fixlast::overlay_fix,
             fixlast::fix_relisten,
             fixlast::fix_with_text,
+            fixlast::teach_spelling,
+            provider_keys,
+            save_provider_key,
+            revoke_provider_key,
             open_groq_keys,
             smoke_finished,
             updater::check_for_update,
@@ -159,6 +165,9 @@ pub fn run() {
             rating::session_mark_running(&dir);
             if let Err(err) = store::save_settings(&dir, &settings) {
                 logbuf::log_line(&dir, "error", &format!("rating startup: {err}"));
+            }
+            if !settings.keep_recordings {
+                spool::discard_all_audio(&dir);
             }
             memory::init(&dir);
             managed::init(&dir);
@@ -501,6 +510,9 @@ fn save_settings(
         }
         return Err(err);
     }
+    if !settings.keep_recordings {
+        spool::discard_all_audio(&state.config_dir);
+    }
     state.listener.set_hotkey(settings.hotkey.clone());
     state.listener.set_paste_hotkey(settings.paste_hotkey.clone());
     state.warm.retarget(settings.microphone.clone());
@@ -542,6 +554,55 @@ fn clear_api_key(state: tauri::State<'_, AppState>) -> Result<(), String> {
     credentials::clear_api_key().map_err(|err| err.to_string())?;
     provider::sync_primary_key(&state.config_dir, false, None);
     Ok(())
+}
+
+#[tauri::command]
+fn provider_keys(state: tauri::State<'_, AppState>) -> provider::ProviderKeyStatus {
+    provider::ProviderKeyStatus {
+        keys: provider::list_rows(&state.config_dir),
+        note: None,
+    }
+}
+
+#[tauri::command]
+async fn save_provider_key(
+    state: tauri::State<'_, AppState>,
+    id: String,
+    mut key: String,
+) -> Result<provider::ProviderKeyStatus, String> {
+    let trimmed = key.trim().to_string();
+    cleanup::wipe(&mut key);
+    if let Err(err) = credentials::validate_key(&trimmed) {
+        let mut trimmed = trimmed;
+        cleanup::wipe(&mut trimmed);
+        return Err(err);
+    }
+    let probe = provider::probe_key(transcribe::http_client(), &trimmed).await;
+    if probe == provider::Probe::Rejected {
+        let mut trimmed = trimmed;
+        cleanup::wipe(&mut trimmed);
+        return Err(provider::probe_message(probe).unwrap_or("Groq did not accept that key.").into());
+    }
+    let note = provider::probe_message(probe).map(str::to_string);
+    let saved = provider::store_user_key(&state.config_dir, &id, &trimmed);
+    let mut trimmed = trimmed;
+    cleanup::wipe(&mut trimmed);
+    saved?;
+    logbuf::log_line(&state.config_dir, "info", "provider key stored");
+    Ok(provider::ProviderKeyStatus {
+        keys: provider::list_rows(&state.config_dir),
+        note,
+    })
+}
+
+#[tauri::command]
+fn revoke_provider_key(state: tauri::State<'_, AppState>, id: String) -> Result<provider::ProviderKeyStatus, String> {
+    provider::revoke_user_key(&state.config_dir, &id)?;
+    logbuf::log_line(&state.config_dir, "info", "provider key removed");
+    Ok(provider::ProviderKeyStatus {
+        keys: provider::list_rows(&state.config_dir),
+        note: None,
+    })
 }
 
 #[tauri::command]

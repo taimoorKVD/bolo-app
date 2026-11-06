@@ -7,7 +7,7 @@ Releases are automated by `.github/workflows/release.yml`. It mirrors
 
 1. Bump the version in `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml`, `package.json`, and `package-lock.json` (the root package), then commit to `main`. Keep `productName` as `Bolo.com`: that string is the NSIS install folder and uninstall key, and changing it installs a second copy next to 0.1.6 instead of upgrading it. The exe name is `bolo.exe` (`mainBinaryName`). Do not change the Microsoft Store Identity Name or Publisher.
 2. Tag and push: `git tag -a v0.1.6 -m "What changed"` then `git push origin v0.1.6`.
-   The tag message becomes the updater notes. The tag must equal the app version or the run stops.
+   The annotated tag message becomes the updater notes. The workflow fetches the tag object first. A shallow checkout only has the commit, and reading `%(contents)` there publishes the commit message (that is what 0.1.10 shipped). If the annotation is missing, the notes file in `docs/release-notes/` is used. The commit message is never the note. The tag must equal the app version or the run stops.
 3. When the run is green, download `Bolo_<v>.0_x64.msixupload` from the GitHub Release and submit it in
    Partner Center (Bolo, 9NMW6C99BF04) by hand.
 
@@ -25,7 +25,9 @@ Release, so users get nothing. A manual run that is not on a `v*` tag is always 
 | build | `cargo test` (never `--ignored`), NSIS build, signs it with `tauri signer sign -p ""` through cmd with stdin closed (an empty password can't hang), verifies the key id, writes `latest.json` |
 | store | Builds the MSIX with `scripts/build-msix.ps1` (no in-app updater) and wraps it as `.msixupload`. Automatic Store submission is a commented block; uncomment it once the `MSSTORE_*` secrets exist |
 | website | Real releases only. Commits the installer, `updates/latest.json`, `version.json` and the `index.html` download links to `taimoorKVD/bolo-website`. That push runs the site's own Deploy workflow, which pulls it onto the server. Then it waits until `/updates/latest.json` shows the new version |
-| github-release | Real releases only. Creates a GitHub Release with the installer, `.sig`, `latest.json` and `.msixupload` |
+| github-release | Real releases only. Creates a GitHub Release with the installer, `.sig`, `latest.json` and `.msixupload`. It does not wait on the website job. |
+
+The website job pushes to `taimoorKVD/bolo-website`. After `version.json` and `updates/latest.json` are copied, it runs that repo's `python3 scripts/sync-release.py`. The site's Deploy workflow refuses to publish unless that script's `--check` passes, which is why 0.1.10's push (`master` `3fb220d`) did not update the live site within 10 minutes: the homepage and README still named the previous version. A failed site check still fails the website job. The GitHub Release is created from the same artifacts and does not wait on that check. Store upload stays manual.
 
 `windows-installer.yml` no longer builds on tags, so a release builds once.
 

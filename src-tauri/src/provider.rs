@@ -345,6 +345,24 @@ impl ProviderStore {
             self.keys.retain(|key| key.id != "default" || key.kind != KeyKind::User);
         }
 
+        for id in BACKUP_IDS {
+            match credentials::load_provider_key(id) {
+                Ok(Some(mut value)) => {
+                    let hint = hint_of(&value);
+                    crate::cleanup::wipe(&mut value);
+                    if let Some(existing) = self.keys.iter_mut().find(|key| key.id == *id) {
+                        existing.hint = Some(hint);
+                        existing.kind = KeyKind::User;
+                        existing.provider = "groq".into();
+                    } else {
+                        self.keys.push(KeyMeta::user(id, Some(hint)));
+                    }
+                }
+                Ok(None) => self.keys.retain(|key| key.id != *id),
+                Err(_) => {}
+            }
+        }
+
         if crate::builtin::available() {
             if !self.keys.iter().any(|key| key.id == "builtin") {
                 self.keys.push(KeyMeta::builtin());
@@ -459,6 +477,7 @@ fn hint_of(key: &str) -> String {
 }
 
 fn compact_error(message: &str) -> String {
+    let message = crate::builtin::redact_secrets(message);
     let one = message.split_whitespace().collect::<Vec<_>>().join(" ");
     if one.chars().count() <= 160 {
         one
@@ -553,6 +572,167 @@ fn load_secret_for(id: &str) -> anyhow::Result<Option<KeyMaterial>> {
 /// Persist metadata after a take. Best-effort; never blocks dictation on disk errors.
 pub fn save_store(config_dir: &Path, store: &ProviderStore) {
     let _ = store.save(config_dir);
+}
+
+/// Backup slots. The primary key stays `default`.
+pub const BACKUP_IDS: [&str; 3] = ["backup-1", "backup-2", "backup-3"];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Probe {
+    Accepted,
+    Rejected,
+    Unreachable,
+}
+
+/// What a Groq models check means. The body is ignored so a key cannot leak out of it.
+pub fn classify_probe(status: Option<u16>) -> Probe {
+    match status {
+        Some(200..=299) => Probe::Accepted,
+        Some(401 | 403) => Probe::Rejected,
+        _ => Probe::Unreachable,
+    }
+}
+
+pub fn probe_message(probe: Probe) -> Option<&'static str> {
+    match probe {
+        Probe::Accepted => None,
+        Probe::Rejected => Some("Groq did not accept that key. Check it and paste it again."),
+        Probe::Unreachable => {
+            Some("Bolo could not confirm the key with Groq just now. It is saved on this PC and will be tried on the next take.")
+        }
+    }
+}
+
+pub async fn probe_key(client: &reqwest::Client, key: &str) -> Probe {
+    match client
+        .get("https://api.groq.com/openai/v1/models")
+        .bearer_auth(key)
+        .send()
+        .await
+    {
+        Ok(response) => classify_probe(Some(response.status().as_u16())),
+        Err(_) => classify_probe(None),
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderKeyRow {
+    pub id: String,
+    pub hint: Option<String>,
+    pub state: String,
+    pub kind: String,
+    pub preferred: bool,
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderKeyStatus {
+    pub keys: Vec<ProviderKeyRow>,
+    pub note: Option<String>,
+}
+
+pub fn rows_from(store: &ProviderStore) -> Vec<ProviderKeyRow> {
+    store
+        .keys
+        .iter()
+        .filter(|key| key.kind != KeyKind::Managed)
+        .map(|key| ProviderKeyRow {
+            id: key.id.clone(),
+            hint: key.hint.clone(),
+            state: match key.state {
+                KeyState::Ok => "ok",
+                KeyState::Cooling => "cooling",
+                KeyState::Dead => "dead",
+            }
+            .into(),
+            kind: match key.kind {
+                KeyKind::User => "user",
+                KeyKind::Builtin => "builtin",
+                KeyKind::Managed => "managed",
+            }
+            .into(),
+            preferred: store.preferred.as_deref() == Some(key.id.as_str()),
+            last_error: key.last_error.as_ref().map(|err| crate::builtin::redact_secrets(err)),
+        })
+        .collect()
+}
+
+pub fn list_rows(config_dir: &Path) -> Vec<ProviderKeyRow> {
+    rows_from(&ProviderStore::load(config_dir))
+}
+
+pub fn next_backup_id(store: &ProviderStore) -> Result<String, String> {
+    for id in BACKUP_IDS {
+        let taken = store.keys.iter().any(|key| key.id == id && key.kind == KeyKind::User);
+        if !taken {
+            return Ok(id.to_string());
+        }
+    }
+    Err("You already have three backup keys. Remove one to add another.".into())
+}
+
+fn backup_id(id: &str) -> bool {
+    BACKUP_IDS.contains(&id)
+}
+
+/// Save a user key. `new` takes the next backup slot. Secrets stay in the
+/// credential store; this file keeps the hint and the slot only.
+pub fn store_user_key(config_dir: &Path, requested: &str, key: &str) -> Result<(), String> {
+    let requested = requested.trim();
+    let id = if requested.is_empty() || requested == "new" {
+        next_backup_id(&ProviderStore::load(config_dir))?
+    } else if requested == "default" || backup_id(requested) {
+        requested.to_string()
+    } else {
+        return Err("That key slot is not available.".into());
+    };
+    if id == "default" {
+        credentials::set_api_key(key).map_err(|err| crate::builtin::redact_secrets(&err.to_string()))?;
+        let status = credentials::status();
+        sync_primary_key(config_dir, status.configured, status.hint);
+        return Ok(());
+    }
+    credentials::set_provider_key(&id, key).map_err(|err| crate::builtin::redact_secrets(&err.to_string()))?;
+    let mut store = ProviderStore::load(config_dir);
+    let hint = Some(hint_of(key));
+    if let Some(existing) = store.get_mut(&id) {
+        existing.hint = hint;
+        existing.kind = KeyKind::User;
+        existing.provider = "groq".into();
+        existing.state = KeyState::Ok;
+        existing.cooldown_until_ms = None;
+        existing.quota_hits = 0;
+        existing.last_error = None;
+    } else {
+        store.keys.push(KeyMeta::user(&id, hint));
+    }
+    store.save(config_dir).map_err(|err| crate::builtin::redact_secrets(&err.to_string()))?;
+    Ok(())
+}
+
+pub fn revoke_user_key(config_dir: &Path, id: &str) -> Result<(), String> {
+    let id = id.trim();
+    if id == "builtin" || id == "managed" {
+        return Err("That one belongs to Bolo. Remove a key you added.".into());
+    }
+    if id == "default" {
+        credentials::clear_api_key().map_err(|err| crate::builtin::redact_secrets(&err.to_string()))?;
+        sync_primary_key(config_dir, false, None);
+        return Ok(());
+    }
+    if !backup_id(id) {
+        return Err("That key slot is not available.".into());
+    }
+    credentials::clear_provider_key(id).map_err(|err| crate::builtin::redact_secrets(&err.to_string()))?;
+    let mut store = ProviderStore::load(config_dir);
+    store.keys.retain(|key| key.id != id);
+    if store.preferred.as_deref() == Some(id) {
+        store.preferred = store.keys.iter().find(|key| key.kind == KeyKind::User).map(|key| key.id.clone());
+    }
+    store.save(config_dir).map_err(|err| crate::builtin::redact_secrets(&err.to_string()))?;
+    Ok(())
 }
 
 /// Notify the store that the user saved or cleared the primary key.
@@ -896,6 +1076,32 @@ mod tests {
         let loaded: ProviderStore = serde_json::from_str(&raw).unwrap();
         assert_eq!(loaded.keys[0].id, "default");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn probe_results_and_backup_slots_never_store_a_secret() {
+        assert_eq!(classify_probe(Some(200)), Probe::Accepted);
+        assert_eq!(classify_probe(Some(401)), Probe::Rejected);
+        assert_eq!(classify_probe(Some(403)), Probe::Rejected);
+        assert_eq!(classify_probe(Some(429)), Probe::Unreachable);
+        assert_eq!(classify_probe(None), Probe::Unreachable);
+        assert!(probe_message(Probe::Rejected).unwrap().contains("did not accept"));
+        let mut store = ProviderStore {
+            keys: vec![
+                KeyMeta::user("backup-1", Some("····aaaa".into())),
+                KeyMeta::user("backup-2", Some("····bbbb".into())),
+                KeyMeta::user("backup-3", Some("····cccc".into())),
+            ],
+            preferred: None,
+        };
+        assert!(next_backup_id(&store).unwrap_err().contains("three backup"));
+        store.keys.pop();
+        assert_eq!(next_backup_id(&store).unwrap(), "backup-3");
+        store.keys[0].last_error = Some("rejected gsk_test_fixture_key_value_xxxxxxxx".into());
+        let raw = serde_json::to_string(&rows_from(&store)).unwrap();
+        assert!(raw.contains("····aaaa"));
+        assert!(!raw.contains("gsk_"), "{raw}");
+        assert!(!raw.to_ascii_lowercase().contains("bearer"));
     }
 
     #[test]

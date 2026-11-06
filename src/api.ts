@@ -1,5 +1,6 @@
 import type {
   ApiKeyStatus,
+  ProviderKeyStatus,
   AppInfo,
   DictationEvent,
   HistoryEntry,
@@ -81,6 +82,10 @@ export const api = {
   apiKeyStatus: () => call<ApiKeyStatus>("api_key_status"),
   setApiKey: (key: string) => call<ApiKeyStatus>("set_api_key", { key }),
   clearApiKey: () => call<void>("clear_api_key"),
+  providerKeys: () => call<ProviderKeyStatus>("provider_keys"),
+  saveProviderKey: (id: string, key: string) => call<ProviderKeyStatus>("save_provider_key", { id, key }),
+  revokeProviderKey: (id: string) => call<ProviderKeyStatus>("revoke_provider_key", { id }),
+  teachSpelling: (from: string, to: string) => call<MemoryView>("teach_spelling", { from, to }),
   listMicrophones: () => call<MicInfo[]>("list_microphones"),
   getMicStatus: () => call<MicStatus>("get_mic_status"),
   micLevel: () => call<number>("mic_level"),
