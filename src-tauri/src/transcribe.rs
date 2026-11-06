@@ -184,8 +184,42 @@ pub fn whisper_prompt(words: &[String]) -> Option<String> {
 /// get an Urdu-script prompt instead.
 pub(crate) const URDU_PROMPT: &str = "یہ اردو میں بولی گئی بات ہے۔ بہتری، بہتر، ایپلیکیشن، اینیمیشن، بیک گراؤنڈ، ویب سائٹ، ڈیزائن۔";
 
+/// Technical spellings Whisper otherwise turns into ordinary English.
+/// Kept in the long prompt, and used alone on a short clip.
+const PROMPT_TECH: &[&str] = &["EasySSH", "SSH", "API", "HTTP", "JSON", "URL"];
+
+/// Under this trimmed length, a vocabulary prompt and the previous take are
+/// more influential than the audio. Whisper then starts the paste with a
+/// prompt word ("Bolo and Easy…") or continues the last sentence.
+pub const BRIEF_AUDIO_SECS: f32 = 2.5;
+
+pub fn brief_audio(speech_secs: f32) -> bool {
+    speech_secs > 0.0 && speech_secs < BRIEF_AUDIO_SECS
+}
+
+/// Short clips get a closed glossary and nothing else. No instruction
+/// sentence (it gets echoed), no proper names (they get pasted), no recent
+/// transcript (it gets continued).
+pub fn whisper_prompt_brief() -> String {
+    "EasySSH, SSH, API, HTTP, HTTPS, JSON, URL, SQL.".to_string()
+}
+
 /// Dictionary terms plus the last couple of local transcripts, capped at 800 characters.
 pub fn whisper_prompt_with(words: &[String], recent: &[String]) -> Option<String> {
+    let incoming_empty = words.iter().all(|word| word.trim().is_empty());
+    let recent_empty = recent.iter().all(|text| text.trim().is_empty());
+    if incoming_empty && recent_empty {
+        return None;
+    }
+    let mut words_owned: Vec<String> = PROMPT_TECH.iter().map(|term| (*term).to_string()).collect();
+    for word in words {
+        let trimmed = word.trim();
+        if trimmed.is_empty() || words_owned.iter().any(|have| have.eq_ignore_ascii_case(trimmed)) {
+            continue;
+        }
+        words_owned.push(trimmed.to_string());
+    }
+    let words = words_owned;
     let snippets: Vec<String> = recent
         .iter()
         .take(2)
@@ -199,7 +233,7 @@ pub fn whisper_prompt_with(words: &[String], recent: &[String]) -> Option<String
         180.min(snippets.iter().map(|s| s.chars().count() + 1).sum())
     };
     let term_budget = 800usize.saturating_sub(prefix.chars().count() + 1 + snippet_reserve);
-    let terms = select_terms(words, term_budget);
+    let terms = select_terms(&words, term_budget);
     if terms.is_empty() && snippets.is_empty() {
         return None;
     }
@@ -289,6 +323,243 @@ fn snippet(text: &str, max_chars: usize) -> String {
     }
 }
 
+/// Words that make "it's such a …" a real sentence rather than a mis-hearing of SSH.
+const REAL_SUCH: &[&str] = &[
+    "amazing", "awful", "bad", "beautiful", "big", "blessing", "clear", "cold", "common", "cool", "deal", "fun", "good",
+    "great", "happy", "hard", "honor", "honour", "hot", "huge", "idea", "important", "joy", "long", "lovely", "mess",
+    "nice", "nightmare", "obvious", "pain", "perfect", "pity", "pleasure", "problem", "rare", "relief", "sad", "shame",
+    "shock", "short", "simple", "small", "strange", "strong", "surprise", "sweet", "terrible", "tiny", "waste", "weak",
+    "weird", "wonderful",
+];
+
+const LIGHT_GLUE: &[&str] = &["and", "so", "um", "uh", "umm", "well", "hey", "ok", "okay", "yeah"];
+
+const FINITE_VERBS: &[&str] = &[
+    "is", "are", "was", "were", "be", "been", "am", "have", "has", "had", "do", "does", "did", "can", "could", "will",
+    "would", "should", "shall", "may", "might", "go", "goes", "went", "going", "want", "wants", "need", "needs", "think",
+    "thinks", "said", "say", "says", "make", "makes", "made", "get", "gets", "got", "ship", "send", "open", "start",
+    "let", "lets", "please", "use", "uses", "run", "runs", "deploy", "check", "see", "look", "remember", "know", "note",
+    "keep", "hold", "try", "tell", "ask", "call", "put", "take", "give", "come", "mean", "love", "like", "hope", "find",
+    "leave", "stay", "stop", "wait", "help", "show", "move", "turn", "read", "write", "set", "add", "change", "fix",
+    "work", "works",
+];
+
+/// Whisper hears "easy ssh" as ordinary English and then keeps talking:
+/// "easy, it's such are", "Bolo and Easy, it's such a truth. Nerd thing, imagination."
+/// Restore the technical phrase when the take is that failure, and leave a real
+/// sentence ("it's such a good idea", "open easy ssh and log in") alone.
+pub fn recover_brief_tech(text: &str) -> String {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if let Some(collapsed) = collapse_tech_hallucination(trimmed) {
+        return collapsed;
+    }
+    replace_tech_literals(trimmed)
+}
+
+/// Drop a runaway tail when the trimmed audio is too short to have held those words.
+pub fn guard_short_take(text: &str, speech_secs: f32) -> String {
+    let recovered = recover_brief_tech(text);
+    clamp_runaway(&recovered, speech_secs)
+}
+
+fn clamp_runaway(text: &str, speech_secs: f32) -> String {
+    if !(speech_secs > 0.05 && speech_secs < 6.0) {
+        return text.to_string();
+    }
+    let words: Vec<&str> = text.split_whitespace().collect();
+    // Conversational speech is about 2–4 words a second. Far above that, the
+    // extra words are the model continuing after the person stopped.
+    let max_words = ((speech_secs * 4.5) + 3.0).round() as usize;
+    let max_words = max_words.max(4);
+    if words.len() <= max_words {
+        return text.to_string();
+    }
+    words[..max_words].join(" ")
+}
+
+fn collapse_tech_hallucination(text: &str) -> Option<String> {
+    let cores = tech_cores(text);
+    if cores.is_empty() || cores.len() > 16 {
+        return None;
+    }
+    if let Some(easy_at) = cores.iter().position(|word| word == "easy") {
+        let prefix = &cores[..easy_at];
+        if prefix.iter().all(|word| is_seed_glue(word) || is_light_glue(word)) {
+            if let Some(span) = ssh_mishear_len(&cores[easy_at + 1..]) {
+                let tail = &cores[easy_at + 1 + span..];
+                if collapse_tail(text, prefix, tail) {
+                    return Some("EasySSH".to_string());
+                }
+            }
+        }
+    }
+    if let Some(span) = ssh_mishear_len(&cores) {
+        let tail = &cores[span..];
+        if collapse_tail(text, &[], tail) {
+            let product = matches!(cores.first().map(String::as_str), Some("easyssh" | "easy-ssh"));
+            return Some(if product { "EasySSH" } else { "SSH" }.to_string());
+        }
+    }
+    None
+}
+
+fn collapse_tail(original: &str, prefix: &[String], tail: &[String]) -> bool {
+    if real_such_clause(tail) {
+        return false;
+    }
+    let leaked = prefix.iter().any(|word| is_seed_glue(word));
+    leaked || broken_tail(tail) || extra_sentence_nonsense(original)
+}
+
+fn real_such_clause(tail: &[String]) -> bool {
+    let rest = match tail.first().map(String::as_str) {
+        Some("a" | "an" | "the") => &tail[1..],
+        _ => return false,
+    };
+    rest.first().is_some_and(|word| REAL_SUCH.contains(&word.as_str()))
+}
+
+fn broken_tail(tail: &[String]) -> bool {
+    let words: Vec<&str> = tail.iter().map(String::as_str).collect();
+    matches!(
+        words.as_slice(),
+        []
+            | ["are"]
+            | ["a"]
+            | ["an"]
+            | ["the"]
+            | ["truth"]
+            | ["thing"]
+            | ["a", "truth"]
+            | ["a", "thing"]
+            | ["the", "truth"]
+            | ["the", "thing"]
+    )
+}
+
+/// A second fragment with no verb ("Nerd thing, imagination.") after the mis-hearing.
+fn extra_sentence_nonsense(text: &str) -> bool {
+    let parts: Vec<&str> = text.split(['.', '?', '!']).filter(|part| !part.trim().is_empty()).collect();
+    if parts.len() < 2 {
+        return false;
+    }
+    let extra = tech_cores(&parts[1..].join(" "));
+    !extra.is_empty() && extra.len() <= 8 && !extra.iter().any(|word| FINITE_VERBS.contains(&word.as_str()))
+}
+
+fn ssh_mishear_len(cores: &[String]) -> Option<usize> {
+    let c = |i: usize| cores.get(i).map(String::as_str);
+    if c(0) == Some("ssh") || c(0) == Some("easyssh") || c(0) == Some("easy-ssh") {
+        return Some(1);
+    }
+    if matches!(c(0), Some("s" | "es" | "ess")) && matches!(c(1), Some("s" | "es" | "ess")) && matches!(c(2), Some("h" | "aitch")) {
+        return Some(3);
+    }
+    if matches!(c(0), Some("it's" | "its" | "it")) && c(1) == Some("such") {
+        return Some(2);
+    }
+    None
+}
+
+fn is_seed_glue(word: &str) -> bool {
+    let flat: String = word.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+    matches!(
+        flat.as_str(),
+        "bolo"
+            | "bolocom"
+            | "kingdom"
+            | "vision"
+            | "taimoor"
+            | "hussain"
+            | "taimoorhussain"
+            | "taimoorhussaincom"
+            | "thebetawebsite"
+            | "thebetawebsitecom"
+    )
+}
+
+fn is_light_glue(word: &str) -> bool {
+    LIGHT_GLUE.contains(&word)
+}
+
+fn replace_tech_literals(text: &str) -> String {
+    let tokens: Vec<&str> = text.split_whitespace().collect();
+    if tokens.is_empty() {
+        return text.to_string();
+    }
+    let cores: Vec<String> = tokens.iter().copied().map(core_word).collect();
+    let mut out = Vec::new();
+    let mut index = 0;
+    let mut changed = false;
+    while index < tokens.len() {
+        let Some(span) = literal_tech_span(&cores[index..]) else {
+            out.push(tokens[index].to_string());
+            index += 1;
+            continue;
+        };
+        let product = literal_includes_easy(&cores[index..index + span]);
+        let tail = trailing_punct(tokens[index + span - 1]);
+        out.push(format!("{}{tail}", if product { "EasySSH" } else { "SSH" }));
+        index += span;
+        changed = true;
+    }
+    if !changed {
+        text.to_string()
+    } else {
+        out.join(" ")
+    }
+}
+
+/// Joining spans only. "it's such" is handled by the utterance collapse so a
+/// real sentence ("it's such a good idea") is not rewritten.
+fn literal_tech_span(cores: &[String]) -> Option<usize> {
+    let c = |i: usize| cores.get(i).map(String::as_str);
+    if matches!(c(0), Some("easyssh" | "easy-ssh")) {
+        return Some(1);
+    }
+    if c(0) == Some("easy") && c(1) == Some("ssh") {
+        return Some(2);
+    }
+    if c(0) == Some("easy")
+        && matches!(c(1), Some("s" | "es" | "ess"))
+        && matches!(c(2), Some("s" | "es" | "ess"))
+        && matches!(c(3), Some("h" | "aitch"))
+    {
+        return Some(4);
+    }
+    if matches!(c(0), Some("s" | "es" | "ess")) && matches!(c(1), Some("s" | "es" | "ess")) && matches!(c(2), Some("h" | "aitch")) {
+        return Some(3);
+    }
+    None
+}
+
+fn literal_includes_easy(cores: &[String]) -> bool {
+    cores.iter().any(|word| word == "easy" || word == "easyssh" || word == "easy-ssh")
+}
+
+fn trailing_punct(token: &str) -> String {
+    token
+        .chars()
+        .rev()
+        .take_while(|c| !c.is_alphanumeric() && *c != '\'')
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect()
+}
+
+fn tech_cores(text: &str) -> Vec<String> {
+    text.split_whitespace().map(core_word).filter(|word| !word.is_empty()).collect()
+}
+
+fn core_word(token: &str) -> String {
+    let trimmed = token.trim_matches(|c: char| !c.is_alphanumeric() && c != '\'' && c != '\u{2019}' && c != '-');
+    trimmed.replace(['\u{2019}', '\u{2018}'], "'").to_ascii_lowercase()
+}
+
 /// Drop Whisper prompt echoes that sometimes prepend the pasted transcript.
 pub(crate) fn strip_prompt_leak(text: &str) -> String {
     let mut out = text.trim().to_string();
@@ -298,6 +569,8 @@ pub(crate) fn strip_prompt_leak(text: &str) -> String {
         let next = if let Some(rest) = strip_known_prefix(trimmed) {
             rest
         } else if let Some(rest) = strip_term_instruction(trimmed) {
+            rest
+        } else if let Some(rest) = strip_glossary_echo(trimmed) {
             rest
         } else {
             break;
@@ -322,6 +595,20 @@ fn strip_known_prefix(text: &str) -> Option<String> {
     ];
     for prefix in PREFIXES {
         if let Some(rest) = text.strip_prefix(prefix) {
+            return Some(rest.to_string());
+        }
+    }
+    None
+}
+
+/// The short-clip glossary, echoed back as the transcript.
+fn strip_glossary_echo(text: &str) -> Option<String> {
+    const MARKERS: &[&str] = &[
+        "EasySSH, SSH, API, HTTP, HTTPS, JSON, URL, SQL.",
+        "EasySSH, SSH, API, HTTP, HTTPS, JSON, URL, SQL",
+    ];
+    for marker in MARKERS {
+        if let Some(rest) = text.strip_prefix(marker) {
             return Some(rest.to_string());
         }
     }
@@ -679,6 +966,11 @@ fn parse_attempt(body: &str) -> anyhow::Result<Attempt> {
                 .as_deref()
                 .map(confidence)
                 .unwrap_or((None, None));
+            let text = verbose
+                .segments
+                .as_deref()
+                .map(|segments| filter_hallucinated_segments(&text, segments))
+                .unwrap_or(text);
             return Ok(Attempt {
                 text: strip_prompt_leak(&text),
                 avg_logprob,
@@ -844,8 +1136,40 @@ pub(crate) fn has_arabic(text: &str) -> bool {
 
 #[derive(Debug, Deserialize)]
 struct VerboseSegment {
+    #[serde(default)]
+    text: Option<String>,
     avg_logprob: Option<f32>,
     no_speech_prob: Option<f32>,
+    #[serde(default)]
+    compression_ratio: Option<f32>,
+}
+
+/// A later segment that is silence, very unsure, or highly repetitive is the
+/// model talking after the person stopped. Keep the earlier speech.
+fn filter_hallucinated_segments(text: &str, segments: &[VerboseSegment]) -> String {
+    let usable: Vec<&VerboseSegment> = segments
+        .iter()
+        .filter(|segment| segment.text.as_ref().is_some_and(|value| !value.trim().is_empty()))
+        .collect();
+    if usable.len() < 2 {
+        return text.to_string();
+    }
+    let kept: Vec<&str> = usable
+        .iter()
+        .filter(|segment| !segment_is_hallucination(segment))
+        .filter_map(|segment| segment.text.as_deref())
+        .collect();
+    if kept.is_empty() || kept.len() == usable.len() {
+        return text.to_string();
+    }
+    let joined = kept.join("").trim().to_string();
+    if joined.is_empty() { text.to_string() } else { joined }
+}
+
+fn segment_is_hallucination(segment: &VerboseSegment) -> bool {
+    segment.compression_ratio.is_some_and(|value| value > 2.4)
+        || segment.avg_logprob.is_some_and(|value| value < -1.0)
+        || segment.no_speech_prob.is_some_and(|value| value > 0.6)
 }
 
 fn words(text: &str) -> Vec<String> {
@@ -944,8 +1268,16 @@ mod tests {
         assert_eq!(whisper_prompt(&[]), None);
         assert_eq!(
             whisper_prompt(&["  Bolo  ".into(), "".into(), "Tauri".into()]).as_deref(),
-            Some("Dictation transcript. Spell these terms exactly when spoken: Bolo, Tauri.")
+            Some("Dictation transcript. Spell these terms exactly when spoken: EasySSH, SSH, API, HTTP, JSON, URL, Bolo, Tauri.")
         );
+        let brief = whisper_prompt_brief();
+        assert!(brief.contains("EasySSH") && brief.contains("SSH") && brief.ends_with('.'));
+        assert!(!brief.to_lowercase().contains("bolo"));
+        assert!(!brief.contains("Spell these"));
+        assert!(brief_audio(1.1));
+        assert!(!brief_audio(0.0));
+        assert!(!brief_audio(BRIEF_AUDIO_SECS));
+        assert!(!brief_audio(4.0));
         let huge = vec!["Supercalifragilistic".to_string(); 80];
         let prompt = whisper_prompt(&huge).unwrap();
         assert!(prompt.chars().count() <= 800);
@@ -957,6 +1289,7 @@ mod tests {
         )
         .unwrap();
         assert!(with_recent.contains("Bolo"));
+        assert!(with_recent.contains("EasySSH"));
         assert!(!with_recent.contains("Recent dictation"));
         assert!(with_recent.contains("Priya"));
         assert!(with_recent.chars().count() <= 800);
@@ -972,6 +1305,54 @@ mod tests {
             "Ship it tomorrow."
         );
         assert_eq!(strip_prompt_leak("Ship it tomorrow."), "Ship it tomorrow.");
+        assert_eq!(
+            strip_prompt_leak("EasySSH, SSH, API, HTTP, HTTPS, JSON, URL, SQL. Ship it."),
+            "Ship it."
+        );
+    }
+
+    #[test]
+    fn short_tech_phrases_stay_words_not_invented_sentences() {
+        let cases = [
+            ("easy ssh", "EasySSH"),
+            ("easy, ssh", "EasySSH"),
+            ("EasySSH", "EasySSH"),
+            ("easyssh", "EasySSH"),
+            ("easy s s h", "EasySSH"),
+            ("s s h", "SSH"),
+            ("ssh", "SSH"),
+            ("easy, it's such are", "EasySSH"),
+            ("easy, its such are", "EasySSH"),
+            ("easy it’s such", "EasySSH"),
+            ("Bolo and Easy, it's such a truth. Nerd thing, imagination.", "EasySSH"),
+            ("Bolo and Easy, it's such a truth. Nerd thing, imagination.", "EasySSH"),
+            ("it's such", "SSH"),
+            ("it's such are", "SSH"),
+            ("it's such a truth. Nerd thing, imagination.", "SSH"),
+            ("open easy ssh please", "open EasySSH please"),
+            ("ssh into the server", "ssh into the server"),
+            ("I think it's such a good idea", "I think it's such a good idea"),
+            ("Easy, it's such a beautiful day", "Easy, it's such a beautiful day"),
+            ("Bolo and Easy, it's such a beautiful day", "Bolo and Easy, it's such a beautiful day"),
+            ("It's such a truth. Remember that.", "It's such a truth. Remember that."),
+            ("Open Bolo and start dictating.", "Open Bolo and start dictating."),
+            ("ship it tomorrow", "ship it tomorrow"),
+        ];
+        for (heard, expected) in cases {
+            assert_eq!(recover_brief_tech(heard), expected, "{heard}");
+        }
+        let runaway = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda";
+        let clamped = guard_short_take(runaway, 0.5);
+        assert!(clamped.split_whitespace().count() < runaway.split_whitespace().count(), "{clamped}");
+        assert_eq!(guard_short_take("ship the notes to Priya tomorrow", 3.0), "ship the notes to Priya tomorrow");
+        assert_eq!(guard_short_take("easy, it's such are", 0.9), "EasySSH");
+        let body = r#"{"text":" easy it's such. Nerd thing, imagination.","language":"english","segments":[
+            {"text":" easy it's such.","avg_logprob":-0.3,"no_speech_prob":0.05,"compression_ratio":1.2},
+            {"text":" Nerd thing, imagination.","avg_logprob":-1.4,"no_speech_prob":0.82,"compression_ratio":2.8}
+        ]}"#;
+        let attempt = parse_attempt(body).unwrap();
+        assert!(!attempt.text.to_lowercase().contains("imagination"), "{}", attempt.text);
+        assert!(attempt.text.to_lowercase().contains("such") || attempt.text.contains("EasySSH"));
     }
 
     #[test]

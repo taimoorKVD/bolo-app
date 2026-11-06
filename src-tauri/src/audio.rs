@@ -718,11 +718,16 @@ pub struct EncodedSpeech {
     pub bytes: Vec<u8>,
     /// `flac` or `wav`. Logged with the stage timings.
     pub format: &'static str,
+    /// Trimmed speech length. Short clips use a smaller Whisper prompt.
+    pub speech_secs: f32,
 }
 
 pub fn prepare_speech(finished: &FinishedAudio) -> Result<EncodedSpeech, SpeechError> {
     let resampled = speech_samples(finished)?;
-    encode_speech(&resampled, TARGET_RATE)
+    let speech_secs = resampled.len() as f32 / TARGET_RATE as f32;
+    let mut encoded = encode_speech(&resampled, TARGET_RATE)?;
+    encoded.speech_secs = speech_secs;
+    Ok(encoded)
 }
 
 /// Trimmed, gain-normalized, 16 kHz mono samples ready to encode.
@@ -840,7 +845,38 @@ pub fn noise_only(samples: &[f32], sample_rate: u32) -> bool {
             noisy += 1;
         }
     }
-    frames >= 8 && vowelish == 0 && noisy * 2 >= frames
+    if !(frames >= 8 && vowelish == 0 && noisy * 2 >= frames) {
+        return false;
+    }
+    // A spoken "ssh" is a short loud burst with quiet edges. Steady hiss is
+    // flat from the first sample to the last, and that is what we drop.
+    !fricative_burst(samples, sample_rate)
+}
+
+fn fricative_burst(samples: &[f32], sample_rate: u32) -> bool {
+    let n = samples.len();
+    let rate = sample_rate as usize;
+    if rate == 0 || n < rate / 10 || n > rate * 2 {
+        return false;
+    }
+    let third = (n / 3).max(1);
+    if third >= n {
+        return false;
+    }
+    let edge = rms(&samples[..third]).max(rms(&samples[n - third..]));
+    let mid = rms(&samples[third..n - third]);
+    mid >= 0.004 && mid > edge * 1.8
+}
+
+/// Vowels clear the energy floor. Fricatives ("s", "sh") are quieter and
+/// cross zero quickly; a vowel-only floor was cutting them off "easy ssh".
+fn frame_is_speech(chunk: &[f32], threshold: f32) -> bool {
+    let energy = rms(chunk);
+    if energy >= threshold {
+        return true;
+    }
+    let floor = (threshold * 0.45).max(0.0022);
+    energy >= floor && zero_cross_rate(chunk) >= 0.16
 }
 
 fn zero_cross_rate(chunk: &[f32]) -> f32 {
@@ -872,7 +908,7 @@ pub fn trim_silence_with(samples: &[f32], sample_rate: u32, threshold: f32) -> V
     }
     let voiced: Vec<bool> = samples
         .chunks(frame)
-        .map(|chunk| rms(chunk) >= threshold)
+        .map(|chunk| frame_is_speech(chunk, threshold))
         .collect();
     // Onset needs two voiced frames so a click is not speech. A short hangover
     // keeps a quiet consonant that follows the last loud frame.
@@ -955,11 +991,11 @@ pub fn resample(input: &[f32], in_rate: u32, out_rate: u32) -> Vec<f32> {
 pub fn encode_speech(samples: &[f32], sample_rate: u32) -> Result<EncodedSpeech, SpeechError> {
     if let Ok(bytes) = encode_flac(samples, sample_rate) {
         if bytes.starts_with(b"fLaC") && bytes.len() > 42 {
-            return Ok(EncodedSpeech { bytes, format: "flac" });
+            return Ok(EncodedSpeech { bytes, format: "flac", speech_secs: 0.0 });
         }
     }
     let bytes = encode_wav(samples, sample_rate).map_err(|err| SpeechError::Encode(err.to_string()))?;
-    Ok(EncodedSpeech { bytes, format: "wav" })
+    Ok(EncodedSpeech { bytes, format: "wav", speech_secs: 0.0 })
 }
 
 fn encode_flac(samples: &[f32], sample_rate: u32) -> anyhow::Result<Vec<u8>> {
@@ -1513,6 +1549,42 @@ mod tests {
         );
         assert!(speech_threshold(0.0) < 0.01);
         assert!(speech_threshold(0.02) <= 0.018);
+    }
+
+    #[test]
+    fn a_trailing_fricative_is_kept_and_a_flat_hiss_is_not() {
+        let rate = 16_000u32;
+        let mut samples = vec![0.0; rate as usize / 5];
+        samples.extend(tone(rate, 200, 0.25));
+        let mut state = 0x1234_5678u32;
+        let fricative: Vec<f32> = (0..(rate as usize * 400 / 1000))
+            .map(|_| {
+                state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+                (state as f32 / u32::MAX as f32 - 0.5) * 0.012
+            })
+            .collect();
+        let fricative_rms = rms(&fricative);
+        assert!(fricative_rms < speech_threshold(0.0), "fixture should sit under the vowel floor, rms {fricative_rms}");
+        samples.extend(fricative);
+        samples.extend(vec![0.0; rate as usize / 5]);
+        let trimmed = trim_silence_with(&samples, rate, speech_threshold(0.0));
+        let secs = trimmed.len() as f32 / rate as f32;
+        assert!(secs > 0.7, "the quiet ssh tail should stay on the clip, got {secs:.3}s");
+
+        let mut burst = vec![0.0; rate as usize / 5];
+        burst.extend((0..(rate as usize * 350 / 1000)).map(|_| {
+            state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+            (state as f32 / u32::MAX as f32 - 0.5) * 0.08
+        }));
+        burst.extend(vec![0.0; rate as usize / 5]);
+        let ssh = FinishedAudio {
+            interleaved: burst,
+            channels: 1,
+            sample_rate: rate,
+            elapsed_ms: 800,
+            noise_rms: 0.0,
+        };
+        assert!(speech_samples(&ssh).is_ok(), "a spoken ssh burst is speech");
     }
 
     fn headset() -> ListedMic {

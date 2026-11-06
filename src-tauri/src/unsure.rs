@@ -50,7 +50,7 @@ pub fn reason(s: &Signals) -> Option<&'static str> {
 }
 
 fn cleanup_ok(why: &str) -> bool {
-    why.starts_with("applied") || matches!(why, "off" | "verbatim" | "empty")
+    why.starts_with("applied") || matches!(why, "off" | "verbatim" | "empty" | "brief")
 }
 
 fn words(text: &str) -> Vec<String> {
@@ -105,7 +105,7 @@ mod tests {
 
     #[test]
     fn cleanup_off_or_verbatim_is_fine() {
-        for why in ["off", "verbatim", "empty", "applied"] {
+        for why in ["off", "verbatim", "empty", "applied", "brief"] {
             let s = Signals { cleanup_why: why.into(), ..fine() };
             assert_eq!(reason(&s), None, "{why}");
         }

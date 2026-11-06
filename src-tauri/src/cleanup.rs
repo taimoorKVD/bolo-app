@@ -103,6 +103,9 @@ pub async fn clean_transcript(
     model: &str,
     using_builtin: bool,
 ) -> CleanOutcome {
+    // Restore "easy ssh" before a model can treat the mis-hearing as a sentence to finish.
+    let transcript = crate::transcribe::recover_brief_tech(transcript);
+    let transcript = transcript.as_str();
     if verbatim {
         return skipped(transcript.trim().to_string(), "verbatim");
     }
@@ -115,6 +118,10 @@ pub async fn clean_transcript(
     }
     if transcript.trim().is_empty() {
         return skipped(fallback, "empty");
+    }
+    // A few words have nothing to restructure. The model was inventing a sentence around them.
+    if brief_phrase(transcript) {
+        return skipped(fallback, "brief");
     }
     let models = model_order(model);
     let mut missed = Vec::new();
@@ -399,7 +406,7 @@ fn allowed_swaps(candidate: &[String], original: &[String], vocab: &[String]) ->
         if protected.iter().any(|p| p == word) {
             continue;
         }
-        let Some(i) = left.iter().position(|w| crate::vocab::sounds_alike(w, word)) else {
+        let Some(i) = left.iter().position(|w| crate::vocab::sounds_alike(w, word) && consonant_swap_ok(w, word)) else {
             return false;
         };
         left.swap_remove(i);
@@ -409,6 +416,16 @@ fn allowed_swaps(candidate: &[String], original: &[String], vocab: &[String]) ->
         }
     }
     true
+}
+
+/// "ssh" sounds a bit like "such". That swap is how a product name became a sentence.
+fn consonant_swap_ok(original: &str, candidate: &str) -> bool {
+    !consonant_token(original) || consonant_token(candidate)
+}
+
+fn consonant_token(word: &str) -> bool {
+    let letters: String = word.chars().filter(|c| c.is_ascii_alphabetic()).collect();
+    letters.len() >= 2 && !letters.chars().any(|c| matches!(c, 'a' | 'e' | 'i' | 'o' | 'u' | 'y'))
 }
 
 fn multiset_subset(candidate: &[String], original: &[String]) -> bool {
@@ -564,7 +581,7 @@ fn tidy_spacing(input: &str) -> String {
 fn style_line(tone: Tone) -> &'static str {
     match tone {
         Tone::Casual => "Tone: chat. Keep contractions. Light punctuation.",
-        Tone::Formal => "Tone: email or document. Complete sentences and clear punctuation.",
+        Tone::Formal => "Tone: email or document. Clear punctuation. Leave a short phrase short.",
         Tone::Plain | Tone::Verbatim => "Tone: neutral dictation. Punctuate sentences.",
     }
 }
@@ -591,7 +608,7 @@ pub(crate) fn salvage_homophones(original: &str, candidate: &str, vocab: &[Strin
             out.push((*before).to_string());
             continue;
         }
-        if crate::vocab::sounds_alike(&left, &right) {
+        if crate::vocab::sounds_alike(&left, &right) && consonant_swap_ok(&left, &right) {
             out.push((*after).to_string());
             changed = true;
             continue;
@@ -654,6 +671,33 @@ fn is_preamble(line: &str) -> bool {
     .any(|head| lower.starts_with(head))
 }
 
+pub(crate) fn cleanup_system(tone: Tone, plain: bool) -> String {
+    let system = if plain {
+        "Correct this dictation. Return only the corrected words, with no introduction and no quotes. If it is a short phrase, return that phrase. Do not invent a sentence."
+            .to_string()
+    } else {
+        format!(
+            "Fix grammar, punctuation, capitalization, and sentence structure in a dictation transcript. Return only those words.\n{}\nKeep the speaker's words and meaning. You may change a word's form for agreement (go/goes/went, is/are/was, a/an, don't/doesn't) and you may capitalize. Do not add content words, names, or ideas. Do not drop words, except standalone um or uh, and except the words a spoken correction replaces (scratch that, no wait, I mean). Do not paraphrase, explain, or wrap the result in quotes. A short phrase stays a short phrase: never expand it into a new sentence. Keep technical names and acronyms (EasySSH, SSH, API, HTTP, JSON, URL) spelled that way.",
+            style_line(tone)
+        ) + &style_samples_line()
+    };
+    system + &vocab_line()
+}
+
+/// Five content words or fewer, unless the speaker corrected themselves.
+/// Those takes are punctuated locally. A model pass was rewriting them.
+pub(crate) fn brief_phrase(text: &str) -> bool {
+    if has_spoken_correction(text) {
+        return false;
+    }
+    content_tokens(text).len() <= 5
+}
+
+fn has_spoken_correction(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("scratch that") || lower.contains("no wait") || lower.contains("i mean")
+}
+
 async fn request_cleanup(
     client: &reqwest::Client,
     api_key: &str,
@@ -663,15 +707,7 @@ async fn request_cleanup(
     model: &str,
     using_builtin: bool,
 ) -> Result<String, CleanupFail> {
-    let system = if plain {
-        "Correct this dictation. Return only the corrected words, with no introduction and no quotes.".to_string()
-    } else {
-        format!(
-            "Fix grammar, punctuation, capitalization, and sentence structure in a dictation transcript. Return only those words.\n{}\nKeep the speaker's words and meaning. You may change a word's form for agreement (go/goes/went, is/are/was, a/an, don't/doesn't) and you may capitalize. Do not add content words, names, or ideas. Do not drop words, except standalone um or uh, and except the words a spoken correction replaces (scratch that, no wait, I mean). Do not paraphrase, explain, or wrap the result in quotes.",
-            style_line(tone)
-        ) + &style_samples_line()
-    };
-    let system = system + &vocab_line();
+    let system = cleanup_system(tone, plain);
     let user = transcript.trim();
     let chars = user.chars().count();
     let max_tokens = (chars as u32 / 2 + if plain { 96 } else { 64 }).clamp(64, 400);
@@ -1204,6 +1240,8 @@ mod tests {
         assert!(!accept_cleanup_with("i goes to the store", "I went shopping later", &vocab));
         // Still rejected: added words, and too many swaps.
         assert!(!accept_cleanup_with("ship it tomorrow", "Ship it tomorrow, boss.", &vocab));
+        assert!(!accept_cleanup_with("easy ssh", "easy, it's such are", &vocab));
+        assert!(!accept_cleanup_with("use easy ssh today now", "use easy such today now", &vocab));
         assert!(!accept_cleanup_with("I roots the email", "I wrote the mail later", &vocab));
         assert!(!accept_cleanup_with("their cat sat there", "There cats sit their", &vocab));
     }
@@ -1213,6 +1251,55 @@ mod tests {
         let line = vocab_line();
         assert!(line.contains("taimoorhussain.com"));
         assert!(line.contains("roots for wrote"));
+        let system = cleanup_system(Tone::Plain, false);
+        assert!(system.contains("never expand it into a new sentence"));
+        assert!(system.contains("EasySSH"));
+        assert!(!cleanup_system(Tone::Formal, false).contains("Complete sentences"));
+        let plain = cleanup_system(Tone::Plain, true);
+        assert!(plain.contains("Do not invent a sentence"));
+    }
+
+    #[test]
+    fn a_short_technical_phrase_never_calls_the_model() {
+        let outcome = tauri::async_runtime::block_on(clean_transcript(
+            crate::transcribe::http_client(),
+            "unused",
+            "easy, it's such are",
+            true,
+            Tone::Formal,
+            false,
+            CLEANUP_MODEL,
+            false,
+        ));
+        assert!(!outcome.used_model);
+        assert_eq!(outcome.why, "brief");
+        assert_eq!(outcome.text, "EasySSH");
+        let garbled = tauri::async_runtime::block_on(clean_transcript(
+            crate::transcribe::http_client(),
+            "unused",
+            "Bolo and Easy, it's such a truth. Nerd thing, imagination.",
+            true,
+            Tone::Plain,
+            false,
+            CLEANUP_MODEL,
+            false,
+        ));
+        assert_eq!(garbled.why, "brief");
+        assert_eq!(garbled.text, "EasySSH");
+        assert!(brief_phrase("ship it tomorrow"));
+        assert!(!brief_phrase("Email Sarah I mean Sam"));
+        let sentence = tauri::async_runtime::block_on(clean_transcript(
+            crate::transcribe::http_client(),
+            "unused",
+            "ship it tomorrow",
+            true,
+            Tone::Plain,
+            false,
+            CLEANUP_MODEL,
+            false,
+        ));
+        assert_eq!(sentence.why, "brief");
+        assert_eq!(sentence.text, "ship it tomorrow");
     }
 
     #[test]

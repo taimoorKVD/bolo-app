@@ -241,9 +241,15 @@ fn transcribe_one(index: usize, audio: FinishedAudio, env: &JobEnv) -> Product {
     product.format = encoded.format.to_string();
     spool::write_audio(&env.config_dir, &env.spool_id, index, &encoded.bytes);
     let remote_started = Instant::now();
-    match tauri::async_runtime::block_on(recognize(encoded.bytes, env, crate::managed::audio_minutes(audio.interleaved.len(), audio.channels, audio.sample_rate), encoded.format)) {
+    match tauri::async_runtime::block_on(recognize(
+        encoded.bytes,
+        env,
+        crate::managed::audio_minutes(audio.interleaved.len(), audio.channels, audio.sample_rate),
+        encoded.format,
+        encoded.speech_secs,
+    )) {
         Ok(recognized) => {
-            product.text = recognized.text;
+            product.text = transcribe::guard_short_take(&recognized.text, encoded.speech_secs);
             product.tries = recognized.tries;
             product.engine = recognized.engine;
             product.language = recognized.language;
@@ -272,9 +278,15 @@ pub(crate) struct Recognized {
     pub(crate) path: String,
 }
 
-async fn recognize(bytes: Vec<u8>, env: &JobEnv, minutes: f64, _format: &str) -> Result<Recognized, String> {
+async fn recognize(bytes: Vec<u8>, env: &JobEnv, minutes: f64, _format: &str, speech_secs: f32) -> Result<Recognized, String> {
     let offline_model = env.settings.offline_model.clone();
-    let prompt = transcribe::whisper_prompt_with(&prompt_words(&env.settings.dictionary, &env.settings.language), &env.recent);
+    // A one-second clip was continuing the prompt ("Bolo and Easy, it's such a
+    // truth…"). Names and the previous take stay on for a real sentence.
+    let prompt = if transcribe::brief_audio(speech_secs) {
+        Some(transcribe::whisper_prompt_brief())
+    } else {
+        transcribe::whisper_prompt_with(&prompt_words(&env.settings.dictionary, &env.settings.language), &env.recent)
+    };
     let model = env.settings.model.clone();
     let language = env.settings.language.clone();
     let output = env.settings.output.clone();
@@ -494,6 +506,7 @@ pub(crate) async fn speech_via(
         got.text = transcribe::collapse_repeats(&got.text);
         got.path = format!("{}-collapsed", got.path);
     }
+    got.text = transcribe::recover_brief_tech(&got.text);
     Ok(got)
 }
 
