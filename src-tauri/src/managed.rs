@@ -362,7 +362,7 @@ pub async fn whisper(bytes: &[u8], minutes: f64, task: &str, language: &str, pro
     let audio_b64 = account::base64_encode(bytes);
     let language = crate::transcribe::normalize_language(language);
     let first = run(Op::Whisper { audio_b64: &audio_b64, minutes, task, language: language.as_deref(), prompt }).await?;
-    let unsure = crate::transcribe::should_retry(&first.text, first.avg_logprob, first.no_speech_prob)
+    let unsure = crate::transcribe::should_retry(&first.text, first.avg_logprob, first.no_speech_prob, None)
         || crate::transcribe::stock_phrase(&first.text);
     if unsure && prompt.is_some() {
         if let Some(second) = run(Op::Whisper { audio_b64: &audio_b64, minutes, task, language: language.as_deref(), prompt: None }).await {

@@ -353,9 +353,10 @@ fn hallucinations_on_silence_are_caught_but_real_speech_is_not() {
     assert!(stock_phrase("Thanks for watching!"));
     assert!(stock_phrase("Bye."));
     assert!(!stock_phrase("Thanks for the update"));
-    assert!(should_retry("ok", Some(-1.5), None));
-    assert!(should_retry("you", None, Some(0.9)));
-    assert!(!should_retry("send the report today", Some(-0.2), Some(0.9)));
+    assert!(should_retry("ok", Some(-1.5), None, None));
+    assert!(should_retry("you", None, Some(0.9), None));
+    assert!(!should_retry("send the report today", Some(-0.2), Some(0.9), Some(1.2)));
+    assert!(should_retry("send the report today", Some(-0.2), Some(0.1), Some(2.9)));
 }
 
 // ---------- Cleanup ----------

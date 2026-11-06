@@ -358,9 +358,57 @@ pub fn accept_cleanup_with(original: &str, candidate: &str, vocab: &[String]) ->
     if !multiset_subset(&cand_words, &orig_words) && !allowed_swaps(&cand_words, &orig_words, vocab) {
         return false;
     }
-    let dropped = orig_words.len().saturating_sub(cand_words.len());
-    let allowance = (orig_words.len() / 3).max(4);
-    dropped <= allowance
+    let length_drop = orig_words.len().saturating_sub(cand_words.len());
+    let folded = unmatched_words(&orig_words, &cand_words)
+        .iter()
+        .filter(|word| folded_into_spelling(word, &cand_words, vocab))
+        .count();
+    // A same-length sound-alike swap is not a drop. "dot com" folding into a
+    // protected spelling is not one either. Other missing words are.
+    let unexplained = length_drop.saturating_sub(folded);
+    unexplained <= drop_allowance(original, orig_words.len())
+}
+
+/// "dot" / "com" disappearing into taimoorhussain.com is a spelling, not a deleted word.
+fn folded_into_spelling(word: &str, candidate: &[String], vocab: &[String]) -> bool {
+    let word_l = word.to_ascii_lowercase();
+    let glue = matches!(word_l.as_str(), "dot" | "at" | "underscore" | "dash" | "hyphen");
+    for entry in vocab {
+        let entry_l = entry.to_ascii_lowercase();
+        let parts: Vec<&str> = entry_l.split(|c: char| !c.is_ascii_alphanumeric()).filter(|part| !part.is_empty()).collect();
+        let present = candidate.iter().any(|token| token.trim_end_matches('.').eq_ignore_ascii_case(entry));
+        if !present {
+            continue;
+        }
+        if glue || parts.iter().any(|part| *part == word_l) {
+            return true;
+        }
+    }
+    false
+}
+
+fn unmatched_words<'a>(original: &'a [String], candidate: &[String]) -> Vec<&'a str> {
+    let mut left: Vec<&str> = original.iter().map(String::as_str).collect();
+    for word in candidate {
+        if let Some(index) = left.iter().position(|have| *have == word.as_str() || crate::grammar::same_lexeme(have, word)) {
+            left.swap_remove(index);
+        }
+    }
+    left
+}
+
+/// How many content words a cleanup rewrite may omit.
+///
+/// Fillers are already gone from the token lists. The old rule allowed four
+/// drops on every take (`len / 3`, at least 4), so a six-word sentence could
+/// lose most of its meaning and still be pasted. A spoken correction
+/// ("scratch that") is the case that is supposed to drop words.
+pub(crate) fn drop_allowance(original: &str, count: usize) -> usize {
+    if has_spoken_correction(original) {
+        (count / 2).max(3)
+    } else {
+        (count / 10).min(2)
+    }
 }
 
 fn content_tokens(input: &str) -> Vec<String> {
@@ -677,7 +725,7 @@ pub(crate) fn cleanup_system(tone: Tone, plain: bool) -> String {
             .to_string()
     } else {
         format!(
-            "Fix grammar, punctuation, capitalization, and sentence structure in a dictation transcript. Return only those words.\n{}\nKeep the speaker's words and meaning. You may change a word's form for agreement (go/goes/went, is/are/was, a/an, don't/doesn't) and you may capitalize. Do not add content words, names, or ideas. Do not drop words, except standalone um or uh, and except the words a spoken correction replaces (scratch that, no wait, I mean). Do not paraphrase, explain, or wrap the result in quotes. A short phrase stays a short phrase: never expand it into a new sentence. Keep technical names and acronyms (EasySSH, SSH, API, HTTP, JSON, URL) spelled that way.",
+            "Fix grammar, punctuation, capitalization, and sentence structure in a dictation transcript. Return only those words.\n{}\nKeep the speaker's words and meaning. You may change a word's form for agreement (go/goes/went, is/are/was, a/an, don't/doesn't) and you may capitalize. Do not add content words, names, or ideas. Do not drop words, except standalone um or uh, and except the words a spoken correction replaces (scratch that, no wait, I mean). If you are unsure what a word was, leave that word as it appears. Do not swap in a more common word. Do not paraphrase, explain, or wrap the result in quotes. A short phrase stays a short phrase: never expand it into a new sentence. Keep technical names and acronyms (EasySSH, SSH, API, HTTP, JSON, URL) spelled that way.",
             style_line(tone)
         ) + &style_samples_line()
     };
@@ -1253,6 +1301,7 @@ mod tests {
         assert!(line.contains("roots for wrote"));
         let system = cleanup_system(Tone::Plain, false);
         assert!(system.contains("never expand it into a new sentence"));
+        assert!(system.contains("leave that word as it appears"));
         assert!(system.contains("EasySSH"));
         assert!(!cleanup_system(Tone::Formal, false).contains("Complete sentences"));
         let plain = cleanup_system(Tone::Plain, true);
@@ -1359,6 +1408,15 @@ mod tests {
             "Let's meet Tuesday scratch that Wednesday",
             "Let's meet Wednesday"
         ));
+        assert!(
+            !accept_cleanup(
+                "please send the invoice to Ahmed by Friday morning",
+                "Send the invoice Friday."
+            ),
+            "dropping most of a sentence is a paraphrase"
+        );
+        assert_eq!(drop_allowance("please send the invoice to Ahmed by Friday morning", 9), 0);
+        assert!(drop_allowance("Let's meet Tuesday scratch that Wednesday", 6) >= 3);
     }
 
     #[test]
