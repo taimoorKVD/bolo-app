@@ -10,8 +10,7 @@ const BRANDS: &[&str] = &[
 
 /// Software words that are easy for Whisper to misspell.
 const TECH: &[&str] = &[
-    "API", "SSH", "EasySSH", "HTTP", "JSON", "URL", "SQL", "PDF", "HTML", "CSS", "JavaScript", "TypeScript", "Python", "React", "invoice",
-    "deadline", "roadmap",
+    "API", "SSH", "EasySSH", "HTTP", "JSON", "URL", "SQL", "PDF", "HTML", "CSS", "JavaScript", "TypeScript", "Python", "React",
 ];
 
 /// Names and places that come up in Pakistani English and Urdu dictation.

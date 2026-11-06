@@ -735,7 +735,9 @@ pub fn speech_samples(finished: &FinishedAudio) -> Result<Vec<f32>, SpeechError>
     if finished.channels == 0 || finished.sample_rate == 0 || finished.interleaved.is_empty() {
         return Err(SpeechError::Empty);
     }
-    let mono = downmix(&finished.interleaved, finished.channels);
+    // DC and rumble, once boosted, look like a vowel to Whisper and come back
+    // as the wrong word. A 90 Hz high-pass leaves speech and fricatives.
+    let mono = highpass(&downmix(&finished.interleaved, finished.channels), finished.sample_rate);
     let mut trimmed = trim_silence_with(&mono, finished.sample_rate, speech_threshold(finished.noise_rms));
     if trimmed.is_empty() {
         // A mic whose Windows level is very low still carries speech, just
@@ -756,24 +758,66 @@ pub fn speech_samples(finished: &FinishedAudio) -> Result<Vec<f32>, SpeechError>
     Ok(resample(&gained, finished.sample_rate, TARGET_RATE))
 }
 
-/// Boost quiet speech toward a comfortable peak. Already-loud audio is left
-/// alone, and a near-silent buffer is not amplified into noise.
+/// Lift the body of the speech, not whatever single sample is loudest.
+///
+/// Peak gain left a mumbled phrase quiet whenever a plosive or a click set
+/// the peak, and it also amplified room hiss by up to 60x when the whole
+/// take was quiet. The 90th-percentile amplitude is the speech. A lone click
+/// may clip; the words get louder.
 pub fn normalize_gain(samples: &[f32]) -> Vec<f32> {
-    const TARGET_PEAK: f32 = 0.72;
-    // Quiet mics (low Windows level) need far more than 6x to be heard.
-    const MAX_GAIN: f32 = 60.0;
+    const BODY_TARGET: f32 = 0.42;
+    const PEAK_LIMIT: f32 = 0.92;
+    const MAX_GAIN: f32 = 24.0;
     let peak = samples.iter().fold(0.0f32, |peak, sample| peak.max(sample.abs()));
     if peak < 0.0003 {
         return samples.to_vec();
     }
-    let gain = (TARGET_PEAK / peak).clamp(1.0, MAX_GAIN);
+    let body = percentile_abs(samples, 0.90);
+    if body < 0.0003 {
+        return samples.to_vec();
+    }
+    let mut gain = (BODY_TARGET / body).clamp(1.0, MAX_GAIN);
+    // The speech itself is the peak. Don't push that into clipping.
+    if peak * gain > PEAK_LIMIT && body > peak * 0.45 {
+        gain = (PEAK_LIMIT / peak).clamp(1.0, gain);
+    }
     if gain <= 1.001 {
         return samples.to_vec();
     }
     samples
         .iter()
-        .map(|sample| (sample * gain).clamp(-1.0, 1.0))
+        .map(|sample| (sample * gain).clamp(-PEAK_LIMIT, PEAK_LIMIT))
         .collect()
+}
+
+fn percentile_abs(samples: &[f32], quantile: f32) -> f32 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    let mut levels: Vec<f32> = samples.iter().map(|sample| sample.abs()).collect();
+    levels.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let index = ((levels.len() - 1) as f32 * quantile.clamp(0.0, 1.0)).round() as usize;
+    levels[index.min(levels.len() - 1)]
+}
+
+/// One-pole high-pass. Removes DC and low rumble before gain and the speech floor.
+fn highpass(samples: &[f32], sample_rate: u32) -> Vec<f32> {
+    if samples.is_empty() || sample_rate == 0 {
+        return samples.to_vec();
+    }
+    let rc = 1.0 / (2.0 * std::f32::consts::PI * 90.0);
+    let dt = 1.0 / sample_rate as f32;
+    let alpha = rc / (rc + dt);
+    let mut out = Vec::with_capacity(samples.len());
+    let mut prev_x = 0.0f32;
+    let mut prev_y = 0.0f32;
+    for &sample in samples {
+        let y = alpha * (prev_y + sample - prev_x);
+        out.push(y);
+        prev_x = sample;
+        prev_y = y;
+    }
+    out
 }
 
 pub fn downmix(interleaved: &[f32], channels: u16) -> Vec<f32> {
@@ -1533,6 +1577,30 @@ mod tests {
         let loud_peak = unchanged.iter().fold(0.0f32, |peak, sample| peak.max(sample.abs()));
         assert!((loud_peak - 0.9).abs() < 0.05, "loud peak {loud_peak}");
         assert!(normalize_gain(&vec![0.0001; 400]).iter().all(|sample| sample.abs() < 0.001));
+        let mut mumbled = tone(16_000, 180, 0.02);
+        for sample in mumbled.iter_mut().take(6) {
+            *sample = 0.95;
+        }
+        let lifted = normalize_gain(&mumbled);
+        let body = lifted[32..].iter().fold(0.0f32, |peak, sample| peak.max(sample.abs()));
+        assert!(body > 0.15, "a click must not leave the mumbled phrase quiet, body {body}");
+        assert!(lifted.iter().all(|sample| sample.abs() <= 0.93));
+    }
+
+    #[test]
+    fn dc_offset_is_not_sent_to_whisper() {
+        let rate = 16_000u32;
+        let dc = FinishedAudio {
+            interleaved: vec![0.2; rate as usize],
+            channels: 1,
+            sample_rate: rate,
+            elapsed_ms: 1000,
+            noise_rms: 0.0,
+        };
+        assert!(
+            matches!(speech_samples(&dc), Err(SpeechError::Silent)),
+            "a DC offset used to look like a vowel and come back as the wrong words"
+        );
     }
 
     #[test]

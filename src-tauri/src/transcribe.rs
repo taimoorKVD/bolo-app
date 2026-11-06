@@ -184,14 +184,16 @@ pub fn whisper_prompt(words: &[String]) -> Option<String> {
 /// get an Urdu-script prompt instead.
 pub(crate) const URDU_PROMPT: &str = "یہ اردو میں بولی گئی بات ہے۔ بہتری، بہتر، ایپلیکیشن، اینیمیشن، بیک گراؤنڈ، ویب سائٹ، ڈیزائن۔";
 
-/// Technical spellings Whisper otherwise turns into ordinary English.
-/// Kept in the long prompt, and used alone on a short clip.
-const PROMPT_TECH: &[&str] = &["EasySSH", "SSH", "API", "HTTP", "JSON", "URL"];
-
 /// Under this trimmed length, a vocabulary prompt and the previous take are
 /// more influential than the audio. Whisper then starts the paste with a
 /// prompt word ("Bolo and Easy…") or continues the last sentence.
 pub const BRIEF_AUDIO_SECS: f32 = 2.5;
+
+/// Character budget for a normal take's glossary. Whisper reads the prompt as
+/// the words spoken just before this clip (about 224 tokens). An 800-character
+/// instruction plus the previous paste filled that window, so everyday speech
+/// was continued from the prompt instead of heard from the mic.
+pub const PROMPT_TERM_BUDGET: usize = 280;
 
 pub fn brief_audio(speech_secs: f32) -> bool {
     speech_secs > 0.0 && speech_secs < BRIEF_AUDIO_SECS
@@ -204,62 +206,71 @@ pub fn whisper_prompt_brief() -> String {
     "EasySSH, SSH, API, HTTP, HTTPS, JSON, URL, SQL.".to_string()
 }
 
-/// Dictionary terms plus the last couple of local transcripts, capped at 800 characters.
+/// Rare spellings for a normal-length take.
+///
+/// The prompt is previous-token context, not an instruction. A sentence such as
+/// "Spell these terms exactly…" and the last paste are continued as if the
+/// person were still saying them, which is how ordinary speech picked up
+/// EasySSH, SSH, and the previous sentence. This list is names and odd
+/// spellings only. `recent` contributes proper nouns from the last takes
+/// (Priya), never the sentences themselves. Technical acronyms stay on
+/// `whisper_prompt_brief`, which is the whole prompt for a short clip.
 pub fn whisper_prompt_with(words: &[String], recent: &[String]) -> Option<String> {
-    let incoming_empty = words.iter().all(|word| word.trim().is_empty());
-    let recent_empty = recent.iter().all(|text| text.trim().is_empty());
-    if incoming_empty && recent_empty {
-        return None;
-    }
-    let mut words_owned: Vec<String> = PROMPT_TECH.iter().map(|term| (*term).to_string()).collect();
+    let mut merged = context_terms(recent);
     for word in words {
         let trimmed = word.trim();
-        if trimmed.is_empty() || words_owned.iter().any(|have| have.eq_ignore_ascii_case(trimmed)) {
+        if trimmed.is_empty() || merged.iter().any(|have| have.eq_ignore_ascii_case(trimmed)) {
             continue;
         }
-        words_owned.push(trimmed.to_string());
+        merged.push(trimmed.to_string());
     }
-    let words = words_owned;
-    let snippets: Vec<String> = recent
-        .iter()
-        .take(2)
-        .map(|text| snippet(text, 140))
-        .filter(|text| !text.is_empty())
-        .collect();
-    let prefix = "Dictation transcript. Spell these terms exactly when spoken: ";
-    let snippet_reserve = if snippets.is_empty() {
-        0
-    } else {
-        180.min(snippets.iter().map(|s| s.chars().count() + 1).sum())
-    };
-    let term_budget = 800usize.saturating_sub(prefix.chars().count() + 1 + snippet_reserve);
-    let terms = select_terms(&words, term_budget);
-    if terms.is_empty() && snippets.is_empty() {
+    if merged.is_empty() {
         return None;
     }
-    let mut prompt = String::new();
-    if !terms.is_empty() {
-        prompt.push_str(prefix);
-        prompt.push_str(&terms.join(", "));
-        prompt.push('.');
+    let terms = select_terms(&merged, PROMPT_TERM_BUDGET);
+    if terms.is_empty() {
+        return None;
     }
-    if !snippets.is_empty() {
-        // Prior text as a style example only — no meta label. Whisper often
-        // echoes labels like "Recent dictation:" into the pasted transcript.
-        if !prompt.is_empty() {
-            prompt.push(' ');
+    Some(format!("{}.", terms.join(", ")))
+}
+
+/// Capitalized names and addresses from recent pastes. The first word of a
+/// sentence is skipped: it is capitalized because it starts the sentence.
+fn context_terms(recent: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for text in recent.iter().take(2) {
+        let mut boundary = true;
+        for token in text.split_whitespace() {
+            let ends = token.ends_with(['.', '?', '!', '۔']);
+            let mut bare: String = token.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '.' || *c == '@').collect();
+            if ends {
+                bare = bare.trim_end_matches(['.', '?', '!']).to_string();
+            }
+            if !boundary && name_like(&bare) && !out.iter().any(|have: &String| have.eq_ignore_ascii_case(&bare)) {
+                out.push(bare);
+            }
+            boundary = ends;
+            if out.len() >= 6 {
+                return out;
+            }
         }
-        prompt.push_str(&snippets.join(" "));
     }
-    // Whisper prompts are capped at 224 tokens. Stay well under that in characters.
-    if prompt.chars().count() > 800 {
-        let truncated: String = prompt.chars().take(800).collect();
-        prompt = match truncated.rfind(['.', ',', '|']) {
-            Some(index) if index > 40 => truncated[..index].to_string(),
-            _ => truncated,
-        };
+    out
+}
+
+fn name_like(bare: &str) -> bool {
+    if bare.contains('.') || bare.contains('@') {
+        return bare.chars().any(|c| c.is_ascii_alphabetic());
     }
-    Some(prompt)
+    let chars: Vec<char> = bare.chars().collect();
+    if chars.len() < 3 || chars.len() > 32 {
+        return false;
+    }
+    let head = chars[0].is_uppercase();
+    let tail_lower = chars.iter().skip(1).any(|c| c.is_lowercase());
+    let inner_cap = chars.iter().skip(1).any(|c| c.is_uppercase());
+    let acronym = chars.len() <= 6 && chars.iter().all(|c| c.is_ascii_uppercase());
+    (head && tail_lower) || inner_cap || acronym
 }
 
 /// My words (already most-used first) stay ahead of seeds, and seeds keep a
@@ -311,16 +322,6 @@ fn select_terms(words: &[String], budget: usize) -> Vec<String> {
         chosen.push(term.clone());
     }
     chosen
-}
-
-fn snippet(text: &str, max_chars: usize) -> String {
-    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if flat.chars().count() <= max_chars {
-        flat
-    } else {
-        let cut: String = flat.chars().take(max_chars).collect();
-        format!("{cut}…")
-    }
 }
 
 /// Words that make "it's such a …" a real sentence rather than a mis-hearing of SSH.
@@ -636,7 +637,8 @@ pub struct Transcript {
     pub doubtful: bool,
 }
 
-/// Milder than `should_retry`: worth offering Fix last, not worth a second call.
+/// Worth offering Fix last. A low logprob is also retried; no_speech on its
+/// own only raises the card, unless the take is a couple of words.
 pub fn doubtful(text: &str, avg_logprob: Option<f32>, no_speech_prob: Option<f32>) -> bool {
     if text.trim().is_empty() {
         return false;
@@ -644,9 +646,10 @@ pub fn doubtful(text: &str, avg_logprob: Option<f32>, no_speech_prob: Option<f32
     avg_logprob.is_some_and(|value| value < -0.7) || no_speech_prob.is_some_and(|value| value > 0.5)
 }
 
-/// A second Whisper call is worth it when the first result is empty or the
-/// model itself is unsure. Temperature stays 0; the retry drops the prompt so
-/// the request is not identical.
+/// First decode is greedy (temperature 0). A mumbled or accented take often
+/// sticks to the wrong word there. The retry samples a little (Whisper's own
+/// fallback schedule starts at 0.2) and drops the prompt so it is not the same request.
+pub const RETRY_TEMPERATURE: f32 = 0.2;
 /// "Please try again in 3.2s" / "in 850ms" from a Groq 429 message.
 pub fn retry_after_ms(message: &str) -> Option<u64> {
     let at = message.find("try again in ")? + "try again in ".len();
@@ -691,15 +694,25 @@ pub fn stock_phrase(text: &str) -> bool {
     )
 }
 
-pub fn should_retry(text: &str, avg_logprob: Option<f32>, no_speech_prob: Option<f32>) -> bool {
+pub fn should_retry(
+    text: &str,
+    avg_logprob: Option<f32>,
+    no_speech_prob: Option<f32>,
+    compression_ratio: Option<f32>,
+) -> bool {
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return true;
     }
-    let words = trimmed.split_whitespace().count();
-    if avg_logprob.is_some_and(|value| value < -1.0) {
+    // OpenAI's decoder treats compression above 2.4 as a loop, and logprob
+    // below -0.7 as a decode it would not keep. Both used to be pasted.
+    if compression_ratio.is_some_and(|value| value > 2.4) {
         return true;
     }
+    if avg_logprob.is_some_and(|value| value < -0.7) {
+        return true;
+    }
+    let words = trimmed.split_whitespace().count();
     no_speech_prob.is_some_and(|value| value > 0.7) && words < 3
 }
 
@@ -713,13 +726,24 @@ pub async fn transcribe(
     using_builtin: bool,
 ) -> anyhow::Result<Transcript> {
     let model = normalize_model(model).context("unknown Whisper model")?;
-    let first = request_audio(client, api_key, audio.clone(), TRANSCRIPTIONS, model, language, prompt.as_deref(), using_builtin).await?;
+    let first = request_audio(
+        client,
+        api_key,
+        audio.clone(),
+        TRANSCRIPTIONS,
+        model,
+        language,
+        prompt.as_deref(),
+        0.0,
+        using_builtin,
+    )
+    .await?;
     let mut first = first;
     if stock_phrase(&first.text) && first.no_speech_prob.unwrap_or(0.0) > 0.25 {
         // "Thank you." / "Thanks for watching." on a take that is mostly noise.
         first.text.clear();
     }
-    if !should_retry(&first.text, first.avg_logprob, first.no_speech_prob) {
+    if !should_retry(&first.text, first.avg_logprob, first.no_speech_prob, first.compression_ratio) {
         let doubt = doubtful(&first.text, first.avg_logprob, first.no_speech_prob);
         return Ok(Transcript {
             text: first.text,
@@ -728,7 +752,11 @@ pub async fn transcribe(
             doubtful: doubt,
         });
     }
-    match request_audio(client, api_key, audio, TRANSCRIPTIONS, model, language, None, using_builtin).await {
+    crate::diag::note(format!(
+        "whisper retry temp={RETRY_TEMPERATURE} log={:?} compression={:?} no_speech={:?}",
+        first.avg_logprob, first.compression_ratio, first.no_speech_prob
+    ));
+    match request_audio(client, api_key, audio, TRANSCRIPTIONS, model, language, None, RETRY_TEMPERATURE, using_builtin).await {
         Ok(second) => {
             let chosen = prefer_attempt(first, second);
             let doubt = doubtful(&chosen.text, chosen.avg_logprob, chosen.no_speech_prob);
@@ -758,7 +786,7 @@ pub async fn translate_audio(
     prompt: Option<&str>,
     using_builtin: bool,
 ) -> anyhow::Result<Transcript> {
-    let first = request_audio(client, api_key, audio.clone(), TRANSLATIONS, WHISPER_LARGE, "", prompt, using_builtin).await?;
+    let first = request_audio(client, api_key, audio.clone(), TRANSLATIONS, WHISPER_LARGE, "", prompt, 0.0, using_builtin).await?;
     if !first.text.trim().is_empty() && !repetitive(&first.text) {
         let doubt = doubtful(&first.text, first.avg_logprob, first.no_speech_prob);
         return Ok(Transcript {
@@ -768,7 +796,7 @@ pub async fn translate_audio(
             doubtful: doubt,
         });
     }
-    let second = request_audio(client, api_key, audio, TRANSLATIONS, WHISPER_LARGE, "", None, using_builtin).await?;
+    let second = request_audio(client, api_key, audio, TRANSLATIONS, WHISPER_LARGE, "", None, RETRY_TEMPERATURE, using_builtin).await?;
     let language = if second.language.is_empty() {
         first.language
     } else {
@@ -789,19 +817,23 @@ const TRANSLATIONS: &str = "https://api.groq.com/openai/v1/audio/translations";
 fn prefer_attempt(first: Attempt, second: Attempt) -> Attempt {
     let primary = first.text.trim();
     let retry = second.text.trim();
-    let pick_second = if primary.is_empty() {
+    let pick_second = if retry.is_empty() {
+        false
+    } else if primary.is_empty() || (stock_phrase(primary) && !stock_phrase(retry)) {
         true
-    } else if retry.is_empty() {
+    } else if stock_phrase(retry) && !stock_phrase(primary) {
         false
     } else {
-        let first_bad = should_retry(primary, first.avg_logprob, first.no_speech_prob);
-        let second_bad = should_retry(retry, second.avg_logprob, second.no_speech_prob);
-        if first_bad && !second_bad {
-            true
-        } else if !first_bad && second_bad {
-            false
+        let first_bad = should_retry(primary, first.avg_logprob, first.no_speech_prob, first.compression_ratio);
+        let second_bad = should_retry(retry, second.avg_logprob, second.no_speech_prob, second.compression_ratio);
+        if first_bad != second_bad {
+            first_bad
+        } else if first_bad && second_bad && retry.chars().count() > primary.chars().count() * 3 / 2 + 8 {
+            // Both weak, and the retry kept talking. Length used to win here,
+            // which pasted the hallucination.
+            matches!((first.avg_logprob, second.avg_logprob), (Some(a), Some(b)) if b > a + 0.25)
         } else {
-            retry.chars().count() >= primary.chars().count()
+            matches!((first.avg_logprob, second.avg_logprob), (Some(a), Some(b)) if b > a + 0.05)
         }
     };
     let fallback_language = if first.language.is_empty() {
@@ -821,6 +853,7 @@ struct Attempt {
     text: String,
     avg_logprob: Option<f32>,
     no_speech_prob: Option<f32>,
+    compression_ratio: Option<f32>,
     language: String,
 }
 
@@ -832,11 +865,12 @@ async fn request_audio(
     model: &str,
     language: &str,
     prompt: Option<&str>,
+    temperature: f32,
     using_builtin: bool,
 ) -> anyhow::Result<Attempt> {
     let mut attempt = 0u32;
     loop {
-        match request_audio_once(client, api_key, audio.clone(), endpoint, model, language, prompt, using_builtin).await {
+        match request_audio_once(client, api_key, audio.clone(), endpoint, model, language, prompt, temperature, using_builtin).await {
             Ok(parsed) => return Ok(parsed),
             Err(failure) if failure.kind == FailKind::RateLimit && attempt < 3 => {
                 // Free Groq keys allow ~20 requests a minute. Groq says how long
@@ -874,6 +908,7 @@ async fn request_audio_once(
     model: &str,
     language: &str,
     prompt: Option<&str>,
+    temperature: f32,
     using_builtin: bool,
 ) -> Result<Attempt, GroqFailure> {
     let translating = endpoint.ends_with("/translations");
@@ -894,7 +929,7 @@ async fn request_audio_once(
         .part("file", part)
         .text("model", model.to_string())
         .text("response_format", "verbose_json")
-        .text("temperature", "0");
+        .text("temperature", temperature_field(temperature));
     if !translating {
         if let Some(code) = normalize_language(language) {
             form = form.text("language", code);
@@ -945,6 +980,14 @@ async fn request_audio_once(
     })
 }
 
+fn temperature_field(temperature: f32) -> String {
+    if temperature <= 0.0 {
+        "0".to_string()
+    } else {
+        format!("{temperature:.2}")
+    }
+}
+
 fn audio_part(bytes: Vec<u8>) -> anyhow::Result<reqwest::multipart::Part> {
     let flac = bytes.starts_with(b"fLaC");
     let (name, mime) = if flac {
@@ -961,11 +1004,11 @@ fn audio_part(bytes: Vec<u8>) -> anyhow::Result<reqwest::multipart::Part> {
 fn parse_attempt(body: &str) -> anyhow::Result<Attempt> {
     if let Ok(verbose) = serde_json::from_str::<VerboseBody>(body) {
         if let Some(text) = verbose.text {
-            let (avg_logprob, no_speech_prob) = verbose
+            let (avg_logprob, no_speech_prob, compression_ratio) = verbose
                 .segments
                 .as_deref()
                 .map(confidence)
-                .unwrap_or((None, None));
+                .unwrap_or((None, None, None));
             let text = verbose
                 .segments
                 .as_deref()
@@ -975,6 +1018,7 @@ fn parse_attempt(body: &str) -> anyhow::Result<Attempt> {
                 text: strip_prompt_leak(&text),
                 avg_logprob,
                 no_speech_prob,
+                compression_ratio,
                 language: verbose.language.map(|value| language_code(&value)).unwrap_or_default(),
             });
         }
@@ -985,11 +1029,12 @@ fn parse_attempt(body: &str) -> anyhow::Result<Attempt> {
         text: strip_prompt_leak(&parsed.text),
         avg_logprob: None,
         no_speech_prob: None,
+        compression_ratio: None,
         language: String::new(),
     })
 }
 
-fn confidence(segments: &[VerboseSegment]) -> (Option<f32>, Option<f32>) {
+fn confidence(segments: &[VerboseSegment]) -> (Option<f32>, Option<f32>, Option<f32>) {
     let logs: Vec<f32> = segments.iter().filter_map(|segment| segment.avg_logprob).collect();
     let noises: Vec<f32> = segments.iter().filter_map(|segment| segment.no_speech_prob).collect();
     let avg = if logs.is_empty() {
@@ -998,7 +1043,8 @@ fn confidence(segments: &[VerboseSegment]) -> (Option<f32>, Option<f32>) {
         Some(logs.iter().sum::<f32>() / logs.len() as f32)
     };
     let noise = noises.into_iter().reduce(f32::max);
-    (avg, noise)
+    let compression = segments.iter().filter_map(|segment| segment.compression_ratio).reduce(f32::max);
+    (avg, noise, compression)
 }
 
 pub fn normalize_language(language: &str) -> Option<String> {
@@ -1063,6 +1109,11 @@ pub fn speech_route(output: &str, setting: &str, detected: &str, text: &str) -> 
         return SpeechRoute::Transcribe;
     }
     let detected = language_code(detected);
+    // English words that were only tagged Urdu. Translating them rewrites the
+    // sentence. A real Urdu take has Urdu script; French and the rest still translate.
+    if setting_code != "ur" && detected == "ur" && has_latin(text) && !has_arabic(text) {
+        return SpeechRoute::Transcribe;
+    }
     let urdu = setting_code == "ur" || detected == "ur" || mixed_urdu(text);
     if !urdu {
         if detected.is_empty() || detected == "en" {
@@ -1119,6 +1170,17 @@ fn mixed_urdu(text: &str) -> bool {
 
 pub(crate) fn has_latin(text: &str) -> bool {
     text.chars().any(|c| c.is_ascii_alphabetic())
+}
+
+/// Latin letters and no other script, or Latin clearly outweighs it.
+/// Accented English is often tagged Hindi or Urdu while the letters stay Latin.
+pub(crate) fn latin_only(text: &str) -> bool {
+    let latin = text.chars().filter(|c| c.is_ascii_alphabetic()).count();
+    if latin == 0 {
+        return false;
+    }
+    let other = text.chars().filter(|c| c.is_alphabetic() && !c.is_ascii()).count();
+    other == 0 || latin > other.saturating_mul(3)
 }
 
 pub(crate) fn has_arabic(text: &str) -> bool {
@@ -1268,7 +1330,7 @@ mod tests {
         assert_eq!(whisper_prompt(&[]), None);
         assert_eq!(
             whisper_prompt(&["  Bolo  ".into(), "".into(), "Tauri".into()]).as_deref(),
-            Some("Dictation transcript. Spell these terms exactly when spoken: EasySSH, SSH, API, HTTP, JSON, URL, Bolo, Tauri.")
+            Some("Bolo, Tauri.")
         );
         let brief = whisper_prompt_brief();
         assert!(brief.contains("EasySSH") && brief.contains("SSH") && brief.ends_with('.'));
@@ -1280,8 +1342,9 @@ mod tests {
         assert!(!brief_audio(4.0));
         let huge = vec!["Supercalifragilistic".to_string(); 80];
         let prompt = whisper_prompt(&huge).unwrap();
-        assert!(prompt.chars().count() <= 800);
-        assert!(prompt.starts_with("Dictation transcript."));
+        assert!(prompt.chars().count() <= PROMPT_TERM_BUDGET + 8, "{}", prompt.chars().count());
+        assert!(!prompt.contains("Dictation transcript"));
+        assert!(!prompt.contains("Spell these"));
         assert!(prompt.contains("Supercalifragilistic"));
         let with_recent = whisper_prompt_with(
             &["Bolo".into()],
@@ -1289,11 +1352,18 @@ mod tests {
         )
         .unwrap();
         assert!(with_recent.contains("Bolo"));
-        assert!(with_recent.contains("EasySSH"));
-        assert!(!with_recent.contains("Recent dictation"));
         assert!(with_recent.contains("Priya"));
-        assert!(with_recent.chars().count() <= 800);
+        assert!(!with_recent.to_lowercase().contains("tomorrow"));
+        assert!(!with_recent.to_lowercase().contains("ship the notes"));
+        assert!(!with_recent.contains("EasySSH"), "a normal take does not lead with the tech glossary\n{with_recent}");
+        assert!(!with_recent.contains("Recent dictation"));
+        assert!(!with_recent.contains("Spell these"));
+        assert!(with_recent.chars().count() <= PROMPT_TERM_BUDGET + 8);
         assert_eq!(whisper_prompt_with(&[], &["  ".into()]), None);
+        assert_eq!(
+            whisper_prompt_with(&[], &["Ship the notes to Priya tomorrow.".into()]).as_deref(),
+            Some("Priya.")
+        );
         assert_eq!(
             strip_prompt_leak("Recent dictation:\"Hey, can you listen to me?\""),
             "Hey, can you listen to me?"
@@ -1357,18 +1427,21 @@ mod tests {
 
     #[test]
     fn retries_empty_or_low_confidence_results() {
-        assert!(should_retry("", None, None));
-        assert!(should_retry("   ", Some(-0.2), Some(0.1)));
-        assert!(should_retry("hello there", Some(-1.4), Some(0.2)));
-        assert!(should_retry("hi", Some(-0.2), Some(0.9)));
-        assert!(!should_retry("ship it tomorrow", Some(-0.3), Some(0.05)));
-        assert!(!should_retry("a longer confident sentence here", None, Some(0.8)));
-        let body = r#"{"text":" Ship it. ","language":"english","segments":[{"avg_logprob":-0.2,"no_speech_prob":0.01},{"avg_logprob":-0.4,"no_speech_prob":0.2}]}"#;
+        assert!(should_retry("", None, None, None));
+        assert!(should_retry("   ", Some(-0.2), Some(0.1), None));
+        assert!(should_retry("hello there", Some(-1.4), Some(0.2), None));
+        assert!(should_retry("hello there", Some(-0.85), Some(0.1), None), "the old -1.0 gate pasted this");
+        assert!(should_retry("ship it tomorrow", Some(-0.3), Some(0.05), Some(2.8)));
+        assert!(should_retry("hi", Some(-0.2), Some(0.9), None));
+        assert!(!should_retry("ship it tomorrow", Some(-0.3), Some(0.05), Some(1.4)));
+        assert!(!should_retry("a longer confident sentence here", None, Some(0.8), None));
+        let body = r#"{"text":" Ship it. ","language":"english","segments":[{"avg_logprob":-0.2,"no_speech_prob":0.01,"compression_ratio":1.1},{"avg_logprob":-0.4,"no_speech_prob":0.2,"compression_ratio":1.8}]}"#;
         let attempt = parse_attempt(body).unwrap();
         assert_eq!(attempt.text, "Ship it.");
         assert_eq!(attempt.language, "en");
         assert!(attempt.avg_logprob.unwrap() < -0.2);
         assert!((attempt.no_speech_prob.unwrap() - 0.2).abs() < 0.001);
+        assert!((attempt.compression_ratio.unwrap() - 1.8).abs() < 0.001);
         let plain = parse_attempt(r#"{"text":"hello"}"#).unwrap();
         assert_eq!(plain.text, "hello");
         assert_eq!(retry_plan(FailKind::RateLimit, 0), RetryPlan::Backoff { ms: 700 });
@@ -1391,6 +1464,42 @@ mod tests {
         let wrapped = anyhow::Error::from(failure);
         assert_eq!(failure_kind(&wrapped), Some(FailKind::RateLimit));
         assert!(plain.avg_logprob.is_none());
+        assert_eq!(temperature_field(0.0), "0");
+        assert_eq!(temperature_field(RETRY_TEMPERATURE), "0.20");
+    }
+
+    #[test]
+    fn a_longer_weak_retry_loses_to_the_clearer_take() {
+        let clear = Attempt {
+            text: "send the invoice friday".into(),
+            avg_logprob: Some(-0.35),
+            no_speech_prob: Some(0.05),
+            compression_ratio: Some(1.2),
+            language: "en".into(),
+        };
+        let longer = Attempt {
+            text: "send the invoice friday and then we talked about the whole roadmap for next quarter in detail please".into(),
+            avg_logprob: Some(-0.92),
+            no_speech_prob: Some(0.4),
+            compression_ratio: Some(2.7),
+            language: "en".into(),
+        };
+        assert_eq!(prefer_attempt(clear, longer).text, "send the invoice friday");
+        let mumbled = Attempt {
+            text: "ship it to maro".into(),
+            avg_logprob: Some(-0.95),
+            no_speech_prob: Some(0.2),
+            compression_ratio: Some(1.3),
+            language: "en".into(),
+        };
+        let recovered = Attempt {
+            text: "ship it tomorrow".into(),
+            avg_logprob: Some(-0.28),
+            no_speech_prob: Some(0.04),
+            compression_ratio: Some(1.2),
+            language: "en".into(),
+        };
+        assert_eq!(prefer_attempt(mumbled, recovered).text, "ship it tomorrow");
     }
 
     #[test]
@@ -1418,6 +1527,10 @@ mod tests {
         assert_eq!(
             speech_route("english", "auto", "urdu", "meeting کل ہے"),
             SpeechRoute::Mixed
+        );
+        assert_eq!(
+            speech_route("english", "auto", "urdu", "please send the invoice by Friday"),
+            SpeechRoute::Transcribe
         );
         assert_eq!(
             speech_route("english", "ur", "", "kal meeting hai at 5"),

@@ -281,7 +281,8 @@ pub(crate) struct Recognized {
 async fn recognize(bytes: Vec<u8>, env: &JobEnv, minutes: f64, _format: &str, speech_secs: f32) -> Result<Recognized, String> {
     let offline_model = env.settings.offline_model.clone();
     // A one-second clip was continuing the prompt ("Bolo and Easy, it's such a
-    // truth…"). Names and the previous take stay on for a real sentence.
+    // truth…"). A normal sentence gets rare spellings only — not an instruction
+    // and not the previous paste, which Whisper continues as if it were speech.
     let prompt = if transcribe::brief_audio(speech_secs) {
         Some(transcribe::whisper_prompt_brief())
     } else {
@@ -545,12 +546,16 @@ async fn speech_raw(
         // speak English and Urdu, so pin English and transcribe again.
         // Urdu is often detected as Hindi and written in Devanagari, which an
         // Urdu speaker can't use. Pin Urdu for that case, English otherwise.
-        let pin = if hindi_like(&spoken.language, &spoken.text) { "ur" } else { "en" };
+        let pin = if hindi_like(&spoken.language, &spoken.text) && !transcribe::latin_only(&spoken.text) {
+            "ur"
+        } else {
+            "en"
+        };
         let pin_prompt = if pin == "ur" { Some(transcribe::URDU_PROMPT.to_string()) } else { prompt.map(str::to_string) };
         crate::diag::note(format!("repin lang={pin} prompt={:?}", pin_prompt));
         if let Ok(pinned) = via.transcribe(audio.clone(), model, pin, pin_prompt).await {
             crate::diag::note(format!("repin text={}", pinned.text));
-            if !pinned.text.trim().is_empty() {
+            if keep_repass(&spoken, &pinned) {
                 let tries = spoken.tries.saturating_add(pinned.tries);
                 spoken = pinned;
                 spoken.tries = tries;
@@ -559,13 +564,13 @@ async fn speech_raw(
             }
         }
     }
-    if urdu_needs_clean_pass(language, &spoken.language, &spoken.text) {
+    if urdu_needs_clean_pass(language, &spoken.language, &spoken.text) && !flags.repass {
         // Auto-detect heard Urdu but the English prompt leaked English
         // look-alike words in. Transcribe again as Urdu with an Urdu prompt.
         crate::diag::note("urdu clean pass (auto heard Urdu; redo with the Urdu prompt)");
         if let Ok(pinned) = via.transcribe(audio.clone(), model, "ur", Some(transcribe::URDU_PROMPT.to_string())).await {
             crate::diag::note(format!("urdu clean pass text={}", pinned.text));
-            if !pinned.text.trim().is_empty() {
+            if !pinned.text.trim().is_empty() && keep_repass(&spoken, &pinned) {
                 // The Urdu prompt has no Latin letters, so a mixed sentence can
                 // come back with the English words rewritten in Urdu script.
                 // Keep the pass that still has those English words.
@@ -669,11 +674,26 @@ fn latin_words(text: &str) -> Vec<String> {
         .collect()
 }
 
-pub(crate) fn urdu_needs_clean_pass(setting: &str, detected: &str, _text: &str) -> bool {
+pub(crate) fn urdu_needs_clean_pass(setting: &str, detected: &str, text: &str) -> bool {
     // diag.log showed the English-prompt pass spelling بہتری as بیٹری
-    // ("battery") even in pure Urdu script, so any Urdu heard on auto gets
-    // the Urdu-prompt pass, not only takes with Latin words.
-    transcribe::normalize_language(setting).is_none() && transcribe::language_code(detected) == "ur"
+    // ("battery") even in pure Urdu script, so Urdu script on auto gets
+    // the Urdu-prompt pass. Latin-only English that Whisper tagged as Urdu
+    // does not: that pass rewrites the sentence into Urdu and the English
+    // output path then translates the rewrite.
+    transcribe::normalize_language(setting).is_none()
+        && transcribe::language_code(detected) == "ur"
+        && (transcribe::has_arabic(text) || !transcribe::has_latin(text))
+}
+
+/// A doubtful second pass must not replace a decode Whisper was sure about.
+pub(crate) fn keep_repass(first: &transcribe::Transcript, second: &transcribe::Transcript) -> bool {
+    if second.text.trim().is_empty() {
+        return false;
+    }
+    if first.text.trim().is_empty() {
+        return true;
+    }
+    !(second.doubtful && !first.doubtful)
 }
 
 /// Auto language and Whisper picked something other than English or Urdu.
@@ -735,7 +755,17 @@ mod tests {
         assert!(urdu_needs_clean_pass("auto", "urdu", "کیا کوئی بہتری باقی ہے"));
         assert!(!urdu_needs_clean_pass("auto", "english", "is there any betterment left"));
         assert!(!urdu_needs_clean_pass("ur", "urdu", "کیا کوئی battery باقی ہے"));
+        assert!(
+            !urdu_needs_clean_pass("auto", "urdu", "please send the invoice by Friday"),
+            "latin English tagged Urdu stays English"
+        );
         assert!(!transcribe::URDU_PROMPT.chars().any(|c| c.is_ascii_alphabetic()));
+        let sure = transcribe::Transcript { text: "send the invoice".into(), tries: 1, language: "en".into(), doubtful: false };
+        let worse = transcribe::Transcript { text: "send the invoice tomorrow somehow".into(), tries: 1, language: "en".into(), doubtful: true };
+        let better = transcribe::Transcript { text: "send the invoice today".into(), tries: 1, language: "en".into(), doubtful: false };
+        assert!(!keep_repass(&sure, &worse));
+        assert!(keep_repass(&sure, &better));
+        assert!(keep_repass(&worse, &better));
     }
     #[test]
     fn urdu_capable_takes_use_the_full_model() {
@@ -935,6 +965,41 @@ mod via_tests {
         assert!(calls.iter().any(|c| c.0 == "translate_text" && c.2.as_deref() == Some("آج meeting ہے")));
         assert_eq!(got.text, "There is a meeting today.");
         assert!(got.path.starts_with("mixed-llama"));
+    }
+
+    #[test]
+    fn english_mistagged_as_urdu_is_not_translated() {
+        let fake = FakeVia::new(&[("please send the invoice by Friday", "ur")], None);
+        let got = run(&fake, "auto", "english", Some("Bolo"));
+        let calls = fake.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1, "no Urdu redo and no translation: {calls:?}");
+        assert_eq!(got.text, "please send the invoice by Friday");
+        assert_eq!(got.path, "transcribe");
+    }
+
+    #[test]
+    fn latin_text_tagged_hindi_is_repinned_to_english() {
+        let fake = FakeVia::new(
+            &[("please send the invoice", "hi"), ("please send the invoice by Friday", "en")],
+            None,
+        );
+        let got = run(&fake, "auto", "english", Some("Bolo"));
+        let calls = fake.calls.lock().unwrap();
+        assert_eq!(calls.len(), 2, "{calls:?}");
+        assert_eq!(calls[1].1, "en");
+        assert_ne!(calls[1].2.as_deref(), Some(transcribe::URDU_PROMPT));
+        assert_eq!(got.text, "please send the invoice by Friday");
+    }
+
+    #[test]
+    fn devanagari_is_repinned_to_urdu() {
+        let fake = FakeVia::new(&[("यह हिंदी है", "hi"), ("یہ اردو ہے", "ur")], None);
+        let got = run(&fake, "auto", "same", None);
+        let calls = fake.calls.lock().unwrap();
+        assert_eq!(calls.len(), 2, "{calls:?}");
+        assert_eq!(calls[1].1, "ur");
+        assert_eq!(calls[1].2.as_deref(), Some(transcribe::URDU_PROMPT));
+        assert_eq!(got.text, "یہ اردو ہے");
     }
 
     #[test]
