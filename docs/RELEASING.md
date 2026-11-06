@@ -27,7 +27,7 @@ Release, so users get nothing. A manual run that is not on a `v*` tag is always 
 | website | Real releases only. Commits the installer, `updates/latest.json`, `version.json` and the `index.html` download links to `taimoorKVD/bolo-website`. That push runs the site's own Deploy workflow, which pulls it onto the server. Then it waits until `/updates/latest.json` shows the new version |
 | github-release | Real releases only. Creates a GitHub Release with the installer, `.sig`, `latest.json` and `.msixupload`. It does not wait on the website job. |
 
-The website job pushes to `taimoorKVD/bolo-website`. That repo's own Deploy workflow publishes the files. 0.1.10's push landed (`master` `3fb220d`) and the live site later showed 0.1.10, but the 10-minute check failed and the GitHub Release job was skipped. A failed site check still fails the website job. Publishing the site after a red check is a bolo-website deploy concern, not a second push from this workflow. Store upload stays manual.
+The website job pushes to `taimoorKVD/bolo-website`. After `version.json` and `updates/latest.json` are copied, it runs that repo's `python3 scripts/sync-release.py`. The site's Deploy workflow refuses to publish unless that script's `--check` passes, which is why 0.1.10's push (`master` `3fb220d`) did not update the live site within 10 minutes: the homepage and README still named the previous version. A failed site check still fails the website job. The GitHub Release is created from the same artifacts and does not wait on that check. Store upload stays manual.
 
 `windows-installer.yml` no longer builds on tags, so a release builds once.
 

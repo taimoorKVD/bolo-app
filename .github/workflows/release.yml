@@ -215,6 +215,15 @@ jobs:
           $h = Get-Content index.html -Raw
           $h = $h -replace 'downloads/Bolo_[0-9][0-9.]*_x64-setup\.exe', "downloads/$name"
           Set-Content index.html $h -NoNewline -Encoding utf8NoBOM
+      - name: Rewrite marketing pages and README from version.json
+        working-directory: website
+        run: |
+          # The site's Deploy workflow runs `python3 scripts/sync-release.py --check`
+          # and refuses to publish if the homepage, other pages, or README still
+          # show the previous version. 0.1.10 pushed the installer and then failed
+          # that check. version.json is the source; this script rewrites the rest.
+          test -f scripts/sync-release.py
+          python3 scripts/sync-release.py
       - name: Commit and push (triggers site deploy)
         working-directory: website
         run: |
@@ -245,9 +254,12 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with: { path: out, merge-multiple: true }
+      - name: Use the updater notes as the GitHub release body
+        run: python3 -c "import json; open('out/release-notes.txt','w').write(json.load(open('out/latest.json'))['notes'].strip()+'\n')"
       - uses: softprops/action-gh-release@v2
         with:
           name: Bolo ${{ needs.build.outputs.version }}
+          body_path: out/release-notes.txt
           files: |
             out/*.exe
             out/*.sig
