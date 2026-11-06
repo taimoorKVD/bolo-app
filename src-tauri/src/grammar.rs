@@ -154,6 +154,11 @@ fn acronyms(tokens: &mut [String]) {
             "url" => "URL",
             "html" => "HTML",
             "css" => "CSS",
+            "ssh" => "SSH",
+            "http" => "HTTP",
+            "https" => "HTTPS",
+            "json" => "JSON",
+            "easyssh" => "EasySSH",
             _ => continue,
         };
         *token = splice(token, next);
@@ -261,6 +266,7 @@ mod tests {
             ("send the notes please", "Send the notes please."),
             ("the total is 1500 rupees", "The total is 1500 rupees."),
             ("we need 3 api keys", "We need 3 API keys."),
+            ("ssh into the server", "SSH into the server."),
             ("I wrote the email yesterday.", "I wrote the email yesterday."),
             ("bolo kya haal hai", "bolo kya haal hai"),
             ("hello@taimoorhussain.com", "hello@taimoorhussain.com"),

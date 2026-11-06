@@ -10,7 +10,7 @@ const BRANDS: &[&str] = &[
 
 /// Software words that are easy for Whisper to misspell.
 const TECH: &[&str] = &[
-    "API", "SQL", "PDF", "HTML", "CSS", "JavaScript", "TypeScript", "Python", "React", "invoice",
+    "API", "SSH", "EasySSH", "HTTP", "JSON", "URL", "SQL", "PDF", "HTML", "CSS", "JavaScript", "TypeScript", "Python", "React", "invoice",
     "deadline", "roadmap",
 ];
 

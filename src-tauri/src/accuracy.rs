@@ -10,7 +10,8 @@ use crate::vocab;
 /// `homophones` is off for verbatim takes. Names, domains, and saved fixes
 /// still apply: those are spellings, not a rewrite.
 pub fn polish_text(text: &str, corrections: &[Correction], words: &[String], homophones: bool) -> String {
-    let text = memory::apply_corrections(text, corrections);
+    let text = crate::transcribe::recover_brief_tech(text);
+    let text = memory::apply_corrections(&text, corrections);
     let text = vocab::correct(&text, words);
     if !homophones {
         return text;
@@ -89,6 +90,12 @@ mod tests {
             ("for to days", "For two days."),
             // Far from the name. A fuzzy swap here would "fix" unrelated domains.
             ("Send it to Durmusnsusen.com", "Send it to Durmusnsusen.com."),
+            ("easy ssh", "EasySSH"),
+            ("easy, it's such are", "EasySSH"),
+            ("Bolo and Easy, it's such a truth. Nerd thing, imagination.", "EasySSH"),
+            ("open easy ssh please", "Open EasySSH please."),
+            ("I think it's such a good idea", "I think it's such a good idea."),
+            ("ssh into the server", "SSH into the server."),
         ];
         let mut wer_sum = 0.0;
         for (heard, expected) in cases {
