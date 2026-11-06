@@ -64,6 +64,10 @@ pub struct Settings {
     pub smart_time_of_day: bool,
     #[serde(default)]
     pub smart_holiday: bool,
+    /// Keep the last few take recordings on this PC for "Listen again".
+    /// Missing means no: audio is not retained without an explicit choice.
+    #[serde(default)]
+    pub keep_recordings: bool,
     /// Local Store-rating bookkeeping. The settings window does not edit this.
     #[serde(default)]
     pub rating: crate::rating::RatingState,
@@ -157,6 +161,7 @@ impl Default for Settings {
             smart_mood: false,
             smart_time_of_day: false,
             smart_holiday: false,
+            keep_recordings: false,
             keep_learning: true,
             rating: crate::rating::RatingState::default(),
         }

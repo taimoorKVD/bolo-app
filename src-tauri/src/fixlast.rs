@@ -131,6 +131,22 @@ pub fn add_word(state: tauri::State<'_, AppState>, word: String) -> Result<Memor
 }
 
 #[tauri::command]
+pub fn teach_spelling(state: tauri::State<'_, AppState>, from: String, to: String) -> Result<MemoryView, String> {
+    memory::explain_fix(&from, &to)?;
+    {
+        let mut settings = lock(&state.settings);
+        let to_owned = to.trim().to_string();
+        memory::update(|memory| {
+            memory::add_correction(memory, from.trim(), to.trim(), store::now_ms());
+            let _ = memory::add_my_word(memory, to.trim());
+            memory::learn_from_fix(memory, &to_owned, &mut settings.dictionary);
+        });
+        save_settings(&state, &settings)?;
+    }
+    Ok(view(&state))
+}
+
+#[tauri::command]
 pub fn forget_fix(state: tauri::State<'_, AppState>, from: String) -> MemoryView {
     memory::update(|m| m.corrections.retain(|c| c.from != from));
     view(&state)

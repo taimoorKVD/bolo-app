@@ -19,6 +19,8 @@ use std::time::{Duration, Instant};
 
 const PRE_ROLL_MS: u32 = 1000;
 const LOOP_SLICE: Duration = Duration::from_millis(30);
+/// Extra capture after key-up so a quiet ending still in the callback is kept.
+pub const RELEASE_TAIL_MS: u64 = 160;
 
 enum Cmd {
     Retarget(Option<String>),
@@ -478,6 +480,11 @@ fn handle_cmd(cmd: Cmd, state: &Arc<Mutex<Capture>>, watch: &Watch, next_id: &mu
             }
         }
         Cmd::End { id, reply } => {
+            // The key often comes up while the last consonant is still in the
+            // device callback. Hold the take open briefly so that packet lands.
+            // The callback does not need this thread, so the sleep does not
+            // drop samples.
+            std::thread::sleep(Duration::from_millis(RELEASE_TAIL_MS));
             let held_ms = state
                 .lock()
                 .ok()
@@ -1060,11 +1067,7 @@ fn note_energy(state: &mut Capture, energy: f32, frame_ms: u32) {
     }
     if state.take.is_some() {
         let threshold = audio::speech_threshold(state.noise_rms);
-        if energy >= threshold {
-            state.take_silence_ms = 0;
-        } else {
-            state.take_silence_ms = state.take_silence_ms.saturating_add(frame_ms.max(1));
-        }
+        state.take_silence_ms = audio::advance_pause_ms(state.take_silence_ms, energy, threshold, frame_ms);
         maybe_cut(state);
     }
 }
@@ -1238,6 +1241,44 @@ fn arm_marks_preroll_without_opening_a_device() {
             assert_eq!(guard.ring.len(), kept, "reopening the same format cleared the pre-roll");
         }
     }
+
+#[test]
+fn release_waits_for_a_quiet_ending_still_in_the_callback() {
+    let level = Arc::new(AtomicU32::new(0));
+    let state = Arc::new(Mutex::new(Capture::new(Arc::clone(&level))));
+    {
+        let mut guard = state.lock().expect("buffer");
+        guard.apply_format(1, 16_000);
+    }
+    let watch = Watch::new(None, None);
+    let mut next_id = 1u64;
+    let (begin_tx, begin_rx) = mpsc::channel();
+    handle_cmd(
+        Cmd::Begin {
+            preference: None,
+            reply: begin_tx,
+        },
+        &state,
+        &watch,
+        &mut next_id,
+    );
+    let armed = begin_rx.recv_timeout(Duration::from_millis(50)).expect("reply").expect("arm");
+    let late = Arc::clone(&state);
+    let worker = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(40));
+        push_samples(&late, std::iter::repeat(0.2).take(16_000 / 10));
+    });
+    let (end_tx, end_rx) = mpsc::channel();
+    handle_cmd(Cmd::End { id: armed.id, reply: end_tx }, &state, &watch, &mut next_id);
+    worker.join().expect("callback");
+    let finished = end_rx.recv_timeout(Duration::from_millis(50)).expect("end").expect("audio");
+    assert!(
+        finished.interleaved.len() >= 16_000 / 10,
+        "the samples that arrived during the release tail were dropped: {}",
+        finished.interleaved.len()
+    );
+    assert!(finished.interleaved.iter().any(|sample| sample.abs() > 0.1));
+}
 
 #[test]
 fn dead_take_detection_needs_time_and_zeros() {

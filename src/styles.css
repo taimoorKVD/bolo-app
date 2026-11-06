@@ -192,6 +192,10 @@ textarea { resize: vertical; min-height: 140px; }
   flex-wrap: wrap;
 }
 .key-row input { flex: 1; min-width: 180px; }
+.key-steps { margin: 0 0 12px; padding-left: 1.2rem; }
+.key-steps li { margin: 0 0 6px; }
+.key-sub { margin: 16px 0 8px; font-size: 1rem; }
+.provider-keys { display: flex; flex-direction: column; gap: 8px; }
 .own-key-label { margin: 4px 0 0; font-weight: 600; }
 
 button.primary, button.ghost, button.text {

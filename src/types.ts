@@ -36,6 +36,22 @@ export type Settings = {
   smartHoliday: boolean;
   /** Learn names, fixes and style on this PC. */
   keepLearning: boolean;
+  /** Keep the last few recordings on this PC so Listen again can play them. */
+  keepRecordings: boolean;
+};
+
+export type ProviderKeyRow = {
+  id: string;
+  hint: string | null;
+  state: string;
+  kind: string;
+  preferred: boolean;
+  lastError: string | null;
+};
+
+export type ProviderKeyStatus = {
+  keys: ProviderKeyRow[];
+  note: string | null;
 };
 
 export type ApiKeyStatus = {

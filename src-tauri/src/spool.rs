@@ -47,8 +47,8 @@ pub fn remove(config: &Path, id: &str) {
     let _ = fs::remove_dir_all(root(config).join(id));
 }
 
-/// The paste landed. The audio stays (Fix last can listen again) but the take
-/// is no longer offered for crash recovery or paste-again fallback.
+/// The paste landed. The take is no longer offered for crash recovery.
+/// Audio stays only when the caller has not discarded it.
 pub fn mark_pasted(config: &Path, id: &str) {
     if id.is_empty() {
         return;
@@ -56,6 +56,38 @@ pub fn mark_pasted(config: &Path, id: &str) {
     let dir = root(config).join(id);
     if dir.is_dir() {
         let _ = fs::write(dir.join("pasted"), b"1");
+    }
+}
+
+/// Delete audio files for one take. The transcript file stays.
+pub fn discard_audio(config: &Path, id: &str) {
+    if id.is_empty() || id.contains(['/', '\\', '.']) {
+        return;
+    }
+    discard_dir(&root(config).join(id));
+}
+
+/// Delete every saved recording under the spool. Transcripts stay.
+pub fn discard_all_audio(config: &Path) {
+    let Ok(entries) = fs::read_dir(root(config)) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry.path().is_dir() {
+            discard_dir(&entry.path());
+        }
+    }
+}
+
+fn discard_dir(path: &Path) {
+    let Ok(files) = fs::read_dir(path) else {
+        return;
+    };
+    for file in files.flatten() {
+        let path = file.path();
+        if path.extension().is_some_and(|ext| ext == "audio") {
+            let _ = fs::remove_file(path);
+        }
     }
 }
 
@@ -167,6 +199,15 @@ mod tests {
         mark_pasted(&dir, "take-a");
         assert!(latest(&dir).is_none(), "a pasted take is not recovered again");
         assert_eq!(audio(&dir, "take-a"), vec![b"fLaC-chunk".to_vec()]);
+        discard_audio(&dir, "take-a");
+        assert!(audio(&dir, "take-a").is_empty(), "audio is not kept without an explicit choice");
+        assert_eq!(
+            fs::read_to_string(root(&dir).join("take-a").join("text.txt")).unwrap(),
+            "alpha take"
+        );
+        write_audio(&dir, "take-b", 0, b"more-audio");
+        discard_all_audio(&dir);
+        assert!(audio(&dir, "take-b").is_empty());
         assert!(audio(&dir, "..").is_empty());
         remove(&dir, "take-a");
         assert!(audio(&dir, "take-a").is_empty());

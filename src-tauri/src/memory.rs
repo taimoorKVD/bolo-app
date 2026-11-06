@@ -108,9 +108,70 @@ fn migrate(mut memory: Memory) -> (Memory, bool) {
 }
 
 fn useful_fix(from: &str, to: &str) -> bool {
+    correction_is_safe(from, to)
+}
+
+/// A spelling the user set on purpose. It must not rewrite an ordinary word
+/// everywhere, and it must not turn "invoice" into the name "Invoice".
+pub fn correction_is_safe(from: &str, to: &str) -> bool {
     let from = from.trim();
     let to = to.trim();
-    !from.is_empty() && !to.is_empty() && from != to
+    let from_words = split_fix(from);
+    let to_words = split_fix(to);
+    if from_words.is_empty() || to_words.is_empty() || from_words.len() > 5 || to_words.len() > 5 {
+        return false;
+    }
+    // "kubernetes" → "Kubernetes" is a spelling. "invoice" → "Invoice" is not.
+    if from.eq_ignore_ascii_case(to) {
+        // Identical text is not a fix. A capitalisation change is kept only
+        // for a name ("kubernetes" → "Kubernetes"), not for an ordinary word.
+        return from != to
+            && from_words.len() == 1
+            && from_words[0].chars().count() > 3
+            && !crate::cleanup::is_common_word(&from_words[0]);
+    }
+    if from.is_empty() || to.is_empty() {
+        return false;
+    }
+    // "to" → "two" and "the" → "a" would rewrite every sentence.
+    if from_words.len() == 1 && (from_words[0].chars().count() <= 3 || crate::cleanup::is_common_word(&from_words[0])) {
+        return false;
+    }
+    if all_common(&from_words) && all_common(&to_words) {
+        return false;
+    }
+    true
+}
+
+fn split_fix(text: &str) -> Vec<String> {
+    text.split_whitespace().map(|word| word.trim_matches(|c: char| !is_word_char(c)).to_string()).filter(|word| !word.is_empty()).collect()
+}
+
+fn all_common(words: &[String]) -> bool {
+    !words.is_empty() && words.iter().all(|word| crate::cleanup::is_common_word(word))
+}
+
+/// What to tell someone when a spelling should not be saved.
+pub fn explain_fix(from: &str, to: &str) -> Result<(), String> {
+    if correction_is_safe(from, to) {
+        return Ok(());
+    }
+    let from = from.trim();
+    let to = to.trim();
+    if from.is_empty() || to.is_empty() {
+        return Err("Type what Bolo heard, and what you meant.".into());
+    }
+    if from.eq_ignore_ascii_case(to) {
+        return Err("Those are the same word. A capital letter does not make an ordinary word into a name.".into());
+    }
+    let from_words = split_fix(from);
+    if from_words.len() == 1 && crate::cleanup::is_common_word(&from_words[0]) {
+        return Err(
+            "That would change an ordinary word in every sentence. Teach a short phrase instead, such as “easy ssh” to EasySSH."
+                .into(),
+        );
+    }
+    Err("Bolo keeps a spelling only when it cannot be confused with an ordinary word.".into())
 }
 
 pub fn save(config: &Path, memory: &Memory) -> Result<(), String> {
@@ -183,7 +244,7 @@ pub fn apply_corrections(text: &str, corrections: &[Correction]) -> String {
     sorted.sort_by_key(|c| std::cmp::Reverse(c.from.chars().count()));
     for c in sorted {
         let from = c.from.trim();
-        if from.is_empty() || from == c.to {
+        if !correction_is_safe(from, c.to.trim()) {
             continue;
         }
         out = replace_words(&out, from, c.to.trim());
@@ -249,18 +310,14 @@ pub fn diff_fix(old: &str, new: &str) -> Option<(String, String)> {
     }
     let from = from.join(" ");
     let to = to.join(" ");
-    if from == to {
-        return None;
-    }
-    // A one-word fix of a very common word would rewrite every sentence.
-    if !from.contains(' ') && (from.chars().count() <= 3 || crate::cleanup::is_common_word(&from)) && !from.eq_ignore_ascii_case(&to) {
+    if !correction_is_safe(&from, &to) {
         return None;
     }
     Some((from, to))
 }
 
 pub fn add_correction(memory: &mut Memory, from: &str, to: &str, now: u64) {
-    if !useful_fix(from, to) {
+    if !correction_is_safe(from, to) {
         return;
     }
     memory.corrections.retain(|c| !c.from.eq_ignore_ascii_case(from));
@@ -587,6 +644,51 @@ mod tests {
         assert_eq!(diff_fix("same words", "same words"), None);
         assert_eq!(diff_fix("a b c d e f g h", "one two three four five six seven eight"), None);
         assert_eq!(diff_fix("I saw the cat", "I saw a cat"), None);
+        assert_eq!(diff_fix("send the invoice", "send the Invoice"), None);
+        assert_eq!(diff_fix("go there now", "go their now"), None);
+    }
+
+    #[test]
+    fn explicit_spellings_leave_ordinary_words_and_mixed_language_alone() {
+        assert!(explain_fix("easy ssh", "EasySSH").is_ok());
+        assert!(explain_fix("there", "their").is_err());
+        assert!(explain_fix("easy", "EasySSH").is_err());
+        assert!(explain_fix("invoice", "Invoice").is_err());
+        assert!(explain_fix("to", "two").is_err());
+        assert!(explain_fix("kal meeting", "کل meeting").is_ok());
+        let mut memory = Memory::default();
+        add_correction(&mut memory, "there", "their", 1);
+        add_correction(&mut memory, "easy", "EasySSH", 2);
+        add_correction(&mut memory, "easy ssh", "EasySSH", 3);
+        add_correction(&mut memory, "invoice", "Invoice", 4);
+        assert_eq!(memory.corrections.len(), 1, "{:?}", memory.corrections);
+        let spoken = "I took the easy street then said easy ssh and میں meeting ہوں scratch that";
+        let fixed = apply_corrections(spoken, &memory.corrections);
+        assert!(fixed.contains("easy street"), "{fixed}");
+        assert!(fixed.contains("EasySSH"), "{fixed}");
+        assert!(fixed.contains("میں"), "{fixed}");
+        assert!(fixed.contains("scratch that"), "{fixed}");
+        assert_eq!(
+            crate::cleanup::apply_self_correction(&apply_corrections(
+                "Tuesday scratch that Wednesday",
+                &memory.corrections,
+            )),
+            "Wednesday"
+        );
+        let mut dict = Vec::new();
+        let added = learn(
+            &mut memory,
+            "Send the Invoice before the Deadline. The Roadmap stays. Send the Invoice again.",
+            &mut dict,
+        );
+        assert!(
+            dict.iter().chain(added.iter()).all(|word| {
+                !word.eq_ignore_ascii_case("invoice")
+                    && !word.eq_ignore_ascii_case("deadline")
+                    && !word.eq_ignore_ascii_case("roadmap")
+            }),
+            "ordinary words became names: {dict:?} {added:?}"
+        );
     }
 
     #[test]
@@ -665,9 +767,9 @@ mod tests {
     #[test]
     fn prompt_terms_are_newest_first_and_unique() {
         let mut memory = Memory::default();
-        add_correction(&mut memory, "a", "Alpha", 1);
-        add_correction(&mut memory, "b", "Beta", 2);
-        add_correction(&mut memory, "c", "alpha", 3);
+        add_correction(&mut memory, "heard alfa", "Alpha", 1);
+        add_correction(&mut memory, "heard beta", "Beta", 2);
+        add_correction(&mut memory, "heard see", "alpha", 3);
         assert_eq!(prompt_terms(&memory), vec!["alpha".to_string(), "Beta".to_string()]);
     }
 

@@ -86,6 +86,15 @@ jobs:
         if: always()
         shell: pwsh
         run: Remove-Item "$env:RUNNER_TEMP\updater.key" -ErrorAction SilentlyContinue
+      - name: Read annotated tag notes
+        shell: bash
+        run: |
+          # actions/checkout is shallow, so a local tag is lightweight and
+          # %(contents) is the commit message. updater-notes.sh fetches the
+          # annotated tag and refuses the commit message.
+          tag="${GITHUB_REF_NAME}"
+          if [ "${GITHUB_REF_TYPE}" != "tag" ]; then tag="v${{ steps.ver.outputs.version }}"; fi
+          bash scripts/updater-notes.sh . "$tag" > "$RUNNER_TEMP/updater-notes.txt"
       - name: Write latest.json
         shell: pwsh
         run: |
@@ -99,9 +108,8 @@ jobs:
           New-Item -ItemType Directory -Force out | Out-Null
           Copy-Item $exe.FullName "out/$name"
           Copy-Item "$($exe.FullName).sig" "out/$name.sig"
-          $notes = ""
-          if ($env:GITHUB_REF_TYPE -eq 'tag') { $notes = git tag -l --format='%(contents)' $env:GITHUB_REF_NAME }
-          if (-not "$notes".Trim()) { $notes = "Bolo $v" }
+          $notes = Get-Content "$env:RUNNER_TEMP/updater-notes.txt" -Raw
+          if (-not "$notes".Trim()) { throw "Updater notes were empty" }
           [ordered]@{
             version  = $v
             notes    = "$notes".Trim()
@@ -223,11 +231,15 @@ jobs:
             [ "$v" = "${{ needs.build.outputs.version }}" ] && echo "latest.json is live: $v" && exit 0
             sleep 20
           done
-          echo "::error::latest.json did not show the new version within 10 minutes"; exit 1
+          echo "::error::bolo-website received the files, but its Deploy workflow did not publish /updates/latest.json within 10 minutes. That deploy lives in taimoorKVD/bolo-website. Do not re-push from this job."
+          exit 1
 
   github-release:
     name: GitHub Release
-    needs: [build, store, website]
+    # Website smoke is a separate deploy in bolo-website. A slow or failed
+    # site publish must not skip the GitHub Release, which is what left 0.1.10's
+    # workflow red after the installer was already built.
+    needs: [build, store]
     if: needs.build.outputs.dry_run != 'true'
     runs-on: ubuntu-latest
     steps:
