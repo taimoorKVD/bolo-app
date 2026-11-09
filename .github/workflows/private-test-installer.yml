@@ -1,0 +1,42 @@
+name: Private test installer
+
+# Build-only NSIS setup for a private install test. Uploads the setup.exe as a
+# workflow artifact. Does not sign the public updater, push bolo.thebetawebsite.com,
+# or create a GitHub Release.
+#
+# A push that changes this file builds once. Later pushes to main do not.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/private-test-installer.yml
+
+jobs:
+  nsis:
+    name: Build NSIS setup.exe
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          package-manager-cache: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+      - run: npm ci
+      - name: Build the NSIS installer without updater artifacts
+        shell: pwsh
+        run: |
+          '{"bundle":{"createUpdaterArtifacts":false}}' | Set-Content updater-off.conf.json -Encoding utf8NoBOM
+          npx tauri build --bundles nsis --config updater-off.conf.json
+          if ($LASTEXITCODE -ne 0) { throw "tauri build failed" }
+      - name: Upload the setup.exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: bolo-private-nsis
+          if-no-files-found: error
+          path: src-tauri/target/release/bundle/nsis/*-setup.exe
