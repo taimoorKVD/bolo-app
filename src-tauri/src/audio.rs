@@ -723,12 +723,21 @@ pub struct EncodedSpeech {
 }
 
 pub fn prepare_speech(finished: &FinishedAudio) -> Result<EncodedSpeech, SpeechError> {
+    Ok(prepare_speech_parts(finished)?.0)
+}
+
+/// Encoded upload plus the 16 kHz samples it was made from (after gain).
+/// Debug capture listens to those samples; the encoder output is unchanged.
+pub fn prepare_speech_parts(finished: &FinishedAudio) -> Result<(EncodedSpeech, Vec<f32>), SpeechError> {
     let resampled = speech_samples(finished)?;
     let speech_secs = resampled.len() as f32 / TARGET_RATE as f32;
     let mut encoded = encode_speech(&resampled, TARGET_RATE)?;
     encoded.speech_secs = speech_secs;
-    Ok(encoded)
+    Ok((encoded, resampled))
 }
+
+/// Sample rate of the buffer `prepare_speech` uploads.
+pub const SPEECH_RATE: u32 = TARGET_RATE;
 
 /// Trimmed, gain-normalized, 16 kHz mono samples ready to encode.
 pub fn speech_samples(finished: &FinishedAudio) -> Result<Vec<f32>, SpeechError> {

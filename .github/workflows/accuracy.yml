@@ -1,0 +1,64 @@
+name: Accuracy
+
+# Text-stage checks run on every push and pull request. They do not call Groq
+# and they do not need a microphone.
+#
+# The audio evaluation is opt-in: Actions > Accuracy > Run workflow, with
+# "Score recorded audio" ticked, and the GROQ_API_KEY secret set. It does not
+# run on push. Recordings are not in the repo; without a local corpus the
+# audio job reports that and exits.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      run_audio:
+        description: "Score recorded audio with Groq (needs GROQ_API_KEY). Off for a normal run."
+        type: boolean
+        default: false
+
+jobs:
+  text-gate:
+    name: Offline text stages
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+      - name: Grammar, learned spellings, and prompt budget
+        working-directory: src-tauri
+        run: cargo test --lib accuracy_gate -- --test-threads=1
+
+  audio:
+    name: On-demand audio score
+    if: github.event_name == 'workflow_dispatch' && inputs.run_audio
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+      - name: Score a corpus only when one is present
+        working-directory: src-tauri
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          BOLO_SCORE_AUDIO: "1"
+        run: |
+          set -euo pipefail
+          if [ -z "${GROQ_API_KEY}" ]; then
+            echo "GROQ_API_KEY secret is not set. Refusing to call Groq."
+            exit 1
+          fi
+          if [ ! -d ../accuracy-script ] && [ ! -d ../accuracy-debug ]; then
+            echo "No accuracy-script or accuracy-debug corpus in the checkout."
+            echo "Recordings stay on the PC that recorded them and are not committed."
+            echo "Locally: cargo run --bin bolo-score -- /path/to/accuracy-script --api"
+            exit 0
+          fi
+          folder=../accuracy-script
+          if [ ! -d "$folder" ]; then folder=../accuracy-debug; fi
+          cargo run --bin bolo-score -- "$folder" --api --out ../accuracy-out

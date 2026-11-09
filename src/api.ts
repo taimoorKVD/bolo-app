@@ -15,6 +15,8 @@ import type {
   HomeCard,
   RatingCard,
   RateResponse,
+  ScriptLine,
+  HeldInfo,
 } from "./types";
 
 type Handler = (event: DictationEvent) => void;
@@ -125,4 +127,14 @@ export const api = {
   ratingFeedback: () => call<void>("rating_feedback"),
   smokeFinished: (ok: boolean, detail: string | null) =>
     call<void>("smoke_finished", { ok, detail }),
+  openDebugFolder: () => call<void>("open_debug_folder"),
+  clearDebugFolder: () => call<void>("clear_debug_folder"),
+  accuracyScript: () => call<ScriptLine[]>("accuracy_script"),
+  accuracyRecordStart: () => call<void>("accuracy_record_start"),
+  accuracyRecordStop: () => call<HeldInfo>("accuracy_record_stop"),
+  accuracyDiscard: () => call<void>("accuracy_record_discard"),
+  accuracySave: (id: string) => call<string>("accuracy_save", { id }),
+  accuracySaved: () => call<string[]>("accuracy_saved"),
+  accuracyOpenFolder: () => call<void>("accuracy_open_folder"),
+  accuracyClearFolder: () => call<void>("accuracy_clear_folder"),
 };

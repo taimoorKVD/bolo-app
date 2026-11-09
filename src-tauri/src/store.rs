@@ -68,6 +68,10 @@ pub struct Settings {
     /// Missing means no: audio is not retained without an explicit choice.
     #[serde(default)]
     pub keep_recordings: bool,
+    /// Save each take's audio and stage text on this PC. Off unless chosen.
+    /// The folder is local. Nothing in it is uploaded, and API keys are not written.
+    #[serde(default)]
+    pub debug_capture: bool,
     /// Local Store-rating bookkeeping. The settings window does not edit this.
     #[serde(default)]
     pub rating: crate::rating::RatingState,
@@ -162,6 +166,7 @@ impl Default for Settings {
             smart_time_of_day: false,
             smart_holiday: false,
             keep_recordings: false,
+            debug_capture: false,
             keep_learning: true,
             rating: crate::rating::RatingState::default(),
         }

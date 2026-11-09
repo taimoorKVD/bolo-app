@@ -38,6 +38,26 @@ export type Settings = {
   keepLearning: boolean;
   /** Keep the last few recordings on this PC so Listen again can play them. */
   keepRecordings: boolean;
+  /** Save each take's audio and stage text on this PC. Off unless chosen. */
+  debugCapture: boolean;
+};
+
+export type ScriptLine = {
+  id: string;
+  kind: string;
+  expectedLanguage: string;
+  cue: string;
+  say: string;
+};
+
+export type HeldInfo = {
+  deviceName: string;
+  sampleRate: number;
+  channels: number;
+  holdMs: number;
+  peak: number;
+  clippingPct: number;
+  silent: boolean;
 };
 
 export type ProviderKeyRow = {

@@ -26,6 +26,8 @@ import type {
   MicInfo,
   Settings,
   WhisperModel,
+  ScriptLine,
+  HeldInfo,
 } from "./types";
 
 const LANGUAGES: Array<[string, string]> = [
@@ -73,7 +75,8 @@ type SectionId =
   | "dictionary"
   | "privacy"
   | "paste"
-  | "diagnostics";
+  | "diagnostics"
+  | "accuracy";
 
 /** Main pages, with an icon and a title. Advanced sits apart at the bottom. */
 const NAV: Array<[SectionId, string, string]> = [
@@ -95,6 +98,7 @@ const ADVANCED: Array<[SectionId, string, string]> = [
   ["privacy", "Privacy", "What stays on this PC"],
   ["paste", "How text is pasted", "Paste the last take again"],
   ["diagnostics", "Help and diagnostics", "Version, status, and a report you can copy"],
+  ["accuracy", "Accuracy", "Save debug traces on this PC, and record the test sentences"],
 ];
 
 const FEATURED = ["classic", "c02", "c04", "c07", "c06"];
@@ -119,6 +123,7 @@ function normalizeSettings(settings: Settings): Settings {
     smartHoliday: settings.smartHoliday === true,
     keepLearning: settings.keepLearning !== false,
     keepRecordings: settings.keepRecordings === true,
+    debugCapture: settings.debugCapture === true,
   };
 }
 
@@ -228,6 +233,7 @@ function render(root: HTMLElement, draft: Draft): void {
     privacyPanel(draft),
     pastePanel(draft),
     diagnosticsPanel(draft),
+    accuracyPanel(draft),
   );
   main.append(status, form);
   shell.append(nav, main);
@@ -299,6 +305,13 @@ function showSection(form: HTMLElement, id: SectionId): void {
 }
 
 function go(draft: Draft, id: SectionId): void {
+  if (draft.section === "accuracy" && id !== "accuracy") {
+    void api.accuracyDiscard();
+    void api.setHotkeyCapture(false);
+  }
+  if (id === "accuracy" && draft.section !== "accuracy") {
+    void api.setHotkeyCapture(true);
+  }
   draft.section = id;
   const form = document.querySelector<HTMLElement>(".sheet");
   if (form) showSection(form, id);
@@ -1948,6 +1961,216 @@ function refreshHome(draft: Draft): void {
     status.textContent = draft.info.listenerRunning ? "Listening for your shortcut" : "The shortcut isn't working right now";
     status.classList.toggle("is-off", !draft.info.listenerRunning);
   }
+}
+
+function accuracyPanel(draft: Draft): HTMLElement {
+  const panel = panelEl(
+    "accuracy",
+    "Accuracy",
+    "Debug traces and test recordings stay on this PC. Nothing is uploaded, and your key is never written into them.",
+  );
+  panel.append(
+    switchRow(
+      "Save a debug trace for each dictation",
+      "Off unless you turn this on. Each take saves the microphone audio, the audio after gain, and the text after each stage.",
+      draft.settings.debugCapture,
+      (checked) => {
+        draft.settings.debugCapture = checked;
+        markDirty(draft);
+      },
+    ),
+  );
+  const debugActions = el("div", "share-actions");
+  const openDebug = button("Open debug folder", "ghost");
+  const clearDebug = button("Delete debug traces", "ghost");
+  const debugNote = el("p", "field-note", "");
+  openDebug.addEventListener("click", () => {
+    debugNote.textContent = "";
+    void api.openDebugFolder().catch((error) => {
+      debugNote.textContent = messageOf(error);
+      debugNote.className = "field-note bad";
+    });
+  });
+  clearDebug.addEventListener("click", () => {
+    if (!window.confirm("Delete every debug trace on this computer?")) return;
+    void api
+      .clearDebugFolder()
+      .then(() => {
+        debugNote.textContent = "Debug traces deleted. They were only on this PC.";
+        debugNote.className = "field-note good";
+      })
+      .catch((error) => {
+        debugNote.textContent = messageOf(error);
+        debugNote.className = "field-note bad";
+      });
+  });
+  debugActions.append(openDebug, clearDebug);
+  panel.append(debugActions, debugNote);
+
+  const head = el("h3", "", "Record the test sentences");
+  const progress = el("p", "field-note", "");
+  const cue = el("p", "card-body", "");
+  const say = el("p", "accuracy-say", "Loading sentences…");
+  const takeNote = el("p", "field-note", "");
+  const actions = el("div", "share-actions");
+  const record = button("Record", "primary");
+  const redo = button("Redo", "ghost");
+  const save = button("Save and next", "ghost");
+  redo.disabled = true;
+  save.disabled = true;
+  actions.append(record, redo, save);
+  const folderActions = el("div", "share-actions");
+  const openSet = button("Open recordings", "ghost");
+  const clearSet = button("Delete recordings", "ghost");
+  folderActions.append(openSet, clearSet);
+  panel.append(head, progress, cue, say, takeNote, actions, folderActions);
+
+  let lines: ScriptLine[] = [];
+  let saved = new Set<string>();
+  let index = 0;
+  let recording = false;
+  let starting = false;
+  let holding = false;
+
+  const show = () => {
+    const line = lines[index];
+    const done = lines.filter((item) => saved.has(item.id)).length;
+    progress.textContent = lines.length ? `${done} of ${lines.length} saved` : "";
+    if (!line) {
+      cue.textContent = "";
+      say.textContent = "That's the set. The recordings are on this PC, not in the project folder.";
+      record.disabled = true;
+      return;
+    }
+    cue.textContent = line.cue;
+    say.textContent = line.say;
+    record.disabled = starting;
+    record.textContent = recording ? "Stop" : holding ? "Record again" : saved.has(line.id) ? "Record again" : "Record";
+  };
+
+  const jumpToPending = () => {
+    const pending = lines.findIndex((line) => !saved.has(line.id));
+    index = pending === -1 ? Math.max(lines.length - 1, 0) : pending;
+    holding = false;
+    save.disabled = true;
+    redo.disabled = true;
+    show();
+  };
+
+  record.addEventListener("click", () => {
+    takeNote.textContent = "";
+    takeNote.className = "field-note";
+    if (!recording) {
+      recording = true;
+      starting = true;
+      holding = false;
+      save.disabled = true;
+      redo.disabled = true;
+      show();
+      void api.accuracyRecordStart().then(() => {
+        starting = false;
+        show();
+      }).catch((error) => {
+        recording = false;
+        starting = false;
+        show();
+        takeNote.textContent = messageOf(error);
+        takeNote.className = "field-note bad";
+      });
+      return;
+    }
+    record.disabled = true;
+    void api
+      .accuracyRecordStop()
+      .then((info: HeldInfo) => {
+        recording = false;
+        holding = true;
+        record.disabled = false;
+        redo.disabled = false;
+        save.disabled = false;
+        const peak = info.peak.toFixed(3);
+        takeNote.textContent = info.silent
+          ? `${info.deviceName} looks silent (peak ${peak}). A headset jack often records nothing. Redo on another microphone.`
+          : `${info.deviceName} · ${info.sampleRate} Hz · peak ${peak} · clipping ${info.clippingPct.toFixed(2)}%`;
+        takeNote.className = info.silent ? "field-note bad" : "field-note";
+        show();
+      })
+      .catch((error) => {
+        recording = false;
+        record.disabled = false;
+        show();
+        takeNote.textContent = messageOf(error);
+        takeNote.className = "field-note bad";
+      });
+  });
+  redo.addEventListener("click", () => {
+    if (recording || !lines[index]) return;
+    holding = false;
+    save.disabled = true;
+    redo.disabled = true;
+    record.click();
+  });
+  save.addEventListener("click", () => {
+    const line = lines[index];
+    if (!line || !holding) return;
+    save.disabled = true;
+    void api
+      .accuracySave(line.id)
+      .then(() => {
+        saved.add(line.id);
+        holding = false;
+        redo.disabled = true;
+        takeNote.textContent = "Saved on this PC.";
+        takeNote.className = "field-note good";
+        const next = lines.findIndex((item, at) => at > index && !saved.has(item.id));
+        index = next === -1 ? lines.length : next;
+        show();
+      })
+      .catch((error) => {
+        save.disabled = false;
+        takeNote.textContent = messageOf(error);
+        takeNote.className = "field-note bad";
+      });
+  });
+  openSet.addEventListener("click", () => {
+    void api.accuracyOpenFolder().catch((error) => {
+      takeNote.textContent = messageOf(error);
+      takeNote.className = "field-note bad";
+    });
+  });
+  clearSet.addEventListener("click", () => {
+    if (!window.confirm("Delete the test recordings on this computer?")) return;
+    void api
+      .accuracyClearFolder()
+      .then(() => {
+        saved = new Set();
+        holding = false;
+        index = 0;
+        takeNote.textContent = "Recordings deleted. They were only on this PC.";
+        takeNote.className = "field-note";
+        show();
+      })
+      .catch((error) => {
+        takeNote.textContent = messageOf(error);
+        takeNote.className = "field-note bad";
+      });
+  });
+
+  void api
+    .accuracyScript()
+    .then(async (script) => {
+      lines = script;
+      try {
+        saved = new Set(await api.accuracySaved());
+      } catch {
+        saved = new Set();
+      }
+      jumpToPending();
+    })
+    .catch((error) => {
+      say.textContent = messageOf(error);
+    });
+  return panel;
 }
 
 function advancedPanel(draft: Draft): HTMLElement {

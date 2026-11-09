@@ -1,4 +1,5 @@
 mod accuracy;
+pub mod measure;
 mod audio;
 mod builtin;
 mod chunk;
@@ -48,6 +49,8 @@ mod harness;
 mod qa_tests;
 #[cfg(test)]
 mod regressions;
+#[cfg(test)]
+mod accuracy_gate;
 mod rating;
 
 use crate::credentials::ApiKeyStatus;
@@ -129,7 +132,17 @@ pub fn run() {
             growth::dismiss_home_milestone,
             growth::copy_share_message,
             growth::open_share_whatsapp,
-            growth::save_character_card
+            growth::save_character_card,
+            open_debug_folder,
+            clear_debug_folder,
+            accuracy_script,
+            accuracy_record_start,
+            accuracy_record_stop,
+            accuracy_record_discard,
+            accuracy_save,
+            accuracy_saved,
+            accuracy_open_folder,
+            accuracy_clear_folder
         ])
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
@@ -763,4 +776,59 @@ fn smoke_finished(app: tauri::AppHandle, ok: bool, detail: Option<String>) {
         let _ = std::fs::write(path, line);
     }
     app.exit(if ok { 0 } else { 1 });
+}
+
+#[tauri::command]
+fn open_debug_folder(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    measure::open_folder(&measure::debug_dir(&state.config_dir))
+}
+
+#[tauri::command]
+fn clear_debug_folder(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    measure::clear_folder(&measure::debug_dir(&state.config_dir))
+}
+
+#[tauri::command]
+fn accuracy_script() -> &'static [measure::ScriptLine] {
+    measure::script()
+}
+
+#[tauri::command]
+async fn accuracy_record_start(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let preference = state.settings.lock().unwrap_or_else(|err| err.into_inner()).microphone.clone();
+    tauri::async_runtime::spawn_blocking(move || measure::record_start(preference.as_deref()))
+        .await
+        .map_err(|err| err.to_string())?
+}
+
+#[tauri::command]
+async fn accuracy_record_stop() -> Result<measure::HeldInfo, String> {
+    tauri::async_runtime::spawn_blocking(measure::record_stop)
+        .await
+        .map_err(|err| err.to_string())?
+}
+
+#[tauri::command]
+fn accuracy_record_discard() {
+    measure::record_discard();
+}
+
+#[tauri::command]
+fn accuracy_save(state: tauri::State<'_, AppState>, id: String) -> Result<String, String> {
+    measure::save_script(&state.config_dir, &id)
+}
+
+#[tauri::command]
+fn accuracy_saved(state: tauri::State<'_, AppState>) -> Vec<String> {
+    measure::saved_script_ids(&state.config_dir)
+}
+
+#[tauri::command]
+fn accuracy_open_folder(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    measure::open_folder(&measure::script_dir(&state.config_dir))
+}
+
+#[tauri::command]
+fn accuracy_clear_folder(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    measure::clear_folder(&measure::script_dir(&state.config_dir))
 }

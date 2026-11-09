@@ -448,6 +448,13 @@ pub fn begin(app: &AppHandle) {
     };
     *lock(&state.last_error) = None;
     let settings = lock(&state.settings).clone();
+    if settings.debug_capture {
+        if let Some(id) = lock(&state.engine).spool_id.clone() {
+            crate::measure::arm(&id);
+        }
+    } else {
+        crate::measure::disarm();
+    }
     if let Some(tray) = app.tray_by_id("bolo") {
         let _ = tray.set_tooltip(Some(format!("Bolo — hold {}", display(&settings.hotkey))));
     }
@@ -480,8 +487,12 @@ pub fn begin(app: &AppHandle) {
                         engine.generation == generation && matches!(engine.phase, Phase::Arming)
                     };
                     if still {
+                        let dir = state.config_dir.clone();
+                        let _ = crate::measure::commit(&dir, crate::measure::Finish::error(err.clone()));
                         mark_idle(&app);
                         fail(&app, &err);
+                    } else {
+                        crate::measure::disarm();
                     }
                 }
             }
@@ -494,11 +505,14 @@ fn on_armed(app: &AppHandle, take: LiveTake, generation: u64) {
     let (level, stop_flag) = take.meter();
     let started = take.started;
     let note = take.device_note.clone();
+    let device_name = take.active_name.clone();
     let action = {
         let mut engine = lock(&state.engine);
         if engine.generation != generation || !matches!(engine.phase, Phase::Arming) {
             drop(engine);
             let _ = take.finish();
+            let dir = state.config_dir.clone();
+            let _ = crate::measure::commit(&dir, crate::measure::Finish::error("take cancelled before recording"));
             return;
         }
         let released = engine.released_during_arm;
@@ -512,6 +526,7 @@ fn on_armed(app: &AppHandle, take: LiveTake, generation: u64) {
         engine.phase = Phase::Recording;
         after_arm(released, age)
     };
+    crate::measure::set_device(&device_name);
     if let Some(message) = note.as_ref().filter(|message| !message.is_empty()) {
         log_line(&state.config_dir, "info", message);
     }
@@ -604,6 +619,15 @@ pub fn end(app: &AppHandle) {
             finished
         }
         Err(err) => {
+            let dir = state.config_dir.clone();
+            let _ = crate::measure::commit(
+                &dir,
+                crate::measure::Finish {
+                    hold_ms: held_ms,
+                    errors: vec![err.clone()],
+                    ..crate::measure::Finish::default()
+                },
+            );
             mark_idle(app);
             fail(app, &err);
             return;
@@ -665,6 +689,10 @@ pub fn end(app: &AppHandle) {
             Err(err) => {
                 let release_ms = err.staged.release_started.elapsed().as_millis() as u64;
                 log_stages(&app, &err.staged, release_ms);
+                let mut finish = debug_finish_from(&err.staged, err.staged.held_ms, release_ms);
+                finish.errors.push(err.message.clone());
+                let dir = app.state::<AppState>().config_dir.clone();
+                let _ = crate::measure::commit(&dir, finish);
                 mark_idle(&app);
                 if err.hint {
                     hint(&app, &err.message);
@@ -1045,7 +1073,9 @@ async fn deliver(app: &AppHandle, mut outcome: Outcome, generation: u64) {
     };
     crate::vocab::set_current(words.clone());
     let corrections = crate::memory::snapshot().corrections;
-    outcome.text = crate::accuracy::polish_text(&outcome.text, &corrections, &words, !verbatim);
+    let pre_polish = outcome.text.clone();
+    let local = crate::accuracy::local_stages(&pre_polish, &corrections, &words, !verbatim);
+    outcome.text = local.grammar.clone();
     if cleanup_on && !verbatim && crate::sense::needs_model(&outcome.text) {
         if let Ok(key) = crate::credentials::SecretKey::load() {
             let using_builtin = key.is_builtin();
@@ -1066,7 +1096,8 @@ async fn deliver(app: &AppHandle, mut outcome: Outcome, generation: u64) {
                 format!("{} | {}", outcome.staged.cleanup_why, sensed.why)
             };
             let corrections = crate::memory::snapshot().corrections;
-            outcome.text = crate::accuracy::polish_text(&sensed.text, &corrections, &words, true);
+            let again = crate::accuracy::local_stages(&sensed.text, &corrections, &words, true);
+            outcome.text = again.grammar;
         }
     }
     crate::memory::update(|memory| crate::memory::note_uses(memory, &outcome.text));
@@ -1091,6 +1122,7 @@ async fn deliver(app: &AppHandle, mut outcome: Outcome, generation: u64) {
         Ok(Err(err)) => {
             log_stages(app, &outcome.staged, release_ms);
             remember(app, &outcome);
+            debug_commit(app, &outcome, &pre_polish, &local, release_ms, None, Some(err.to_string()));
             mark_idle(app);
             fail(
                 app,
@@ -1101,6 +1133,7 @@ async fn deliver(app: &AppHandle, mut outcome: Outcome, generation: u64) {
         Err(err) => {
             log_stages(app, &outcome.staged, release_ms);
             remember(app, &outcome);
+            debug_commit(app, &outcome, &pre_polish, &local, release_ms, None, Some(err.to_string()));
             mark_idle(app);
             fail(
                 app,
@@ -1113,6 +1146,7 @@ async fn deliver(app: &AppHandle, mut outcome: Outcome, generation: u64) {
     // as Typed, including when the field can't be read back.
     let word = insert::status_word(inserted.method, inserted.verified);
     let verified_paste = word == "Inserted";
+    debug_commit(app, &outcome, &pre_polish, &local, release_ms, Some(inserted), None);
     let partial = outcome.note.as_deref() == Some(pipeline::PARTIAL_NOTE);
     if verified_paste && !partial {
         // The take is no longer recovered after a crash. Audio stays only
@@ -1395,6 +1429,53 @@ fn remember(app: &AppHandle, outcome: &Outcome) -> Option<String> {
         log_line(&state.config_dir, "error", &err);
     }
     Some(id)
+}
+
+fn debug_finish_from(staged: &Staged, hold_ms: u64, latency_ms: u64) -> crate::measure::Finish {
+    crate::measure::Finish {
+        hold_ms,
+        latency_ms,
+        encode_ms: staged.encode_ms,
+        remote_ms: staged.groq_ms,
+        cleanup_ms: staged.cleanup_ms,
+        paste_ms: staged.paste_ms,
+        cleanup_why: staged.cleanup_why.clone(),
+        ..crate::measure::Finish::default()
+    }
+}
+
+fn debug_commit(
+    app: &AppHandle,
+    outcome: &Outcome,
+    pre_polish: &str,
+    local: &crate::accuracy::LocalStages,
+    release_ms: u64,
+    inserted: Option<insert::Insertion>,
+    error: Option<String>,
+) {
+    let mut finish = debug_finish_from(&outcome.staged, outcome.duration_ms, release_ms);
+    finish.after_cleanup = Some(pre_polish.to_string());
+    finish.learned = Some(local.learned.clone());
+    finish.grammar = Some(local.grammar.clone());
+    finish.grammar_ran = local.grammar_ran;
+    finish.final_text = outcome.text.clone();
+    if let Some(inserted) = inserted {
+        finish.insert_method = Some(
+            match inserted.method {
+                insert::InsertMethod::Clipboard => "clipboard",
+                insert::InsertMethod::Typed => "typed",
+            }
+            .into(),
+        );
+        finish.insert_verified = Some(inserted.verified);
+    }
+    if let Some(error) = error {
+        finish.errors.push(error);
+    }
+    let dir = app.state::<AppState>().config_dir.clone();
+    if let Err(err) = crate::measure::commit(&dir, finish) {
+        log_line(&dir, "error", &format!("debug capture: {err}"));
+    }
 }
 
 fn fail(app: &AppHandle, message: &str) {

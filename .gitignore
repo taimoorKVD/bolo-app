@@ -48,3 +48,8 @@ backend/dist/
 # Live backend env (example stays tracked)
 backend/.env
 backend/node/.env
+
+# Accuracy captures stay on the PC that recorded them
+accuracy-debug/
+accuracy-script/
+accuracy-out/

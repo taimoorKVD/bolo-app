@@ -7,29 +7,92 @@ use crate::memory::{self, Correction};
 use crate::sense;
 use crate::vocab;
 
+/// Text after the local passes inside `polish_text`, in the order they run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalStages {
+    /// Saved fixes, then My words / seed spellings. Grammar has not run.
+    pub learned: String,
+    /// `grammar::polish` after the local homophone pass. Equals `learned`
+    /// when `homophones` is off (verbatim), because that pass is skipped.
+    pub grammar: String,
+    pub grammar_ran: bool,
+}
+
 /// `homophones` is off for verbatim takes. Names, domains, and saved fixes
 /// still apply: those are spellings, not a rewrite.
-pub fn polish_text(text: &str, corrections: &[Correction], words: &[String], homophones: bool) -> String {
+pub fn local_stages(text: &str, corrections: &[Correction], words: &[String], homophones: bool) -> LocalStages {
     let text = crate::transcribe::recover_brief_tech(text);
     let text = memory::apply_corrections(&text, corrections);
-    let text = vocab::correct(&text, words);
+    let learned = vocab::correct(&text, words);
     if !homophones {
-        return text;
+        return LocalStages {
+            grammar: learned.clone(),
+            grammar_ran: false,
+            learned,
+        };
     }
-    let text = crate::mishear::apply(&text);
+    let text = crate::mishear::apply(&learned);
     let text = sense::local_homophones(&text, words);
-    crate::grammar::polish(&text)
+    let grammar = crate::grammar::polish(&text);
+    LocalStages {
+        learned,
+        grammar,
+        grammar_ran: true,
+    }
+}
+
+pub fn polish_text(text: &str, corrections: &[Correction], words: &[String], homophones: bool) -> String {
+    local_stages(text, corrections, words, homophones).grammar
+}
+
+/// Tokens used by `wer`: lower case, punctuation dropped, `@` and `.` kept.
+pub fn tokens(text: &str) -> Vec<String> {
+    wer_tokens(text)
 }
 
 /// Word error rate. Punctuation is ignored; `@` and `.` stay so an email is
 /// one word. Empty reference and empty hypothesis score 0.
 pub fn wer(reference: &str, hypothesis: &str) -> f64 {
-    let reference = wer_tokens(reference);
-    let hypothesis = wer_tokens(hypothesis);
-    if reference.is_empty() {
-        return if hypothesis.is_empty() { 0.0 } else { 1.0 };
+    score_tokens(&wer_tokens(reference), &wer_tokens(hypothesis)).wer
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WerScore {
+    pub wer: f64,
+    pub edits: usize,
+    pub reference_words: usize,
+    pub hypothesis_words: usize,
+    /// The reference's first word is missing or replaced.
+    pub first_dropped: bool,
+    /// The reference's last word is missing or replaced.
+    pub last_dropped: bool,
+}
+
+pub fn wer_score(reference: &str, hypothesis: &str) -> WerScore {
+    score_tokens(&wer_tokens(reference), &wer_tokens(hypothesis))
+}
+
+fn score_tokens(reference: &[String], hypothesis: &[String]) -> WerScore {
+    let edits = if reference.is_empty() {
+        if hypothesis.is_empty() { 0 } else { hypothesis.len() }
+    } else {
+        edit(reference, hypothesis)
+    };
+    let wer = if reference.is_empty() {
+        if hypothesis.is_empty() { 0.0 } else { 1.0 }
+    } else {
+        edits as f64 / reference.len() as f64
+    };
+    let first_dropped = reference.first().is_some_and(|word| hypothesis.first() != Some(word));
+    let last_dropped = reference.last().is_some_and(|word| hypothesis.last() != Some(word));
+    WerScore {
+        wer,
+        edits,
+        reference_words: reference.len(),
+        hypothesis_words: hypothesis.len(),
+        first_dropped,
+        last_dropped,
     }
-    edit(&reference, &hypothesis) as f64 / reference.len() as f64
 }
 
 fn wer_tokens(text: &str) -> Vec<String> {

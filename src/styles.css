@@ -799,3 +799,9 @@ button.danger { border-color: rgba(225, 90, 74, 0.6); color: #f0a196; }
 .managed-status[data-tone="backup"] { color: rgba(198, 161, 90, 0.8); border-color: rgba(198, 161, 90, 0.25); }
 .managed-status[data-tone="action"] { background: var(--accent, #c6a15a); color: #0b0a08; border-color: transparent; font-weight: 600; }
 
+.accuracy-say {
+  font-size: 1.35rem;
+  line-height: 1.45;
+  margin: 8px 0 4px;
+}
+

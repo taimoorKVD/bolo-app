@@ -223,19 +223,25 @@ fn transcribe_one(index: usize, audio: FinishedAudio, env: &JobEnv) -> Product {
         speech_path: String::new(),
     };
     let encode_started = Instant::now();
-    let encoded = match audio::prepare_speech(&audio) {
-        Ok(encoded) => encoded,
+    let (encoded, processed) = match audio::prepare_speech_parts(&audio) {
+        Ok(parts) => parts,
         Err(SpeechError::Silent | SpeechError::Empty) => {
+            crate::measure::note_audio(index, &audio, &[]);
+            crate::measure::note_chunk_error(index, "silent or empty audio");
             product.silence = true;
             product.encode_ms = encode_started.elapsed().as_millis() as u64;
             return product;
         }
         Err(err) => {
+            crate::measure::note_audio(index, &audio, &[]);
+            crate::measure::note_chunk_error(index, &err.to_string());
             product.encode_ms = encode_started.elapsed().as_millis() as u64;
             product.error = Some(err.to_string());
             return product;
         }
     };
+    crate::measure::note_audio(index, &audio, &processed);
+    drop(processed);
     product.encode_ms = encode_started.elapsed().as_millis() as u64;
     product.bytes = encoded.bytes.len();
     product.format = encoded.format.to_string();
@@ -252,10 +258,17 @@ fn transcribe_one(index: usize, audio: FinishedAudio, env: &JobEnv) -> Product {
             product.text = transcribe::guard_short_take(&recognized.text, encoded.speech_secs);
             product.tries = recognized.tries;
             product.engine = recognized.engine;
-            product.language = recognized.language;
+            product.language = recognized.language.clone();
             product.speech_path = recognized.path;
+            let (calls, raw) = crate::measure::drain_calls();
+            crate::measure::attach_text(index, calls, raw, &recognized.language, &product.text);
         }
-        Err(err) => product.error = Some(err),
+        Err(err) => {
+            let (calls, raw) = crate::measure::drain_calls();
+            crate::measure::attach_text(index, calls, raw, "", "");
+            crate::measure::note_chunk_error(index, &err);
+            product.error = Some(err);
+        }
     }
     product.remote_ms = remote_started.elapsed().as_millis() as u64;
     product
@@ -364,6 +377,7 @@ async fn recognize(bytes: Vec<u8>, env: &JobEnv, minutes: f64, _format: &str, sp
                 match offline::transcribe_encoded(&env.config_dir, &offline_model, &bytes).await {
                     Ok(text) => {
                         log_speech(env, "offline", "transcribe");
+                        crate::measure::note_call("raw", &offline_model, "offline", None, "offline", &text);
                         return Ok(Recognized {
                             text,
                             tries: 1,
@@ -384,6 +398,7 @@ async fn recognize(bytes: Vec<u8>, env: &JobEnv, minutes: f64, _format: &str, sp
             match offline::transcribe_encoded(&env.config_dir, &offline_model, &bytes).await {
                 Ok(text) => {
                     log_speech(env, "offline", "transcribe");
+                    crate::measure::note_call("raw", &offline_model, "offline", None, "offline", &text);
                     Ok(Recognized {
                         text,
                         tries: 1,
@@ -525,6 +540,7 @@ async fn speech_raw(
     if transcribe::direct_translate(output, language) {
         let translated = via.translate_audio(audio, prompt).await?;
         flags.doubtful |= translated.doubtful;
+        crate::measure::note_call("translate", model, language, prompt, &translated.language, &translated.text);
         let code = transcribe::normalize_language(language).unwrap_or_else(|| "unknown".into());
         return Ok(Recognized {
             text: translated.text,
@@ -538,7 +554,8 @@ async fn speech_raw(
     let urdu_set = transcribe::normalize_language(language).as_deref() == Some("ur");
     let first_prompt = if urdu_set { Some(transcribe::URDU_PROMPT.to_string()) } else { prompt.map(str::to_string) };
     crate::diag::note(format!("whisper#1 model={model} lang={language} prompt={:?}", first_prompt));
-    let mut spoken = via.transcribe(audio.clone(), model, language, first_prompt).await?;
+    let mut spoken = via.transcribe(audio.clone(), model, language, first_prompt.clone()).await?;
+    crate::measure::note_call("raw", model, language, first_prompt.as_deref(), &spoken.language, &spoken.text);
     crate::diag::note(format!("whisper#1 detected={} text={}", spoken.language, spoken.text));
     if unlikely_language(language, &spoken.language) {
         // Short or accented English is sometimes detected as Spanish, Welsh,
@@ -553,7 +570,7 @@ async fn speech_raw(
         };
         let pin_prompt = if pin == "ur" { Some(transcribe::URDU_PROMPT.to_string()) } else { prompt.map(str::to_string) };
         crate::diag::note(format!("repin lang={pin} prompt={:?}", pin_prompt));
-        if let Ok(pinned) = via.transcribe(audio.clone(), model, pin, pin_prompt).await {
+        if let Ok(pinned) = via.transcribe(audio.clone(), model, pin, pin_prompt.clone()).await {
             crate::diag::note(format!("repin text={}", pinned.text));
             if keep_repass(&spoken, &pinned) {
                 let tries = spoken.tries.saturating_add(pinned.tries);
@@ -561,6 +578,7 @@ async fn speech_raw(
                 spoken.tries = tries;
                 spoken.language = pin.into();
                 flags.repass = true;
+                crate::measure::note_call("redecode", model, pin, pin_prompt.as_deref(), &spoken.language, &spoken.text);
             }
         }
     }
@@ -582,6 +600,7 @@ async fn speech_raw(
                     spoken.tries = tries;
                     spoken.language = "ur".into();
                     flags.repass = true;
+                    crate::measure::note_call("redecode", model, "ur", Some(transcribe::URDU_PROMPT), &spoken.language, &spoken.text);
                 }
             }
         }
@@ -605,6 +624,7 @@ async fn speech_raw(
         SpeechRoute::Translate => {
             let translated = via.translate_audio(audio, prompt).await?;
             flags.doubtful |= translated.doubtful;
+            crate::measure::note_call("translate", model, language, prompt, &translated.language, &translated.text);
             Ok(Recognized {
                 text: translated.text,
                 tries: spoken.tries.saturating_add(translated.tries),
@@ -618,6 +638,7 @@ async fn speech_raw(
             let outcome = via.translate_text(&spoken.text, cleanup_model).await;
             crate::diag::note(format!("llm translate used={} why={} loop={} output={}", outcome.used_model, outcome.why, transcribe::repetitive(&outcome.text), outcome.text));
             if outcome.used_model && !transcribe::repetitive(&outcome.text) {
+                crate::measure::note_call("translate", cleanup_model, "text", None, &detected, &outcome.text);
                 return Ok(Recognized {
                     text: outcome.text,
                     tries: spoken.tries,
@@ -627,13 +648,16 @@ async fn speech_raw(
                 });
             }
             match via.translate_audio(audio, None).await {
-                Ok(translated) if !transcribe::repetitive(&translated.text) || spoken.text.trim().is_empty() => Ok(Recognized {
-                    text: translated.text,
-                    tries: spoken.tries.saturating_add(translated.tries),
-                    engine: via.engine().into(),
-                    language: source_language(language, &detected),
-                    path: "translate".into(),
-                }),
+                Ok(translated) if !transcribe::repetitive(&translated.text) || spoken.text.trim().is_empty() => {
+                    crate::measure::note_call("translate", model, language, None, &translated.language, &translated.text);
+                    Ok(Recognized {
+                        text: translated.text,
+                        tries: spoken.tries.saturating_add(translated.tries),
+                        engine: via.engine().into(),
+                        language: source_language(language, &detected),
+                        path: "translate".into(),
+                    })
+                }
                 Ok(_) | Err(_) if !spoken.text.trim().is_empty() => Ok(Recognized {
                     text: spoken.text,
                     tries: spoken.tries,

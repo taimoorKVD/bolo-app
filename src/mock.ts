@@ -38,6 +38,7 @@ const settings: Settings = {
   smartHoliday: false,
   keepLearning: true,
   keepRecordings: false,
+  debugCapture: false,
 };
 
 let apiKey: string | null = null;
@@ -326,6 +327,38 @@ export async function mockInvoke<T>(command: string, args?: Record<string, unkno
     case "open_groq_keys":
       window.open("https://console.groq.com/keys", "_blank", "noopener");
       return undefined as T;
+    case "open_debug_folder":
+    case "clear_debug_folder":
+    case "accuracy_record_discard":
+    case "accuracy_open_folder":
+    case "accuracy_clear_folder":
+      return undefined as T;
+    case "accuracy_script":
+      return [
+        {
+          id: "01-bolo",
+          kind: "names",
+          expectedLanguage: "en",
+          cue: "Say this sentence.",
+          say: "Open Bolo and start dictating.",
+        },
+      ] as T;
+    case "accuracy_record_start":
+      return undefined as T;
+    case "accuracy_record_stop":
+      return {
+        deviceName: "Preview mic",
+        sampleRate: 48000,
+        channels: 1,
+        holdMs: 1200,
+        peak: 0.2,
+        clippingPct: 0,
+        silent: false,
+      } as T;
+    case "accuracy_save":
+      return "preview" as T;
+    case "accuracy_saved":
+      return [] as T;
     default:
       throw new Error(`Unknown command ${command}`);
   }
