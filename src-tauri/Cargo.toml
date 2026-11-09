@@ -5,6 +5,8 @@ description = "Bolo push-to-talk voice dictation for Windows"
 authors = ["Bolo"]
 edition = "2021"
 rust-version = "1.85"
+# bolo-score is a second binary. Tauri bundles this one.
+default-run = "bolo"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

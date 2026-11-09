@@ -5,6 +5,7 @@ name: Private test installer
 # or create a GitHub Release.
 #
 # A push that changes this file builds once. Later pushes to main do not.
+# The app binary is Cargo's default-run (bolo), not bolo-score.
 on:
   workflow_dispatch:
   push:
