@@ -19,8 +19,8 @@
 <p align="center"><em>Listening → writing → hide with a soft chime — the in-app overlay.</em></p>
 
 <p align="center">
-  <a href="https://bolo.thebetawebsite.com/downloads/Bolo_0.1.11_x64-setup.exe"><img src="https://img.shields.io/badge/Download-Windows%20x64-0078D6?style=for-the-badge&logo=windows&logoColor=white" alt="Download for Windows" /></a>
-  <img src="https://img.shields.io/badge/version-0.1.11-C9A227?style=for-the-badge&labelColor=100F0C&color=C9A227" alt="Version 0.1.11" />
+  <a href="https://bolo.thebetawebsite.com/downloads/Bolo_0.1.12_x64-setup.exe"><img src="https://img.shields.io/badge/Download-Windows%20x64-0078D6?style=for-the-badge&logo=windows&logoColor=white" alt="Download for Windows" /></a>
+  <img src="https://img.shields.io/badge/version-0.1.12-C9A227?style=for-the-badge&labelColor=100F0C&color=C9A227" alt="Version 0.1.12" />
   <img src="https://img.shields.io/badge/Windows-10%20%7C%2011-0A66C2?style=for-the-badge&logo=windows&logoColor=white" alt="Windows 10 or 11" />
   <a href="https://bolo.thebetawebsite.com"><img src="https://img.shields.io/badge/Live%20site-bolo.thebetawebsite.com-F4EFE6?style=for-the-badge&labelColor=100F0C" alt="Live site" /></a>
 </p>
@@ -39,15 +39,15 @@ Bolo is push-to-talk dictation for Windows. Hold a global hotkey in any app, spe
 | --- | --- |
 | **Live site** | [bolo.thebetawebsite.com](https://bolo.thebetawebsite.com) |
 | **Microsoft Store** | [Bolo](https://apps.microsoft.com/detail/9nmw6c99bf04) |
-| **Download** | [Bolo 0.1.11 for Windows](https://bolo.thebetawebsite.com/downloads/Bolo_0.1.11_x64-setup.exe) |
+| **Download** | [Bolo 0.1.12 for Windows](https://bolo.thebetawebsite.com/downloads/Bolo_0.1.12_x64-setup.exe) |
 
 <p align="center">
-  <a href="https://bolo.thebetawebsite.com/downloads/Bolo_0.1.11_x64-setup.exe">
+  <a href="https://bolo.thebetawebsite.com/downloads/Bolo_0.1.12_x64-setup.exe">
     <img src="src-tauri/icons/icon.png" alt="Bolo app icon" width="128" />
   </a>
 </p>
 
-<p align="center"><b><a href="https://bolo.thebetawebsite.com/downloads/Bolo_0.1.11_x64-setup.exe">Download Bolo for Windows</a></b></p>
+<p align="center"><b><a href="https://bolo.thebetawebsite.com/downloads/Bolo_0.1.12_x64-setup.exe">Download Bolo for Windows</a></b></p>
 
 ### At a glance
 
