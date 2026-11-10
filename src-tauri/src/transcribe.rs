@@ -184,6 +184,10 @@ pub fn whisper_prompt(words: &[String]) -> Option<String> {
 /// get an Urdu-script prompt instead.
 pub(crate) const URDU_PROMPT: &str = "یہ اردو میں بولی گئی بات ہے۔ بہتری، بہتر، ایپلیکیشن، اینیمیشن، بیک گراؤنڈ، ویب سائٹ، ڈیزائن۔";
 
+/// Hindi takes that the user asked to keep use a Devanagari prompt. An English
+/// or Urdu prompt pulls the same speech into Latin or Nastaliq.
+pub(crate) const HINDI_PROMPT: &str = "यह हिंदी में कही गई बात है। आज। कल। ठीक है।";
+
 /// Under this trimmed length, a vocabulary prompt and the previous take are
 /// more influential than the audio. Whisper then starts the paste with a
 /// prompt word ("Bolo and Easy…") or continues the last sentence.
@@ -1181,6 +1185,10 @@ pub(crate) fn latin_only(text: &str) -> bool {
     }
     let other = text.chars().filter(|c| c.is_alphabetic() && !c.is_ascii()).count();
     other == 0 || latin > other.saturating_mul(3)
+}
+
+pub(crate) fn has_devanagari(text: &str) -> bool {
+    text.chars().any(|c| ('\u{0900}'..='\u{097F}').contains(&c))
 }
 
 pub(crate) fn has_arabic(text: &str) -> bool {

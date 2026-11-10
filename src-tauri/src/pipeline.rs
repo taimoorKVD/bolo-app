@@ -12,6 +12,7 @@ use crate::store::Settings;
 use crate::cleanup;
 use crate::logbuf::log_line;
 use crate::transcribe::{self, FailKind, SpeechRoute};
+use std::path::Path;
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -374,7 +375,7 @@ async fn recognize(bytes: Vec<u8>, env: &JobEnv, minutes: f64, _format: &str, sp
             let offline_ok = offline::normalize_model(&offline_model) != "off"
                 && (force_offline || saw_outage || should_fallback(&err));
             if offline_ok {
-                match offline::transcribe_encoded(&env.config_dir, &offline_model, &bytes).await {
+                match on_device_text(&env.config_dir, &offline_model, &language, &bytes).await {
                     Ok(text) => {
                         log_speech(env, "offline", "transcribe");
                         crate::measure::note_call("raw", &offline_model, "offline", None, "offline", &text);
@@ -386,7 +387,7 @@ async fn recognize(bytes: Vec<u8>, env: &JobEnv, minutes: f64, _format: &str, sp
                             path: "transcribe".into(),
                         });
                     }
-                    Err(local) => return Err(format!("{err} {local}")),
+                    Err(local) => return Err(offline_error(&err.to_string(), local)),
                 }
             }
             Err(err.to_string())
@@ -395,7 +396,7 @@ async fn recognize(bytes: Vec<u8>, env: &JobEnv, minutes: f64, _format: &str, sp
             if offline::normalize_model(&offline_model) == "off" {
                 return Err(err.to_string());
             }
-            match offline::transcribe_encoded(&env.config_dir, &offline_model, &bytes).await {
+            match on_device_text(&env.config_dir, &offline_model, &language, &bytes).await {
                 Ok(text) => {
                     log_speech(env, "offline", "transcribe");
                     crate::measure::note_call("raw", &offline_model, "offline", None, "offline", &text);
@@ -407,7 +408,7 @@ async fn recognize(bytes: Vec<u8>, env: &JobEnv, minutes: f64, _format: &str, sp
                         path: "transcribe".into(),
                     })
                 }
-                Err(local) => Err(format!("{err} {local}")),
+                Err(local) => Err(offline_error(&err.to_string(), local)),
             }
         }
     }
@@ -552,7 +553,14 @@ async fn speech_raw(
     }
     let model = effective_model(model, language);
     let urdu_set = transcribe::normalize_language(language).as_deref() == Some("ur");
-    let first_prompt = if urdu_set { Some(transcribe::URDU_PROMPT.to_string()) } else { prompt.map(str::to_string) };
+    let hindi_set = keep_hindi_script(language, output);
+    let first_prompt = if urdu_set {
+        Some(transcribe::URDU_PROMPT.to_string())
+    } else if hindi_set {
+        Some(transcribe::HINDI_PROMPT.to_string())
+    } else {
+        prompt.map(str::to_string)
+    };
     crate::diag::note(format!("whisper#1 model={model} lang={language} prompt={:?}", first_prompt));
     let mut spoken = via.transcribe(audio.clone(), model, language, first_prompt.clone()).await?;
     crate::measure::note_call("raw", model, language, first_prompt.as_deref(), &spoken.language, &spoken.text);
@@ -564,11 +572,19 @@ async fn speech_raw(
         // Urdu is often detected as Hindi and written in Devanagari, which an
         // Urdu speaker can't use. Pin Urdu for that case, English otherwise.
         let pin = if hindi_like(&spoken.language, &spoken.text) && !transcribe::latin_only(&spoken.text) {
-            "ur"
+            // Only an explicit Hindi + "same language" setting keeps Devanagari.
+            // Auto and Urdu still pin Urdu: Whisper often writes Urdu in Devanagari.
+            if keep_hindi_script(language, output) { "hi" } else { "ur" }
         } else {
             "en"
         };
-        let pin_prompt = if pin == "ur" { Some(transcribe::URDU_PROMPT.to_string()) } else { prompt.map(str::to_string) };
+        let pin_prompt = if pin == "ur" {
+            Some(transcribe::URDU_PROMPT.to_string())
+        } else if pin == "hi" {
+            Some(transcribe::HINDI_PROMPT.to_string())
+        } else {
+            prompt.map(str::to_string)
+        };
         crate::diag::note(format!("repin lang={pin} prompt={:?}", pin_prompt));
         if let Ok(pinned) = via.transcribe(audio.clone(), model, pin, pin_prompt.clone()).await {
             crate::diag::note(format!("repin text={}", pinned.text));
@@ -604,6 +620,28 @@ async fn speech_raw(
                 }
             }
         }
+    }
+    if keep_hindi_script(language, output)
+        && transcribe::has_arabic(&spoken.text)
+        && !transcribe::has_devanagari(&spoken.text)
+        && !flags.repass
+    {
+        // The user asked for Hindi, and the first pass came back in Urdu script.
+        crate::diag::note("hindi script pass (setting is Hindi; redo without the Urdu prompt)");
+        if let Ok(pinned) = via.transcribe(audio.clone(), model, "hi", Some(transcribe::HINDI_PROMPT.to_string())).await {
+            crate::diag::note(format!("hindi script pass text={}", pinned.text));
+            if transcribe::has_devanagari(&pinned.text) && keep_repass(&spoken, &pinned) {
+                let tries = spoken.tries.saturating_add(pinned.tries);
+                spoken = pinned;
+                spoken.tries = tries;
+                spoken.language = "hi".into();
+                flags.repass = true;
+                crate::measure::note_call("redecode", model, "hi", Some(transcribe::HINDI_PROMPT), &spoken.language, &spoken.text);
+            }
+        }
+    }
+    if keep_hindi_script(language, output) && transcribe::has_devanagari(&spoken.text) {
+        spoken.language = "hi".into();
     }
     flags.doubtful |= spoken.doubtful;
     let detected = spoken.language.clone();
@@ -730,7 +768,16 @@ pub(crate) fn unlikely_language(setting: &str, detected: &str) -> bool {
 }
 
 fn hindi_like(detected: &str, text: &str) -> bool {
-    transcribe::language_code(detected) == "hi" || text.chars().any(|c| ('\u{0900}'..='\u{097F}').contains(&c))
+    transcribe::language_code(detected) == "hi" || transcribe::has_devanagari(text)
+}
+
+/// Devanagari is kept only when the user set "I speak" to Hindi and "Write my
+/// words in" to the language they spoke. Auto and Urdu keep the Urdu repin,
+/// because Whisper often writes Urdu speech in Devanagari. English output
+/// still translates, so Hindi is not pasted when the user asked for English.
+pub(crate) fn keep_hindi_script(setting: &str, output: &str) -> bool {
+    transcribe::normalize_output(output) == "same"
+        && transcribe::normalize_language(setting).as_deref() == Some("hi")
 }
 
 fn source_language(setting: &str, detected: &str) -> String {
@@ -748,6 +795,19 @@ fn log_speech(env: &JobEnv, language: &str, path: &str) {
         "info",
         &format!("speech language={language} path={path}"),
     );
+}
+
+async fn on_device_text(config: &Path, selected: &str, language: &str, bytes: &[u8]) -> Result<String, String> {
+    let model = offline::resolve_fallback(config, selected, language)?;
+    offline::transcribe_encoded(config, model, language, bytes).await
+}
+
+fn offline_error(groq: &str, local: String) -> String {
+    if offline::is_multilingual_notice(&local) {
+        local
+    } else {
+        format!("{groq} {local}")
+    }
 }
 
 fn should_fallback(err: &anyhow::Error) -> bool {
@@ -784,6 +844,14 @@ mod tests {
             "latin English tagged Urdu stays English"
         );
         assert!(!transcribe::URDU_PROMPT.chars().any(|c| c.is_ascii_alphabetic()));
+        assert!(!transcribe::HINDI_PROMPT.chars().any(|c| c.is_ascii_alphabetic()));
+        assert!(transcribe::has_devanagari(transcribe::HINDI_PROMPT));
+        assert!(!transcribe::has_arabic(transcribe::HINDI_PROMPT));
+        assert!(keep_hindi_script("hi", "same"));
+        assert!(keep_hindi_script("HI", "Same"));
+        assert!(!keep_hindi_script("hi", "english"), "English output still translates");
+        assert!(!keep_hindi_script("auto", "same"), "auto keeps the Urdu repin");
+        assert!(!keep_hindi_script("ur", "same"));
         let sure = transcribe::Transcript { text: "send the invoice".into(), tries: 1, language: "en".into(), doubtful: false };
         let worse = transcribe::Transcript { text: "send the invoice tomorrow somehow".into(), tries: 1, language: "en".into(), doubtful: true };
         let better = transcribe::Transcript { text: "send the invoice today".into(), tries: 1, language: "en".into(), doubtful: false };
@@ -796,6 +864,7 @@ mod tests {
         use crate::transcribe::{WHISPER_LARGE, WHISPER_TURBO};
         assert_eq!(super::effective_model(WHISPER_TURBO, "auto"), WHISPER_LARGE);
         assert_eq!(super::effective_model(WHISPER_TURBO, "ur"), WHISPER_LARGE);
+        assert_eq!(super::effective_model(WHISPER_TURBO, "hi"), WHISPER_LARGE);
         assert_eq!(super::effective_model(WHISPER_TURBO, "en"), WHISPER_TURBO);
         assert_eq!(super::effective_model(WHISPER_LARGE, "en"), WHISPER_LARGE);
     }
@@ -1024,6 +1093,54 @@ mod via_tests {
         assert_eq!(calls[1].1, "ur");
         assert_eq!(calls[1].2.as_deref(), Some(transcribe::URDU_PROMPT));
         assert_eq!(got.text, "یہ اردو ہے");
+    }
+
+    #[test]
+    fn hindi_setting_keeps_devanagari_when_output_is_the_spoken_language() {
+        let fake = FakeVia::new(&[("आज मौसम अच्छा है", "hi")], None);
+        let got = run(&fake, "hi", "same", Some("Bolo"));
+        let calls = fake.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1, "no Urdu repin: {calls:?}");
+        assert_eq!(calls[0].1, "hi");
+        assert_eq!(calls[0].2.as_deref(), Some(transcribe::HINDI_PROMPT));
+        assert_ne!(calls[0].2.as_deref(), Some(transcribe::URDU_PROMPT));
+        assert!(calls[0].0.contains(transcribe::WHISPER_LARGE));
+        assert_eq!(got.text, "आज मौसम अच्छा है");
+        assert_eq!(got.language, "hi");
+        assert_eq!(got.path, "transcribe");
+    }
+
+    #[test]
+    fn hindi_setting_redoes_urdu_script_into_devanagari() {
+        let fake = FakeVia::new(&[("آج موسم اچھا ہے", "ur"), ("आज मौसम अच्छा है", "hi")], None);
+        let got = run(&fake, "hi", "same", None);
+        let calls = fake.calls.lock().unwrap();
+        assert_eq!(calls.len(), 2, "{calls:?}");
+        assert_eq!(calls[1].1, "hi");
+        assert_eq!(calls[1].2.as_deref(), Some(transcribe::HINDI_PROMPT));
+        assert_eq!(got.text, "आज मौसम अच्छा है");
+        assert_eq!(got.language, "hi");
+        assert!(got.path.ends_with("-repass"));
+    }
+
+    #[test]
+    fn hindi_with_english_output_still_translates() {
+        let fake = FakeVia::new(&[("आज मौसम अच्छा है", "hi")], None);
+        let got = run(&fake, "hi", "english", Some("Bolo"));
+        let calls = fake.calls.lock().unwrap();
+        assert!(calls.iter().all(|call| call.0 == "translate"), "{calls:?}");
+        assert_eq!(got.text, "translated audio");
+        assert_eq!(got.path, "translate");
+    }
+
+    #[test]
+    fn pinned_urdu_still_uses_the_urdu_prompt_not_hindi() {
+        let fake = FakeVia::new(&[("سلام", "ur")], None);
+        let got = run(&fake, "ur", "same", Some("vocab"));
+        let calls = fake.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        assert_eq!(calls[0].2.as_deref(), Some(transcribe::URDU_PROMPT));
+        assert_eq!(got.text, "سلام");
     }
 
     #[test]

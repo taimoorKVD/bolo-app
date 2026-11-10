@@ -35,7 +35,8 @@ pub struct Settings {
     /// Inserts the previous transcript again. Missing files keep Ctrl+Win+V.
     #[serde(default = "paste_again_hotkey")]
     pub paste_hotkey: Hotkey,
-    /// `base.en`, `small.en`, or `off`. Missing files download base.en on demand.
+    /// `base.en`, `small.en`, multilingual `ggml-base` / `ggml-small`, or `off`.
+    /// Missing files download base.en on demand.
     #[serde(default = "default_offline_model")]
     pub offline_model: String,
     /// `english` translates into English. `same` keeps the spoken language.
@@ -247,7 +248,7 @@ pub fn validate_settings(settings: &Settings) -> Result<(), String> {
         return Err("The paste-again shortcut must differ from the dictation shortcut.".into());
     }
     if !offline::is_known_model(&settings.offline_model) {
-        return Err("Choose base.en, small.en, or off for the on-device model.".into());
+        return Err("Choose base.en, small.en, ggml-base, ggml-small, or off for the on-device model.".into());
     }
     match settings.output.as_str() {
         "english" | "same" => {}

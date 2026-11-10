@@ -5,6 +5,7 @@
 //! and the Windows whisper.cpp build download on first use into the config
 //! directory. Tests never download.
 
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
@@ -12,11 +13,63 @@ use std::time::Duration;
 
 const RELEASE: &str = "v1.8.2";
 
+/// Shown instead of running an English-only model on Urdu, Hindi, or mixed speech.
+pub const URDU_OFFLINE_NOTICE: &str =
+    "Urdu needs the online speech service, or download the multilingual offline model.";
+
+struct ModelSpec {
+    id: &'static str,
+    file: &'static str,
+    url: &'static str,
+    sha256: &'static str,
+    bytes: u64,
+    multilingual: bool,
+}
+
+/// Hugging Face `lfs.oid` sha256 and byte size for ggerganov/whisper.cpp.
+/// `base` and `small` stay aliases of the English models so older saves do not switch.
+const MODELS: &[ModelSpec] = &[
+    ModelSpec {
+        id: "base.en",
+        file: "ggml-base.en.bin",
+        url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin",
+        sha256: "a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdfb897afe36c6d002",
+        bytes: 147_964_211,
+        multilingual: false,
+    },
+    ModelSpec {
+        id: "small.en",
+        file: "ggml-small.en.bin",
+        url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en.bin",
+        sha256: "c6138d6d58ecc8322097e0f987c32f1be8bb0a18532a3f88f734d1bbf9c41e5d",
+        bytes: 487_614_201,
+        multilingual: false,
+    },
+    ModelSpec {
+        id: "ggml-base",
+        file: "ggml-base.bin",
+        url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin",
+        sha256: "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe",
+        bytes: 147_951_465,
+        multilingual: true,
+    },
+    ModelSpec {
+        id: "ggml-small",
+        file: "ggml-small.bin",
+        url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin",
+        sha256: "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b",
+        bytes: 487_601_967,
+        multilingual: true,
+    },
+];
+
 pub fn normalize_model(value: &str) -> &'static str {
     match value.trim().to_ascii_lowercase().as_str() {
         "off" | "none" | "groq" => "off",
-        "small" | "small.en" | "ggml-small.en" => "small.en",
-        "base" | "base.en" | "ggml-base.en" => "base.en",
+        "small" | "small.en" | "ggml-small.en" | "ggml-small.en.bin" => "small.en",
+        "base" | "base.en" | "ggml-base.en" | "ggml-base.en.bin" => "base.en",
+        "ggml-base" | "base.multi" | "multi-base" | "ggml-base.bin" => "ggml-base",
+        "ggml-small" | "small.multi" | "multi-small" | "ggml-small.bin" => "ggml-small",
         _ => "base.en",
     }
 }
@@ -24,9 +77,14 @@ pub fn normalize_model(value: &str) -> &'static str {
 /// True only for values Bolo actually offers, so a bad save is refused
 /// instead of being silently turned into base.en.
 pub fn is_known_model(value: &str) -> bool {
+    let value = value.trim().to_ascii_lowercase();
     matches!(
-        value.trim().to_ascii_lowercase().as_str(),
-        "off" | "none" | "groq" | "small" | "small.en" | "ggml-small.en" | "base" | "base.en" | "ggml-base.en"
+        value.as_str(),
+        "off" | "none" | "groq"
+            | "small" | "small.en" | "ggml-small.en" | "ggml-small.en.bin"
+            | "base" | "base.en" | "ggml-base.en" | "ggml-base.en.bin"
+            | "ggml-base" | "base.multi" | "multi-base" | "ggml-base.bin"
+            | "ggml-small" | "small.multi" | "multi-small" | "ggml-small.bin"
     )
 }
 
@@ -34,16 +92,97 @@ pub fn model_label(model: &str) -> &'static str {
     match normalize_model(model) {
         "off" => "Off",
         "small.en" => "whisper.cpp small.en",
+        "ggml-base" => "whisper.cpp ggml-base",
+        "ggml-small" => "whisper.cpp ggml-small",
         _ => "whisper.cpp base.en",
     }
 }
 
-fn model_url(model: &str) -> Option<&'static str> {
-    match normalize_model(model) {
-        "base.en" => Some("https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin"),
-        "small.en" => Some("https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en.bin"),
-        _ => None,
+pub fn is_english_only(model: &str) -> bool {
+    matches!(normalize_model(model), "base.en" | "small.en")
+}
+
+pub fn is_multilingual_notice(message: &str) -> bool {
+    message == URDU_OFFLINE_NOTICE
+}
+
+/// Auto is the mixed Urdu/English setting. English-only users pin `en`.
+pub fn language_needs_multilingual(language: &str) -> bool {
+    matches!(
+        language.trim().to_ascii_lowercase().as_str(),
+        "ur" | "hi" | "auto" | "mixed"
+    )
+}
+
+fn model_spec(model: &str) -> Option<&'static ModelSpec> {
+    let id = normalize_model(model);
+    MODELS.iter().find(|spec| spec.id == id)
+}
+
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes).iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+pub fn verify_download(model: &str, bytes: &[u8]) -> Result<(), String> {
+    let spec = model_spec(model).ok_or_else(|| "Unknown on-device model.".to_string())?;
+    let got = sha256_hex(bytes);
+    if got != spec.sha256 {
+        return Err(format!(
+            "The {} download didn't match its hash, so it was not saved.",
+            spec.file
+        ));
     }
+    Ok(())
+}
+
+/// English-only models are not used for Urdu, Hindi, or mixed speech.
+/// A multilingual file already on disk is used instead. Otherwise the caller
+/// shows [`URDU_OFFLINE_NOTICE`] and does not run the English model.
+pub fn resolve_fallback(config: &Path, selected: &str, language: &str) -> Result<&'static str, String> {
+    let selected = normalize_model(selected);
+    if selected == "off" {
+        return Err("On-device transcription is turned off in Settings.".into());
+    }
+    if !language_needs_multilingual(language) || !is_english_only(selected) {
+        return Ok(selected);
+    }
+    if model_present(config, "ggml-small") {
+        return Ok("ggml-small");
+    }
+    if model_present(config, "ggml-base") {
+        return Ok("ggml-base");
+    }
+    Err(URDU_OFFLINE_NOTICE.into())
+}
+
+/// whisper.cpp language flag. English-only models are not pinned to Urdu or Hindi.
+/// Auto and mixed stay unpinned so one sentence can contain both languages.
+pub fn cli_language_args(model: &str, language: &str) -> Vec<&'static str> {
+    let Some(spec) = model_spec(model) else {
+        return Vec::new();
+    };
+    if !spec.multilingual {
+        return Vec::new();
+    }
+    match language.trim().to_ascii_lowercase().as_str() {
+        "ur" => vec!["-l", "ur"],
+        "hi" => vec!["-l", "hi"],
+        "en" => vec!["-l", "en"],
+        _ => Vec::new(),
+    }
+}
+
+fn rounded_mb(bytes: u64) -> u64 {
+    (bytes + 500_000) / 1_000_000
+}
+
+pub fn multilingual_choice_label(model: &str) -> Option<String> {
+    let spec = model_spec(model)?;
+    if !spec.multilingual {
+        return None;
+    }
+    let name = spec.file.trim_end_matches(".bin");
+    Some(format!("{name} — multilingual, {} MB", rounded_mb(spec.bytes)))
 }
 
 fn whisper_dir(config: &Path) -> PathBuf {
@@ -51,7 +190,12 @@ fn whisper_dir(config: &Path) -> PathBuf {
 }
 
 fn model_path(config: &Path, model: &str) -> PathBuf {
-    whisper_dir(config).join(format!("ggml-{}.bin", normalize_model(model)))
+    let file = model_spec(model).map(|spec| spec.file).unwrap_or("ggml-base.en.bin");
+    whisper_dir(config).join(file)
+}
+
+fn model_present(config: &Path, model: &str) -> bool {
+    model_path(config, model).is_file()
 }
 
 /// Start a background download when the selected model or binary is missing.
@@ -77,9 +221,7 @@ pub async fn ensure_assets(config: &Path, model: &str) -> Result<(), String> {
     fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
     let model_file = model_path(config, model);
     if !model_file.exists() {
-        if let Some(url) = model_url(model) {
-            download_file(url, &model_file).await?;
-        }
+        download_model(model, &model_file).await?;
     }
     if find_binary(&dir).is_none() && std::env::var("BOLO_WHISPER_BIN").is_err() {
         download_binary(&dir).await?;
@@ -87,7 +229,7 @@ pub async fn ensure_assets(config: &Path, model: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub async fn transcribe_encoded(config: &Path, model: &str, bytes: &[u8]) -> Result<String, String> {
+pub async fn transcribe_encoded(config: &Path, model: &str, language: &str, bytes: &[u8]) -> Result<String, String> {
     let model = normalize_model(model);
     if model == "off" {
         return Err("On-device transcription is turned off in Settings.".into());
@@ -123,7 +265,7 @@ pub async fn transcribe_encoded(config: &Path, model: &str, bytes: &[u8]) -> Res
             .unwrap_or(0)
     ));
     fs::write(&temp, bytes).map_err(|err| format!("couldn't store the chunk: {err}"))?;
-    let result = run_cli(&binary, &model_file, &temp);
+    let result = run_cli(&binary, &model_file, &temp, &cli_language_args(model, language));
     let _ = fs::remove_file(&temp);
     result
 }
@@ -165,15 +307,20 @@ fn find_binary(dir: &Path) -> Option<PathBuf> {
     None
 }
 
-fn run_cli(binary: &Path, model: &Path, audio: &Path) -> Result<String, String> {
-    let output = std::process::Command::new(binary)
+fn run_cli(binary: &Path, model: &Path, audio: &Path, language_args: &[&str]) -> Result<String, String> {
+    let mut command = std::process::Command::new(binary);
+    command
         .arg("-m")
         .arg(model)
         .arg("-f")
         .arg(audio)
         .arg("-nt")
         .arg("--no-prints")
-        .arg("-np")
+        .arg("-np");
+    for arg in language_args {
+        command.arg(arg);
+    }
+    let output = command
         .output()
         .map_err(|err| format!("couldn't start whisper.cpp ({err})"))?;
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -256,8 +403,10 @@ async fn download_binary(dir: &Path) -> Result<(), String> {
     extract_zip(&bytes, dir)
 }
 
-async fn download_file(url: &str, dest: &Path) -> Result<(), String> {
-    let bytes = fetch(url).await?;
+async fn download_model(model: &str, dest: &Path) -> Result<(), String> {
+    let spec = model_spec(model).ok_or_else(|| format!("No download for {model}."))?;
+    let bytes = fetch(spec.url).await?;
+    verify_download(model, &bytes)?;
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent).map_err(|err| err.to_string())?;
     }
@@ -322,8 +471,65 @@ whisper_init_from_file_with_params_no_state: loading model\n\
 whisper_print_timings: load time = 10 ms\n";
         assert_eq!(parse_whisper_output(raw), "ship the notes");
         assert_eq!(normalize_model("small"), "small.en");
+        assert_eq!(normalize_model("base"), "base.en");
         assert_eq!(normalize_model("off"), "off");
         assert_eq!(normalize_model(""), "base.en");
+        assert_eq!(normalize_model("ggml-base"), "ggml-base");
+        assert_eq!(normalize_model("ggml-small.bin"), "ggml-small");
+        assert!(is_known_model("ggml-base"));
+        assert!(is_known_model("ggml-small"));
+        assert!(!is_known_model("ggml-tiny"));
         assert_eq!(model_label("base.en"), "whisper.cpp base.en");
+        assert_eq!(model_label("ggml-base"), "whisper.cpp ggml-base");
+        assert_eq!(sha256_hex(b"abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    }
+
+    #[test]
+    fn multilingual_models_are_pinned_to_the_published_hash_and_size() {
+        let base = model_spec("ggml-base").unwrap();
+        assert_eq!(base.file, "ggml-base.bin");
+        assert!(base.multilingual);
+        assert_eq!(base.bytes, 147_951_465);
+        assert_eq!(base.sha256, "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe");
+        assert_eq!(multilingual_choice_label("ggml-base").as_deref(), Some("ggml-base — multilingual, 148 MB"));
+        let small = model_spec("ggml-small").unwrap();
+        assert_eq!(small.file, "ggml-small.bin");
+        assert_eq!(small.bytes, 487_601_967);
+        assert_eq!(small.sha256, "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b");
+        assert_eq!(multilingual_choice_label("ggml-small").as_deref(), Some("ggml-small — multilingual, 488 MB"));
+        let english = model_spec("base.en").unwrap();
+        assert!(!english.multilingual);
+        assert_eq!(english.bytes, 147_964_211);
+        assert_eq!(english.sha256, "a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdfb897afe36c6d002");
+        let err = verify_download("ggml-base", b"not the model").unwrap_err();
+        assert!(err.contains("didn't match its hash"), "{err}");
+        assert!(err.contains("ggml-base.bin"), "{err}");
+    }
+
+    #[test]
+    fn urdu_hindi_and_mixed_do_not_silently_use_an_english_model() {
+        let dir = std::env::temp_dir().join(format!("bolo-offline-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        for language in ["ur", "hi", "auto", "mixed"] {
+            let err = resolve_fallback(&dir, "base.en", language).unwrap_err();
+            assert_eq!(err, URDU_OFFLINE_NOTICE, "{language}");
+            assert!(is_multilingual_notice(&err));
+        }
+        assert_eq!(resolve_fallback(&dir, "base.en", "en").unwrap(), "base.en");
+        assert_eq!(resolve_fallback(&dir, "small.en", "en").unwrap(), "small.en");
+        assert_eq!(resolve_fallback(&dir, "ggml-base", "ur").unwrap(), "ggml-base");
+        assert!(cli_language_args("base.en", "ur").is_empty());
+        assert_eq!(cli_language_args("ggml-base", "ur"), vec!["-l", "ur"]);
+        assert_eq!(cli_language_args("ggml-small", "hi"), vec!["-l", "hi"]);
+        assert!(cli_language_args("ggml-base", "auto").is_empty());
+        assert!(cli_language_args("ggml-base", "mixed").is_empty());
+        fs::create_dir_all(dir.join("whisper")).unwrap();
+        fs::write(dir.join("whisper").join("ggml-base.bin"), b"present").unwrap();
+        assert_eq!(resolve_fallback(&dir, "small.en", "ur").unwrap(), "ggml-base");
+        fs::write(dir.join("whisper").join("ggml-small.bin"), b"present").unwrap();
+        assert_eq!(resolve_fallback(&dir, "base.en", "hi").unwrap(), "ggml-small");
+        assert_eq!(resolve_fallback(&dir, "ggml-base", "ur").unwrap(), "ggml-base");
+        let _ = fs::remove_dir_all(&dir);
     }
 }

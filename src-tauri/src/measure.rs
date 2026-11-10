@@ -178,6 +178,8 @@ pub struct ScriptLine {
     pub id: &'static str,
     pub kind: &'static str,
     pub expected_language: &'static str,
+    /// `en`, `ur`, `mixed`, or `hi`. The original 30 use the same value as `expected_language`.
+    pub bucket: &'static str,
     pub cue: &'static str,
     pub say: &'static str,
 }
@@ -215,6 +217,9 @@ pub struct ItemReport {
     pub id: String,
     pub kind: String,
     pub reference: Option<String>,
+    /// `en`, `ur`, `mixed`, `hi`, or `other` when the take has no language tag.
+    #[serde(default)]
+    pub bucket: String,
     pub detected_language: String,
     pub expected_language: Option<String>,
     pub language_mistag: bool,
@@ -230,10 +235,24 @@ pub struct ItemReport {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct BucketScore {
+    pub bucket: String,
+    pub items: usize,
+    pub scored: usize,
+    pub mean_wer: Option<f64>,
+    pub first_word_drops: usize,
+    pub last_word_drops: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Report {
     pub mode: String,
     pub items: Vec<ItemReport>,
     pub mean_wer_final: Option<f64>,
+    /// Mean final WER and edge drops for `en`, `ur`, `mixed`, and `hi`.
+    #[serde(default)]
+    pub buckets: Vec<BucketScore>,
     pub first_word_drops: usize,
     pub last_word_drops: usize,
     pub truncations: usize,
@@ -710,6 +729,20 @@ pub fn script() -> &'static [ScriptLine] {
     SCRIPT
 }
 
+/// `original` is the frozen 30-line English set. `languages` is the Urdu,
+/// mixed, Hindi, and English-edge set. Unknown names stay on the original
+/// so older callers keep the comparable set.
+pub fn script_set(set: Option<&str>) -> &'static [ScriptLine] {
+    match set.unwrap_or("original").trim().to_ascii_lowercase().as_str() {
+        "languages" | "language" | "south-asia" | "urdu" => SCRIPT_LANGUAGES,
+        _ => SCRIPT,
+    }
+}
+
+fn find_script_line(id: &str) -> Option<&'static ScriptLine> {
+    SCRIPT.iter().chain(SCRIPT_LANGUAGES.iter()).find(|line| line.id == id)
+}
+
 const SCRIPT: &[ScriptLine] = &[
     line("01-bolo", "names", "en", "Say this sentence.", "Open Bolo and start dictating."),
     line("02-taimoor", "names", "en", "Say the domain as one address.", "Send it to taimoorhussain.com."),
@@ -760,10 +793,47 @@ const fn line(
         id,
         kind,
         expected_language,
+        bucket: expected_language,
         cue,
         say,
     }
 }
+
+/// Second set. The original [`SCRIPT`] is not edited, so old recordings stay comparable.
+const SCRIPT_LANGUAGES: &[ScriptLine] = &[
+    line("sa-01-weather", "urdu", "ur", "Everyday Urdu.", "آج موسم بہت اچھا ہے۔"),
+    line("sa-02-door", "urdu", "ur", "", "براہ کرم دروازہ بند کر دیں۔"),
+    line("sa-03-evening", "urdu", "ur", "", "میں شام کو گھر پہنچ جاؤں گا۔"),
+    line("sa-04-food", "urdu", "ur", "", "کھانا تیار ہے، میز پر آ جاؤ۔"),
+    line("sa-05-phone", "urdu", "ur", "", "کیا آپ نے امی کو فون کیا؟"),
+    line("sa-06-leave", "urdu", "ur", "", "مجھے کل چھٹی چاہیے۔"),
+    line("sa-07-road", "urdu", "ur", "", "یہ راستہ بازار کی طرف جاتا ہے۔"),
+    line("sa-08-park", "urdu", "ur", "", "بچے پارک میں کھیل رہے ہیں۔"),
+    line("sa-09-water", "urdu", "ur", "", "پانی کا گلاس میز پر رکھ دو۔"),
+    line("sa-10-sleep", "urdu", "ur", "", "رات کو جلدی سو جانا بہتر ہے۔"),
+    line("sa-11-zoom", "mixed", "mixed", "Urdu with the English words you would type.", "آج کی meeting تین بجے Zoom پر ہے۔"),
+    line("sa-12-report", "mixed", "mixed", "", "براہ کرم report شام تک email کر دیں۔"),
+    line("sa-13-server", "mixed", "mixed", "", "Server بند ہے، IT والوں کو call کریں۔"),
+    line("sa-14-office", "mixed", "mixed", "", "میں office سے نکل رہا ہوں، WhatsApp پر بتاتا ہوں۔"),
+    line("sa-15-invoice", "mixed", "mixed", "", "Invoice نمبر 4821 approve ہو گئی ہے۔"),
+    line("sa-16-join", "mixed", "mixed", "Roman Urdu, the way it is typed on WhatsApp.", "Meeting kal subah das baje hai, please join on time."),
+    line("sa-17-client", "mixed", "mixed", "", "Client ne kaha ke file aaj shaam tak bhej do."),
+    line("sa-18-slide", "mixed", "mixed", "", "Kal wali presentation ki slide four update karni hai."),
+    line("sa-19-link", "mixed", "mixed", "", "Zoom link group mein bhej dena before lunch."),
+    line("sa-20-ping", "mixed", "mixed", "", "File desktop pe save kar ke mujhe ping kar dena."),
+    line("sa-21-bazaar", "hindi", "hi", "Hindi in Devanagari.", "आज शाम को बाज़ार चलते हैं।"),
+    line("sa-22-window", "hindi", "hi", "", "कृपया खिड़की बंद कर दीजिए।"),
+    line("sa-23-morning", "hindi", "hi", "", "मैं कल सुबह दस बजे पहुँचूँगा।"),
+    line("sa-24-tea", "hindi", "hi", "", "चाय तैयार है, दो कप ले आओ।"),
+    line("sa-25-mother", "hindi", "hi", "", "क्या आपने माँ को फ़ोन किया?"),
+    line("sa-26-children", "hindi", "hi", "", "बच्चे पार्क में खेल रहे हैं।"),
+    line("sa-27-email", "edges", "en", "Say the address as one email.", "Email Priya at priya.sharma@kingdomvision.com today."),
+    line("sa-28-pin", "edges", "en", "Say the digits.", "The invoice is 4821 and the PIN is 9016."),
+    line("sa-29-doctor", "edges", "en", "Say Doctor Farooq and the time three forty-five.", "Meet Doctor Farooq at 3:45 on Thursday."),
+    line("sa-30-mailbox", "edges", "en", "Say the address as one email.", "Send the notes to taimoor.hussain@thebetawebsite.com."),
+    line("sa-31-hostinger", "edges", "en", "", "Kingdom Vision owes Hostinger invoice KV-2048."),
+    line("sa-32-phone", "edges", "en", "Say plus nine two, then the digits.", "Call plus 92 300 555 0142 before noon."),
+];
 
 pub fn record_start(preference: Option<&str>) -> Result<(), String> {
     let mut slot = RECORDER.lock().unwrap_or_else(|err| err.into_inner());
@@ -816,10 +886,7 @@ pub fn record_discard() {
 
 pub fn save_script(config: &Path, id: &str) -> Result<String, String> {
     isolate::refuse_real_config(config)?;
-    let line = script()
-        .iter()
-        .find(|line| line.id == id)
-        .ok_or_else(|| format!("Unknown sentence {id}."))?;
+    let line = find_script_line(id).ok_or_else(|| format!("Unknown sentence {id}."))?;
     let held = HELD
         .lock()
         .unwrap_or_else(|err| err.into_inner())
@@ -838,6 +905,7 @@ pub fn save_script(config: &Path, id: &str) -> Result<String, String> {
         "id": line.id,
         "kind": line.kind,
         "expectedLanguage": line.expected_language,
+        "bucket": line.bucket,
         "cue": line.cue,
         "deviceName": held.device,
         "sampleRate": held.audio.sample_rate,
@@ -1222,6 +1290,11 @@ fn score_trace(
         id,
         kind,
         reference: reference.map(str::to_string),
+        bucket: bucket_name(
+            meta_field(dir, "bucket")
+                .or_else(|| meta_language(dir))
+                .as_deref(),
+        ),
         detected_language: trace.detected_language.clone(),
         expected_language: expected_language.map(str::to_string),
         language_mistag: expected_language
@@ -1256,6 +1329,7 @@ fn language_mistag(expected: &str, detected: &str) -> bool {
         "en" => detected != "en",
         "mixed" => !matches!(detected.as_str(), "en" | "ur" | "hi"),
         "ur" => !matches!(detected.as_str(), "ur" | "hi"),
+        "hi" => detected != "hi",
         _ => false,
     }
 }
@@ -1325,7 +1399,9 @@ fn summarize(mode: &str, items: Vec<ItemReport>, notes: Vec<String>) -> Report {
     } else {
         Some(scored.iter().sum::<f64>() / scored.len() as f64)
     };
+    let buckets = bucket_scores(&items);
     Report {
+        buckets,
         first_word_drops: items.iter().filter(|item| item.first_dropped).count(),
         last_word_drops: items.iter().filter(|item| item.last_dropped).count(),
         truncations: items.iter().filter(|item| item.truncated).count(),
@@ -1391,6 +1467,43 @@ fn meta_language(dir: &Path) -> Option<String> {
     meta_field(dir, "expectedLanguage")
 }
 
+fn bucket_name(raw: Option<&str>) -> String {
+    match raw.unwrap_or("").trim().to_ascii_lowercase().as_str() {
+        "en" | "english" => "en".into(),
+        "ur" | "urdu" => "ur".into(),
+        "hi" | "hindi" => "hi".into(),
+        "mixed" => "mixed".into(),
+        "" => "other".into(),
+        other => other.to_string(),
+    }
+}
+
+fn bucket_scores(items: &[ItemReport]) -> Vec<BucketScore> {
+    ["en", "ur", "mixed", "hi"]
+        .into_iter()
+        .map(|bucket| {
+            let rows: Vec<&ItemReport> = items.iter().filter(|item| item.bucket == bucket).collect();
+            let wers: Vec<f64> = rows
+                .iter()
+                .filter_map(|item| item.stages.iter().find(|stage| stage.stage == "final")?.wer)
+                .collect();
+            let mean = if wers.is_empty() {
+                None
+            } else {
+                Some(wers.iter().sum::<f64>() / wers.len() as f64)
+            };
+            BucketScore {
+                bucket: bucket.into(),
+                items: rows.len(),
+                scored: wers.len(),
+                mean_wer: mean,
+                first_word_drops: rows.iter().filter(|item| item.first_dropped).count(),
+                last_word_drops: rows.iter().filter(|item| item.last_dropped).count(),
+            }
+        })
+        .collect()
+}
+
 fn meta_kind(dir: &Path) -> Option<String> {
     meta_field(dir, "kind")
 }
@@ -1420,6 +1533,19 @@ fn render_markdown(report: &Report) -> String {
     if let Some(mean) = report.mean_wer_final {
         out.push_str(&format!("Mean final word error rate: {mean:.3}\n\n"));
     }
+    out.push_str("| Bucket | Items | Scored | Mean WER | First-word drops | Last-word drops |\n");
+    out.push_str("| --- | --- | --- | --- | --- | --- |\n");
+    for bucket in &report.buckets {
+        let mean = bucket
+            .mean_wer
+            .map(|wer| format!("{wer:.3}"))
+            .unwrap_or_else(|| "—".into());
+        out.push_str(&format!(
+            "| {} | {} | {} | {} | {} | {} |\n",
+            bucket.bucket, bucket.items, bucket.scored, mean, bucket.first_word_drops, bucket.last_word_drops
+        ));
+    }
+    out.push('\n');
     out.push_str(&format!(
         "First-word drops: {}. Last-word drops: {}. Truncations: {}. Language mis-tags: {}. Hard cuts: {}. Unverified typed inserts: {}.\n\n",
         report.first_word_drops, report.last_word_drops, report.truncations, report.language_mistags, report.hard_cuts, report.unverified_inserts
@@ -1572,6 +1698,18 @@ pub fn score_main(args: &[String]) -> Result<(), String> {
             report.items.len()
         );
     }
+    for bucket in &report.buckets {
+        match bucket.mean_wer {
+            Some(mean) => println!(
+                "Bucket {}: mean WER {mean:.3} (n={}), first-word drops {}, last-word drops {}",
+                bucket.bucket, bucket.scored, bucket.first_word_drops, bucket.last_word_drops
+            ),
+            None => println!(
+                "Bucket {}: no scored items, first-word drops {}, last-word drops {}",
+                bucket.bucket, bucket.first_word_drops, bucket.last_word_drops
+            ),
+        }
+    }
     Ok(())
 }
 
@@ -1587,8 +1725,11 @@ fn help_text() -> &'static str {
      Online: pass --api or set BOLO_SCORE_AUDIO=1, and set GROQ_API_KEY. Each audio.wav\n\
      (or captured.wav) with a reference.txt is transcribed. The key is never written.\n\
      \n\
-     Record the sentences in Settings > Advanced > Accuracy. They are saved in the app\n\
-     config folder (accuracy-script), not in the git repo."
+     The report lists mean word error rate, first-word drops, and last-word drops\n\
+     for the en, ur, mixed, and hi buckets.\n\
+     \n\
+     Record either sentence set in Settings > Advanced > Accuracy. They are saved in the app\n\
+     config folder (accuracy-script), not in the git repo. The original 30 lines are unchanged."
 }
 
 #[cfg(test)]
@@ -1765,5 +1906,119 @@ mod tests {
         );
         assert!(!score.first_dropped);
         assert!(score.last_dropped);
+    }
+
+    #[test]
+    fn original_script_stays_thirty_and_the_language_set_is_separate() {
+        assert_eq!(script().len(), 30);
+        assert_eq!(script()[0].id, "01-bolo");
+        assert_eq!(script()[0].say, "Open Bolo and start dictating.");
+        assert_eq!(script()[0].bucket, "en");
+        assert_eq!(script()[16].say, "Bolo mein yeh email bhej do please.");
+        assert_eq!(script()[16].bucket, "mixed");
+        assert_eq!(script()[29].id, "30-right-now");
+        assert_eq!(script()[29].say, "Send it right now.");
+        let languages = script_set(Some("languages"));
+        assert_eq!(languages.len(), 32);
+        assert_eq!(script_set(Some("original")).len(), 30);
+        assert_eq!(script_set(None).len(), 30);
+        let mut counts = [0usize; 4];
+        for line in languages {
+            match line.bucket {
+                "ur" => counts[0] += 1,
+                "mixed" => counts[1] += 1,
+                "hi" => counts[2] += 1,
+                "en" => counts[3] += 1,
+                other => panic!("unexpected bucket {other}"),
+            }
+            assert_eq!(line.bucket, line.expected_language);
+            assert!(!line.say.is_empty());
+        }
+        assert_eq!(counts, [10, 10, 6, 6]);
+        let mut ids: Vec<&str> = script().iter().chain(languages.iter()).map(|line| line.id).collect();
+        let before = ids.len();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), before, "script ids overlap");
+        assert!(languages.iter().any(|line| line.say.contains('۔')));
+        assert!(languages.iter().any(|line| line.say.contains('।') || line.bucket == "hi"));
+        assert!(find_script_line("sa-01-weather").is_some());
+        assert!(find_script_line("01-bolo").is_some());
+        assert!(find_script_line("missing").is_none());
+    }
+
+    #[test]
+    fn bucket_means_count_wer_and_edge_drops() {
+        let dir = std::env::temp_dir().join(format!("bolo-buckets-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        write_scored(&dir, "en-drop", "en", "Pineapple belongs on the pizza", "belongs on the pizza");
+        write_scored(&dir, "ur-ok", "ur", "آج موسم اچھا ہے۔", "آج موسم اچھا ہے");
+        write_scored(&dir, "ur-last", "ur", "رات کو سو جاؤ", "رات کو سو");
+        write_scored(&dir, "hi-ok", "hi", "चाय तैयार है।", "चाय तैयार है");
+        let report = score_offline(&dir).unwrap();
+        let bucket = |name: &str| report.buckets.iter().find(|bucket| bucket.bucket == name).unwrap();
+        assert_eq!(bucket("en").scored, 1);
+        assert!(bucket("en").mean_wer.unwrap() > 0.0);
+        assert_eq!(bucket("en").first_word_drops, 1);
+        assert_eq!(bucket("en").last_word_drops, 0);
+        assert_eq!(bucket("ur").scored, 2);
+        assert_eq!(bucket("ur").mean_wer.unwrap(), 0.125);
+        assert_eq!(bucket("ur").first_word_drops, 0);
+        assert_eq!(bucket("ur").last_word_drops, 1);
+        assert_eq!(bucket("hi").mean_wer, Some(0.0));
+        assert_eq!(bucket("mixed").scored, 0);
+        assert!(bucket("mixed").mean_wer.is_none());
+        let markdown = render_markdown(&report);
+        assert!(markdown.contains("| ur |"));
+        assert!(markdown.contains("First-word drops"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn write_scored(dir: &Path, id: &str, bucket: &str, reference: &str, final_text: &str) {
+        let item = dir.join(id);
+        fs::create_dir_all(&item).unwrap();
+        let trace = Trace {
+            id: id.into(),
+            created_unix_ms: 1,
+            device_name: "Mic".into(),
+            sample_rate: 16_000,
+            channels: 1,
+            hold_ms: 1_000,
+            trimmed_silence_ms: 0,
+            peak: 0.2,
+            clipping_pct: 0.0,
+            processed_peak: 0.2,
+            processed_clipping_pct: 0.0,
+            hard_cut: false,
+            chunk_count: 1,
+            whisper: Vec::new(),
+            detected_language: bucket.into(),
+            pinned_language: bucket.into(),
+            stages: StageTexts {
+                raw_whisper: final_text.into(),
+                after_redecode_translate: final_text.into(),
+                after_ai_cleanup: final_text.into(),
+                after_learned_spellings: final_text.into(),
+                after_grammar: final_text.into(),
+                final_text: final_text.into(),
+            },
+            grammar_ran: false,
+            cleanup_why: String::new(),
+            latency_ms: 1,
+            encode_ms: 1,
+            remote_ms: 1,
+            cleanup_ms: 0,
+            paste_ms: 0,
+            errors: Vec::new(),
+            insert_method: None,
+            insert_verified: None,
+        };
+        fs::write(item.join("trace.json"), serde_json::to_vec_pretty(&trace).unwrap()).unwrap();
+        fs::write(item.join("reference.txt"), reference).unwrap();
+        fs::write(
+            item.join("meta.json"),
+            format!(r#"{{"expectedLanguage":"{bucket}","bucket":"{bucket}","kind":"test"}}"#),
+        )
+        .unwrap();
     }
 }

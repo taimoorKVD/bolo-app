@@ -333,16 +333,31 @@ export async function mockInvoke<T>(command: string, args?: Record<string, unkno
     case "accuracy_open_folder":
     case "accuracy_clear_folder":
       return undefined as T;
-    case "accuracy_script":
+    case "accuracy_script": {
+      const set = String(args?.set ?? "original");
+      if (set === "languages") {
+        return [
+          {
+            id: "sa-01-weather",
+            kind: "urdu",
+            expectedLanguage: "ur",
+            bucket: "ur",
+            cue: "Everyday Urdu.",
+            say: "آج موسم بہت اچھا ہے۔",
+          },
+        ] as T;
+      }
       return [
         {
           id: "01-bolo",
           kind: "names",
           expectedLanguage: "en",
+          bucket: "en",
           cue: "Say this sentence.",
           say: "Open Bolo and start dictating.",
         },
       ] as T;
+    }
     case "accuracy_record_start":
       return undefined as T;
     case "accuracy_record_stop":

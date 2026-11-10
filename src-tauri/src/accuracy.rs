@@ -96,11 +96,45 @@ fn score_tokens(reference: &[String], hypothesis: &[String]) -> WerScore {
 }
 
 fn wer_tokens(text: &str) -> Vec<String> {
+    use unicode_normalization::UnicodeNormalization;
+    // NFC folds alef+madda and other composed Urdu letters before the split,
+    // so a decomposed hypothesis matches a composed reference.
+    let text: String = text.nfc().collect();
+    let text = strip_wer_marks(&text);
     text.to_lowercase()
         .split(|c: char| !c.is_alphanumeric() && c != '@' && c != '.' && c != '\'')
         .map(|word| word.trim_matches(|c: char| c == '.' || c == '\'').to_string())
         .filter(|word| !word.is_empty())
         .collect()
+}
+
+/// Zero-width and bidi marks are not letters; left in, they split one Urdu
+/// word into two. Urdu punctuation (۔ ، ؟) and the Devanagari danda are not words.
+fn strip_wer_marks(text: &str) -> String {
+    text.chars().filter(|c| !wer_ignored(*c)).collect()
+}
+
+fn wer_ignored(c: char) -> bool {
+    matches!(
+        c,
+        '\u{00AD}'
+            | '\u{061C}'
+            | '\u{200B}'
+            | '\u{200C}'
+            | '\u{200D}'
+            | '\u{200E}'
+            | '\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{FEFF}'
+            | '\u{060C}'
+            | '\u{061B}'
+            | '\u{061F}'
+            | '\u{06D4}'
+            | '\u{0964}'
+            | '\u{0965}'
+    )
 }
 
 fn edit(a: &[String], b: &[String]) -> usize {
@@ -312,6 +346,30 @@ mod tests {
             matches!(audio::speech_samples(&noise), Err(SpeechError::Silent)),
             "background noise must not be uploaded"
         );
+    }
+
+    #[test]
+    fn urdu_wer_folds_nfc_and_drops_punctuation_and_zero_width() {
+        assert_eq!(wer("سلام علیکم", "سلام۔ علیکم"), 0.0);
+        assert_eq!(wer("سلام علیکم", "سلام، علیکم؟"), 0.0);
+        assert_eq!(wer("سلام", "س\u{200b}لام"), 0.0);
+        assert_eq!(wer("سلام", "س\u{200c}لام"), 0.0);
+        assert_eq!(wer("سلام", "س\u{200d}لام\u{feff}"), 0.0);
+        assert!(!tokens("سلام۔،؟").iter().any(|word| word.chars().any(|c| matches!(c, '۔' | '،' | '؟'))));
+        let composed = "\u{0622}ج";
+        let decomposed = "\u{0627}\u{0653}ج";
+        assert_ne!(composed, decomposed);
+        assert_eq!(tokens(composed), tokens(decomposed));
+        assert_eq!(wer(composed, decomposed), 0.0);
+        assert_eq!(wer("बच्चे खेल रहे हैं।", "बच्चे खेल रहे हैं"), 0.0);
+        let dropped = wer_score("آج موسم اچھا ہے", "موسم اچھا ہے");
+        assert!(dropped.first_dropped);
+        assert!(!dropped.last_dropped);
+        assert_eq!(
+            tokens("priya.sharma@kingdomvision.com"),
+            vec!["priya.sharma@kingdomvision.com".to_string()]
+        );
+        assert_eq!(wer("Send it right now.", "Send it right now"), 0.0);
     }
 
     /// Live Groq is optional. Without `BOLO_ACCURACY_KEY` this returns before
