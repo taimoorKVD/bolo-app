@@ -1,7 +1,8 @@
 import { createReadStream, existsSync, statSync } from "node:fs";
 import { open } from "node:fs/promises";
+import { request as httpsRequest } from "node:https";
 import { join, normalize, resolve, sep, extname } from "node:path";
-import type { IncomingMessage, ServerResponse } from "node:http";
+import type { IncomingHttpHeaders, IncomingMessage, ServerResponse } from "node:http";
 
 const TYPES: Record<string, string> = {
   ".html": "text/html; charset=utf-8", ".htm": "text/html; charset=utf-8",
@@ -38,7 +39,51 @@ function fileOrIndex(root: string, urlPath: string): string | null {
   return null;
 }
 
-/** Serve GET/HEAD from publicDir. SPA fallback: missing paths with no extension -> index.html. Returns true if handled. */
+/**
+ * Apache serves /contact via index.php. If Passenger still receives /contact,
+ * proxy that PHP page instead of answering with the homepage.
+ * The x-bolo-contact-proxy header stops a loop if the PHP URL comes back here.
+ */
+export async function boloProxyContactPhp(req: IncomingMessage, res: ServerResponse): Promise<boolean> {
+  if (req.headers["x-bolo-contact-proxy"]) return false;
+  try {
+    const q = String(req.url || "").split("?")[1];
+    const url = "https://bolo.thebetawebsite.com/contact/index.php" + (q ? "?" + q : "");
+    const headers: Record<string, string> = {
+      host: "bolo.thebetawebsite.com",
+      accept: typeof req.headers.accept === "string" ? req.headers.accept : "text/html",
+      "x-bolo-contact-proxy": "1",
+      "x-forwarded-proto": "https",
+    };
+    if (typeof req.headers.cookie === "string") headers.cookie = req.headers.cookie;
+    const lang = req.headers["accept-language"];
+    if (typeof lang === "string") headers["accept-language"] = lang;
+    const upstream = await new Promise<{ status: number; headers: IncomingHttpHeaders; body: Buffer } | null>((resolveUp) => {
+      const preq = httpsRequest(url, { method: req.method || "GET", headers, timeout: 8000 }, (pres) => {
+        const chunks: Buffer[] = [];
+        pres.on("data", (c: Buffer) => chunks.push(c));
+        pres.on("end", () => resolveUp({ status: pres.statusCode || 0, headers: pres.headers, body: Buffer.concat(chunks) }));
+      });
+      preq.on("error", () => resolveUp(null));
+      preq.on("timeout", () => { preq.destroy(); resolveUp(null); });
+      preq.end();
+    });
+    if (!upstream || upstream.status !== 200) return false;
+    const html = upstream.body.toString("utf8");
+    if (!html.includes('id="contact-form"') && !html.includes("id='contact-form'")) return false;
+    res.statusCode = 200;
+    res.setHeader("content-type", "text/html; charset=utf-8");
+    res.setHeader("content-length", Buffer.byteLength(html));
+    res.setHeader("x-content-type-options", "nosniff");
+    const setCookie = upstream.headers["set-cookie"];
+    if (setCookie) res.setHeader("set-cookie", setCookie);
+    if ((req.method || "GET") === "HEAD") { res.end(); return true; }
+    res.end(html);
+    return true;
+  } catch { return false; }
+}
+
+/** Serve GET/HEAD from publicDir. Unknown paths are not the homepage. Returns true if handled. */
 export async function tryStatic(req: IncomingMessage, res: ServerResponse, publicDir: string, spa = true): Promise<boolean> {
   if (!publicDir || !existsSync(publicDir)) return false;
   const method = req.method || "GET";
@@ -47,7 +92,20 @@ export async function tryStatic(req: IncomingMessage, res: ServerResponse, publi
   let file = fileOrIndex(publicDir, url.split("?")[0]);
   if (!file && spa) {
     const pathOnly = url.split("?")[0];
-    if (!extname(pathOnly) || pathOnly.endsWith("/")) file = fileOrIndex(publicDir, "/index.html");
+    // Homepage only for a real directory with no index.php, or for /downloads and /.well-known.
+    if (!extname(pathOnly) || pathOnly.endsWith("/")) {
+      const boloKeep = pathOnly === "/downloads" || pathOnly === "/downloads/" || pathOnly.startsWith("/downloads/")
+        || pathOnly === "/.well-known" || pathOnly === "/.well-known/" || pathOnly.startsWith("/.well-known/");
+      let boloDir = false, boloPhp = false;
+      try {
+        const boloFull = safeJoin(publicDir, pathOnly);
+        boloDir = !!(boloFull && existsSync(boloFull) && statSync(boloFull).isDirectory());
+        const boloSlash = pathOnly.endsWith("/") ? pathOnly : pathOnly + "/";
+        const boloIdx = safeJoin(publicDir, boloSlash + "index.php");
+        boloPhp = !!(boloIdx && existsSync(boloIdx));
+      } catch { /* missing */ }
+      if ((boloKeep || boloDir) && !boloPhp) file = fileOrIndex(publicDir, "/index.html");
+    }
   }
   if (!file) return false;
   const st = statSync(file);

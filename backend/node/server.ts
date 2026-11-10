@@ -1,4 +1,4 @@
-import { createServer } from "node:http";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,7 +11,13 @@ import { Smtp2GoMailer, SmtpMailer, smtpConfigFromEnv, type Mailer } from "./mai
 import { TotpVerifier } from "./totp";
 import { FileStateStore, SupabaseStateStore, autosave, restore, snapshot } from "./persist";
 import { loadDotEnv } from "./load-env";
-import { tryStatic } from "./static";
+import { boloProxyContactPhp as proxyContactPhp, tryStatic } from "./static";
+
+// Named exactly as the website deploy's route patch searches, so a later
+// site publish leaves this file alone instead of inserting a second proxy.
+async function boloProxyContactPhp(req: IncomingMessage, res: ServerResponse): Promise<boolean> {
+  return proxyContactPhp(req, res);
+}
 
 /**
  * Self-hosted Bolo API + admin portal + static site for Plesk Passenger / PM2.
@@ -112,6 +118,8 @@ async function main() {
       if (rawPath === "/admin" || rawPath.startsWith("/admin/")) { res.statusCode = 301; res.setHeader("location", OFFICE + rawPath.slice(6)); return res.end(); }
       const isApi = rawPath === "/v1" || rawPath.startsWith("/v1/") || rawPath === "/health" || rawPath === OFFICE || rawPath.startsWith(OFFICE + "/");
       if (!isApi && (req.method === "GET" || req.method === "HEAD")) {
+        // Apache rewrites /contact to PHP. Proxy index.php when this process still sees the path.
+        if ((rawPath === "/contact" || rawPath === "/contact/") && await boloProxyContactPhp(req, res)) return;
         if (await tryStatic(req, res, PUBLIC)) return;
       }
       if (rawPath === "/v1/health") req.url = "/health";

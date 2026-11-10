@@ -9,6 +9,7 @@
     "typecheck": "tsc --noEmit",
     "dev:mock": "node --import tsx worker/mock/server.ts",
     "dev:worker": "wrangler dev",
+    "build": "node node/build.mjs",
     "check": "npm run typecheck && npm run test"
   },
   "devDependencies": {
