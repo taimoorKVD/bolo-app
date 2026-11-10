@@ -9,7 +9,7 @@
 /// How long cleanup may wait, growing with the transcript so a short take
 /// stays snappy and a longer one is not cut off mid-sentence.
 pub fn cleanup_timeout_ms(chars: usize) -> u64 {
-    (800 + (chars as u64) * 3).clamp(800, 2_200)
+    (500 + chars as u64).clamp(500, 1_200)
 }
 
 /// True when `a` and `b` are the same word or an agreement form of it
@@ -286,7 +286,7 @@ mod tests {
         eprintln!("GRAMMAR cleanup_timeout_ms short={short} medium={medium} long={long}");
         assert!(short <= 1_200, "{short}");
         assert!(short < medium && medium < long);
-        assert!(long <= 2_200);
+        assert!(long <= 1_200);
         assert!(same_lexeme("goes", "went"));
         assert!(same_lexeme("a", "an"));
         assert!(!same_lexeme("email", "yesterday"));

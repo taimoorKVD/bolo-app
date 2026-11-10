@@ -571,7 +571,11 @@ async fn speech_raw(
         // speak English and Urdu, so pin English and transcribe again.
         // Urdu is often detected as Hindi and written in Devanagari, which an
         // Urdu speaker can't use. Pin Urdu for that case, English otherwise.
-        let pin = if hindi_like(&spoken.language, &spoken.text) && !transcribe::latin_only(&spoken.text) {
+        let pin = if transcribe::looks_like_roman_urdu(&spoken.text)
+            && transcribe::normalize_language(language).as_deref() != Some("en")
+        {
+            "ur"
+        } else if hindi_like(&spoken.language, &spoken.text) && !transcribe::latin_only(&spoken.text) {
             // Only an explicit Hindi + "same language" setting keeps Devanagari.
             // Auto and Urdu still pin Urdu: Whisper often writes Urdu in Devanagari.
             if keep_hindi_script(language, output) { "hi" } else { "ur" }
@@ -938,14 +942,22 @@ pub(crate) fn prompt_words(dictionary: &[String], language: &str) -> Vec<String>
     let ranked = crate::memory::rank_my_words(&memory);
     let mut words = crate::vocab::protected(&ranked);
     crate::vocab::set_current(words.clone());
+    let mut extra = 0usize;
     for term in dictionary
         .iter()
         .cloned()
         .chain(crate::memory::prompt_terms(&memory))
         .chain(crate::hints::starter_hints(language))
     {
+        if extra >= 24 {
+            break;
+        }
+        if crate::cleanup::should_drop_learned(&term) {
+            continue;
+        }
         if !words.iter().any(|word| word.eq_ignore_ascii_case(&term)) {
             words.push(term);
+            extra += 1;
         }
     }
     words

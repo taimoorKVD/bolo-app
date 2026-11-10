@@ -15,11 +15,26 @@ pub fn is_seed(word: &str) -> bool {
 pub const SEED_WORDS: &[&str] = &[
     "Bolo",
     "Bolo.com",
+    "RoomBoss",
+    "Grok",
+    "EasySSH",
     "Kingdom Vision",
+    "KVTravels",
     "Taimoor Hussain",
     "taimoorhussain.com",
     "thebetawebsite.com",
 ];
+
+/// A whole word Whisper often writes instead of a name this user dictates.
+/// `None` for ordinary words, including "polo" and "grove".
+pub fn intended_term(word: &str) -> Option<&'static str> {
+    match word.trim().to_ascii_lowercase().as_str() {
+        "roomba" | "roombos" => Some("RoomBoss"),
+        "crock" | "grov" => Some("Grok"),
+        "volo" | "poloapp" | "boloapp" => Some("Bolo"),
+        _ => None,
+    }
+}
 
 const TLDS: &[&str] = &["com", "net", "org", "io", "ai", "pk", "co", "app", "dev"];
 
@@ -200,6 +215,15 @@ pub fn correct(text: &str, words: &[String]) -> String {
             edits.push((i, last, core));
             i = last + 1;
             continue;
+        }
+        if let Some(write) = intended_term(&toks[i].core) {
+            let crock_pot = write == "Grok"
+                && toks.get(i + 1).is_some_and(|token| token.core.eq_ignore_ascii_case("pot"));
+            if !crock_pot {
+                edits.push((i, i, write.to_string()));
+                i += 1;
+                continue;
+            }
         }
         if let Some((last, core)) = list_match(&toks, i, &list) {
             edits.push((i, last, core));
@@ -393,6 +417,17 @@ mod tests {
     }
 
     #[test]
+    fn known_mishearings_become_the_real_names() {
+        let list = seeds();
+        assert_eq!(correct("Ask Roomba about Crock", &list), "Ask RoomBoss about Grok");
+        assert_eq!(correct("Roombos and GROV", &list), "RoomBoss and Grok");
+        assert_eq!(correct("PoloApp then BoloApp then Volo", &list), "Bolo then Bolo then Bolo");
+        assert_eq!(correct("a crock pot", &list), "a crock pot");
+        assert_eq!(correct("Play polo on Sunday.", &list), "Play polo on Sunday.");
+        assert_eq!(intended_term("Roomba"), Some("RoomBoss"));
+        assert_eq!(intended_term("polo"), None);
+    }
+
     fn fixes_volo_to_bolo() {
         assert_eq!(correct("Open Volo and start dictating.", &seeds()), "Open Bolo and start dictating.");
         assert_eq!(correct("Visit Volo.com today", &seeds()), "Visit Bolo.com today");

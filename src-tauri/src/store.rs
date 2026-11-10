@@ -286,7 +286,12 @@ pub fn normalize_settings(mut settings: Settings) -> Settings {
         .map(|term| term.trim().to_string())
         .filter(|term| !term.is_empty())
         .take(MAX_DICTIONARY)
-        .map(|term| term.chars().take(MAX_TERM_CHARS).collect())
+        .map(|term| {
+            crate::vocab::intended_term(&term)
+                .map(str::to_string)
+                .unwrap_or(term)
+        })
+        .filter(|term| !crate::cleanup::should_drop_learned(term))
         .collect();
     if let Some(name) = settings.microphone.as_deref() {
         if name.trim().is_empty() {

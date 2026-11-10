@@ -1112,6 +1112,11 @@ pub fn speech_route(output: &str, setting: &str, detected: &str, text: &str) -> 
     if setting_code == "en" {
         return SpeechRoute::Transcribe;
     }
+    // Roman Urdu is Latin, so Whisper often tags it English when the prompt
+    // is English. Output is English, so translate it instead of pasting it raw.
+    if looks_like_roman_urdu(text) {
+        return SpeechRoute::Mixed;
+    }
     let detected = language_code(detected);
     // English words that were only tagged Urdu. Translating them rewrites the
     // sentence. A real Urdu take has Urdu script; French and the rest still translate.
@@ -1170,6 +1175,29 @@ pub fn language_code(raw: &str) -> String {
 
 fn mixed_urdu(text: &str) -> bool {
     has_arabic(text) && has_latin(text)
+}
+
+/// Two Roman Urdu function words. One hit is not enough: "hai" and "kal"
+/// also occur in English names.
+pub(crate) fn looks_like_roman_urdu(text: &str) -> bool {
+    const MARKERS: &[&str] = &[
+        "mein", "hai", "hain", "kya", "nahi", "nahin", "bhej", "bhejo", "batao", "yeh", "theek",
+        "thik", "hoon", "karo", "wala", "wali", "aaj", "abhi", "mujhe", "shukriya", "karke",
+        "subah", "shaam", "dena", "kal",
+    ];
+    let mut hits = 0usize;
+    for word in text.split(|c: char| !c.is_ascii_alphanumeric()) {
+        if word.is_empty() {
+            continue;
+        }
+        if MARKERS.iter().any(|marker| word.eq_ignore_ascii_case(marker)) {
+            hits += 1;
+            if hits >= 2 {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 pub(crate) fn has_latin(text: &str) -> bool {

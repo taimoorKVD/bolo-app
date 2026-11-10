@@ -142,6 +142,17 @@ pub struct WarmMic {
     live: Arc<AtomicBool>,
 }
 
+impl Clone for WarmMic {
+    fn clone(&self) -> Self {
+        Self {
+            cmd: self.cmd.clone(),
+            watch: Arc::clone(&self.watch),
+            level: Arc::clone(&self.level),
+            live: Arc::clone(&self.live),
+        }
+    }
+}
+
 impl WarmMic {
     pub fn spawn(preference: Option<String>, config_dir: Option<PathBuf>) -> Self {
         let (cmd_tx, cmd_rx) = mpsc::channel();
@@ -469,6 +480,13 @@ fn handle_cmd(cmd: Cmd, state: &Arc<Mutex<Capture>>, watch: &Watch, next_id: &mu
             let note = watch.note.lock().unwrap_or_else(|err| err.into_inner()).clone();
             match arm_take(state, next_id, &active_name, &note) {
                 Ok(armed) => {
+                    log_warm(
+                        watch,
+                        &format!(
+                            "mic armed device=\"{active_name}\" preroll_samples={}",
+                            armed.pre_roll_samples
+                        ),
+                    );
                     let id = armed.id;
                     if reply.send(Ok(armed)).is_err() {
                         let _ = disarm_take(state, id);
@@ -659,6 +677,7 @@ fn check_silent_device(finished: &FinishedAudio, held_ms: u64, watch: &Watch) {
     let peak = audio::peak_level(&finished.interleaved);
     if peak >= audio::SILENT_PEAK {
         audio::mark_live_mic(&name);
+        remember_mic(watch, &name);
         return;
     }
     if long_enough && audio::mark_silent_mic(&name) {
@@ -683,7 +702,7 @@ const DEAD_TAKE_MS: u64 = 600;
 /// may use another format), and the rest of the take is captured on the new mic.
 fn fail_over_dead_take(state: &Mutex<Capture>, watch: &Watch, device_count: usize) -> bool {
     let name = watch.active_name.lock().unwrap_or_else(|err| err.into_inner()).clone();
-    if name.is_empty() || device_count < 2 {
+    if name.is_empty() || device_count < 2 || audio::is_builtin_like(&name) {
         return false;
     }
     let Ok(mut guard) = state.lock() else { return false };
@@ -728,6 +747,27 @@ fn device_names_differ(host: &cpal::Host, preference: &Option<String>, active_na
     }
 }
 
+fn remember_mic(watch: &Watch, name: &str) {
+    let Some(dir) = &watch.config_dir else {
+        return;
+    };
+    if name.trim().is_empty() || audio::is_output_like(name) {
+        return;
+    }
+    let _ = std::fs::write(dir.join("last-mic.txt"), name);
+}
+
+fn remembered_mic(watch: &Watch) -> Option<String> {
+    let dir = watch.config_dir.as_ref()?;
+    let name = std::fs::read_to_string(dir.join("last-mic.txt")).ok()?;
+    let name = name.trim().to_string();
+    if name.is_empty() || audio::is_output_like(&name) {
+        None
+    } else {
+        Some(name)
+    }
+}
+
 fn log_warm(watch: &Watch, message: &str) {
     if let Some(dir) = &watch.config_dir {
         crate::logbuf::log_line(dir, "info", message);
@@ -758,7 +798,12 @@ fn open_replacing(
 ) -> Result<(), String> {
     let devices = audio::host_mics(host).map_err(|err| err.to_string())?;
     let avoid = watch.avoid_name.lock().ok().and_then(|mut slot| slot.take());
-    let order = audio::order_avoiding(&devices, preference.as_deref(), avoid.as_deref());
+    let remembered = remembered_mic(watch);
+    let effective = match preference.as_deref().map(str::trim).filter(|name| !name.is_empty()) {
+        Some(_) => preference.clone(),
+        None => remembered,
+    };
+    let order = audio::order_avoiding(&devices, effective.as_deref(), avoid.as_deref());
     if order.is_empty() {
         return Err("No microphone is available.".into());
     }

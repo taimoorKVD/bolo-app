@@ -215,6 +215,30 @@ fn is_live_mic(name: &str) -> bool {
 
 /// A headphone/combo jack or line input: often listed even when nothing is
 /// plugged in, and then it records pure zeros.
+/// Speakers, headphones, and loopback endpoints are not microphones.
+/// Windows sometimes lists them as capture devices ("Speakers (Realtek)").
+/// Recording one of those hears playback, not the person, and the opening
+/// words are lost while Bolo switches away.
+pub fn is_output_like(name: &str) -> bool {
+    let n = normalize_mic_name(name);
+    if n.contains("microphone") || n.contains("mic array") || n.contains("array") {
+        return false;
+    }
+    const MARKERS: &[&str] = &[
+        "speaker",
+        "speakers",
+        "headphone",
+        "headphones",
+        "loopback",
+        "stereo mix",
+        "what u hear",
+        "wave out",
+        "playback",
+        "output",
+    ];
+    MARKERS.iter().any(|marker| n.contains(marker))
+}
+
 pub fn is_jack_like(name: &str) -> bool {
     let n = normalize_mic_name(name);
     n.contains("jack") || n.contains("line in") || n.contains("line-in") || n.contains("stereo mix")
@@ -249,13 +273,20 @@ pub(crate) fn pick_auto<'a>(
     silent: &dyn Fn(&str) -> bool,
     live: &dyn Fn(&str) -> bool,
 ) -> &'a ListedMic {
-    let default = devices.iter().find(|device| device.is_default).unwrap_or(&devices[0]);
+    let inputs: Vec<&'a ListedMic> = devices.iter().filter(|device| !is_output_like(&device.name)).collect();
+    let devices: Vec<&'a ListedMic> = if inputs.is_empty() {
+        devices.iter().collect()
+    } else {
+        inputs
+    };
+    let default = devices.iter().copied().find(|device| device.is_default).unwrap_or(devices[0]);
     let default_rank = mic_rank(&default.name, silent, live);
     if default_rank <= 2 {
         return default;
     }
     let best = devices
         .iter()
+        .copied()
         .min_by_key(|device| mic_rank(&device.name, silent, live))
         .unwrap_or(default);
     if mic_rank(&best.name, silent, live) < default_rank {
@@ -313,9 +344,15 @@ pub fn probe_inputs() -> Vec<(String, f32)> {
         let Ok(finished) = session.finish() else { continue };
         // Skip the first 60 ms: some drivers start with a zeroed buffer.
         let skip = (finished.sample_rate as usize * finished.channels.max(1) as usize * 60) / 1000;
-        let peak = peak_level(finished.interleaved.get(skip..).unwrap_or(&[]));
+        let heard = finished.interleaved.get(skip..).unwrap_or(&[]);
+        // An empty buffer means the device never delivered samples (often because
+        // the warm stream already has it). That is not proof the mic is dead.
+        if heard.is_empty() {
+            out.push((mic.name, 0.0));
+            continue;
+        }
+        let peak = peak_level(heard);
         if peak < SILENT_PEAK {
-            // Zero bytes counts as silence too: an empty jack may deliver nothing.
             mark_silent_mic(&mic.name);
         } else {
             mark_live_mic(&mic.name);
@@ -408,17 +445,26 @@ pub(crate) fn order_with(
     live: &dyn Fn(&str) -> bool,
 ) -> Vec<String> {
     let mut names = Vec::new();
+    let inputs: Vec<&ListedMic> = devices.iter().filter(|device| !is_output_like(&device.name)).collect();
+    let devices: Vec<&ListedMic> = if inputs.is_empty() {
+        devices.iter().collect()
+    } else {
+        inputs
+    };
     if let Some(pref) = trimmed(preference) {
-        if let Some(found) = find_named(devices, &pref) {
+        if let Some(found) = devices.iter().find(|device| {
+            normalize_mic_name(&device.name) == normalize_mic_name(&pref)
+        }) {
             if !silent(&found.name) {
                 push_unique(&mut names, &found.name);
             }
         }
     }
     if !devices.is_empty() {
-        push_unique(&mut names, &pick_auto(devices, silent, live).name);
+        let owned: Vec<ListedMic> = devices.iter().map(|device| (*device).clone()).collect();
+        push_unique(&mut names, &pick_auto(&owned, silent, live).name);
     }
-    let mut rest: Vec<&ListedMic> = devices.iter().collect();
+    let mut rest: Vec<&ListedMic> = devices.clone();
     rest.sort_by_key(|device| mic_rank(&device.name, silent, live));
     for device in rest {
         push_unique(&mut names, &device.name);
@@ -458,6 +504,9 @@ pub(crate) fn host_mics(host: &cpal::Host) -> anyhow::Result<Vec<ListedMic>> {
     let mut mics: Vec<ListedMic> = Vec::new();
     for device in host.input_devices()? {
         let name = device.name().unwrap_or_else(|_| "Microphone".into());
+        if is_output_like(&name) {
+            continue;
+        }
         let is_default = default_name.as_ref() == Some(&name);
         if let Some(existing) = mics.iter_mut().find(|mic| mic.name == name) {
             existing.is_default |= is_default;
@@ -1948,7 +1997,13 @@ mod tests {
         assert!(is_jack_like("Jack Mic (Realtek(R) Audio)"));
         assert!(is_jack_like("Line In (High Definition Audio)"));
         assert!(!is_jack_like("Microphone Array (Intel Smart Sound)"));
+        assert!(is_builtin_like("Microphone Array (2- Realtek(R) Audio)"));
         assert!(is_builtin_like("Microphone Array (Realtek(R) Audio)"));
+        assert!(is_output_like("Speakers (2- Realtek(R) Audio)"));
+        assert!(is_output_like("Headphones (Realtek(R) Audio)"));
+        assert!(is_output_like("Stereo Mix (Realtek(R) Audio)"));
+        assert!(!is_output_like("Microphone Array (2- Realtek(R) Audio)"));
+        assert!(!is_output_like("Headset Microphone"));
         assert!(is_builtin_like("Internal Microphone"));
         assert!(!is_builtin_like("USB Studio Mic"));
     }

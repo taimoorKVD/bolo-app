@@ -605,7 +605,7 @@ pub fn end(app: &AppHandle) {
         log_line(
             &state.config_dir,
             "info",
-            &format!("listen keydown_first_sample_ms={ms}"),
+            &format!("listen keydown_first_sample_ms={ms} device=\"{}\"", take.active_name),
         );
     }
     let open_wait_ms = take.open_wait_ms;

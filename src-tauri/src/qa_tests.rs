@@ -322,6 +322,14 @@ fn speech_routes_for_every_language_option() {
     assert!(direct_translate("english", "hi"));
     assert!(!direct_translate("same", "hi"));
     assert_eq!(speech_route("same", "hi", "hindi", "आज मौसम अच्छा है"), SpeechRoute::Transcribe);
+    assert_eq!(
+        speech_route("english", "auto", "en", "Meeting kal subah hai, please join"),
+        SpeechRoute::Mixed
+    );
+    assert_eq!(
+        speech_route("english", "auto", "en", "Please send the invoice by Friday"),
+        SpeechRoute::Transcribe
+    );
     assert_eq!(language_code("Urdu"), "ur");
     assert_eq!(language_code(" Farsi "), "fa");
     assert!(unlikely_language("auto", "french"));

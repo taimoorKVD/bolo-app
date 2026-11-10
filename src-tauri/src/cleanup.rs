@@ -199,10 +199,11 @@ fn note_fallback(mut outcome: CleanOutcome, missed: &[String]) -> CleanOutcome {
 /// An empty or rejected rewrite may still be worth one simpler retry.
 pub(crate) fn should_retry_cleanup(why: &str) -> bool {
     let lower = why.to_ascii_lowercase();
+    if lower.contains("timed out") || lower.contains("timeout") {
+        return true;
+    }
     !(lower.contains("couldn't reach")
         || lower.contains("could not reach")
-        || lower.contains("timed out")
-        || lower.contains("timeout")
         || lower.contains("error sending request"))
 }
 
@@ -1160,8 +1161,44 @@ const COMMON_WORDS: &[&str] = &[
     "arabic", "project", "software", "architect", "system", "update", "version", "design", "section", "product", "page", "button",
     "settings", "website", "application", "issue", "problem", "testing", "working", "words",
     // Ordinary words that must not be promoted into names.
-    "invoice", "deadline", "roadmap"
+    "invoice", "deadline", "roadmap",
+    "committee", "team", "lead", "senior", "vision", "wired", "alternative", "proportion", "proportional",
 ];
+
+/// One-take mishearings that were saved as if they were names. Not prompted again.
+const ONE_OFF_MISHEARS: &[&str] = &[
+    "aand", "volo", "polo", "poloapp", "boloapp", "roomba", "roombos", "crock", "droc", "smtb", "grov",
+    "passat", "justine", "tori", "cfs", "dbcd", "proportual",
+];
+
+const KEEP_ACRONYMS: &[&str] = &[
+    "API", "SSH", "SQL", "HTTP", "HTTPS", "JSON", "URL", "AWS", "CSS", "HTML", "PDF",
+];
+
+/// Drop a saved dictionary entry that is ordinary English, a known mishearing,
+/// or a short acronym that was not one of the real technical terms above.
+/// Emails, domains, and mixed-case brands stay.
+pub fn should_drop_learned(word: &str) -> bool {
+    let word = word.trim();
+    if word.is_empty() {
+        return true;
+    }
+    if word.contains('@') || word.contains('.') {
+        return false;
+    }
+    if crate::vocab::is_seed(word) || is_common_word(word) {
+        return is_common_word(word);
+    }
+    let lower = word.to_ascii_lowercase();
+    if ONE_OFF_MISHEARS.iter().any(|bad| bad.eq_ignore_ascii_case(&lower)) {
+        return true;
+    }
+    let letters = word.chars().filter(|c| c.is_ascii_alphabetic()).count();
+    let acronym = letters >= 2
+        && letters <= 5
+        && word.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit());
+    acronym && !KEEP_ACRONYMS.iter().any(|keep| keep.eq_ignore_ascii_case(word))
+}
 
 /// Test helper: `learn_terms_with` with a per-thread pending list.
 #[cfg(test)]
@@ -1196,6 +1233,9 @@ pub fn learn_terms_with(
         }
         let bare = word.trim_matches(|c: char| !c.is_ascii_alphanumeric());
         if !learnable(bare) {
+            continue;
+        }
+        if crate::vocab::intended_term(bare).is_some() || should_drop_learned(bare) {
             continue;
         }
         if blocked.iter().any(|term| term.eq_ignore_ascii_case(bare)) {
@@ -1245,8 +1285,9 @@ fn tech_shaped(word: &str) -> bool {
     let chars: Vec<char> = word.chars().collect();
     let inner_upper = chars.iter().skip(1).any(|c| c.is_ascii_uppercase()) && chars.iter().any(|c| c.is_ascii_lowercase());
     let digit = chars.iter().any(|c| c.is_ascii_digit()) && chars.iter().any(|c| c.is_ascii_alphabetic());
-    let acronym = chars.len() >= 2 && chars.len() <= 6 && chars.iter().all(|c| c.is_ascii_uppercase());
-    inner_upper || digit || acronym
+    // Short all-caps tokens (SMTB, GROV) were learned from a single mishearing.
+    // They wait for a second take, the same as a capitalized name.
+    inner_upper || digit
 }
 
 pub fn is_common_word(word: &str) -> bool {
@@ -1261,7 +1302,11 @@ fn learnable(word: &str) -> bool {
     if !chars.iter().all(|c| c.is_ascii_alphanumeric()) || !chars[0].is_ascii_alphabetic() {
         return false;
     }
-    if !tech_shaped(word) && (chars.len() < 4 || !chars[0].is_uppercase() || !chars.iter().any(|c| c.is_lowercase())) {
+    let acronym = chars.len() >= 2 && chars.len() <= 6 && chars.iter().all(|c| c.is_ascii_uppercase());
+    if !tech_shaped(word)
+        && !acronym
+        && (chars.len() < 4 || !chars[0].is_uppercase() || !chars.iter().any(|c| c.is_lowercase()))
+    {
         return false;
     }
     !is_common_word(word)
@@ -1361,7 +1406,15 @@ mod tests {
         }
         assert!(dictionary.is_empty(), "{dictionary:?}");
         let added = learn_terms("we deploy on GitHub with AWS and Win11", &mut dictionary);
-        assert_eq!(added, vec!["GitHub".to_string(), "AWS".to_string(), "Win11".to_string()]);
+        assert_eq!(added, vec!["GitHub".to_string(), "Win11".to_string()]);
+        let added = learn_terms("use AWS again tomorrow", &mut dictionary);
+        assert_eq!(added, vec!["AWS".to_string()]);
+        assert!(should_drop_learned("Only"));
+        assert!(should_drop_learned("SMTB"));
+        assert!(should_drop_learned("Volo"));
+        assert!(!should_drop_learned("Taimoor"));
+        assert!(!should_drop_learned("priya.sharma@kingdomvision.com"));
+        assert!(!should_drop_learned("GitHub"));
         assert!(is_common_word("currently") && !is_common_word("Laravel"));
     }
 
@@ -1514,8 +1567,9 @@ mod tests {
 
     #[test]
     fn unreachable_cleanup_is_not_retried_and_a_homophone_can_be_salvaged() {
-        assert!(!should_retry_cleanup("couldn't reach Groq: timed out"));
-        assert!(!should_retry_cleanup("error sending request: timeout"));
+        assert!(should_retry_cleanup("couldn't reach Groq: timed out"));
+        assert!(should_retry_cleanup("error sending request: timeout"));
+        assert!(!should_retry_cleanup("couldn't reach Groq"));
         assert!(should_retry_cleanup("rejected empty rewrite"));
         assert!(should_retry_cleanup("rejected rewrite (40 chars, transcript 12 chars)"));
         let saved = salvage_homophones(

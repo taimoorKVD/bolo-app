@@ -171,6 +171,9 @@ mod tests {
         let words = words();
         let cases = [
             ("Open Volo and start dictating.", "Open Bolo and start dictating."),
+            ("Ask Roomba about Crock", "Ask RoomBoss about Grok."),
+            ("Roombos then GROV", "RoomBoss then Grok."),
+            ("PoloApp and BoloApp", "Bolo and Bolo."),
             ("Open Volo.com and start dictating.", "Open Bolo.com and start dictating."),
             ("Send it to taimurhussain.com", "Send it to taimoorhussain.com."),
             ("Send it to taimoorhussain.com", "Send it to taimoorhussain.com."),
