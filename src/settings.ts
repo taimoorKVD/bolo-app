@@ -16,6 +16,8 @@ import {
 import lockupUrl from "./brand-lockup.svg";
 import { formatDuration, formatHotkey, formatWhen, modelLabel } from "./format";
 import { listenerNotice, statusBanner, visibleMessage } from "./notices";
+import { knownOfflineModel, OFFLINE_MODELS, offlineModelNote } from "./offline-models";
+import { SCRIPT_SETS, scriptSetId, sentenceCue } from "./script-sets";
 import type {
   ApiKeyStatus,
   ProviderKeyRow,
@@ -107,7 +109,7 @@ function normalizeSettings(settings: Settings): Settings {
   return {
     ...settings,
     historyEnabled: settings.historyEnabled !== false,
-    offlineModel: settings.offlineModel || "base.en",
+    offlineModel: knownOfflineModel(settings.offlineModel),
     pasteHotkey: settings.pasteHotkey ?? { ctrl: true, alt: false, shift: false, win: true, key: "v" },
     output: settings.output === "same" ? "same" : "english",
     verbatim: settings.verbatim === true,
@@ -980,6 +982,7 @@ function languagePanel(draft: Draft): HTMLElement {
   lang.addEventListener("change", () => {
     draft.settings.language = lang.value;
     markDirty(draft);
+    refreshOfflineNote(draft);
   });
   langLabel.append(lang);
   const outputLabel = el("label", "stack");
@@ -1053,34 +1056,22 @@ function enginePanel(draft: Draft): HTMLElement {
   offlineLabel.append(el("span", "label", "On-device model"));
   const offline = document.createElement("select");
   offline.setAttribute("aria-label", "On-device model");
-  const offlineChoices: Array<[string, string]> = [
-    ["base.en", "base.en — smaller English model"],
-    ["small.en", "small.en — larger English model"],
-    ["off", "Off — Groq only"],
-  ];
-  for (const [value, name] of offlineChoices) {
+  for (const choice of OFFLINE_MODELS) {
     const option = document.createElement("option");
-    option.value = value;
-    option.textContent = name;
+    option.value = choice.id;
+    option.textContent = choice.label;
     offline.append(option);
   }
-  const selected = draft.settings.offlineModel === "small.en" || draft.settings.offlineModel === "off"
-    ? draft.settings.offlineModel
-    : "base.en";
-  offline.value = selected;
+  offline.value = knownOfflineModel(draft.settings.offlineModel);
+  const offlineNote = el("p", "field-note", offlineModelNote(draft.settings.language, offline.value));
+  offlineNote.dataset.offlineNote = "true";
   offline.addEventListener("change", () => {
     draft.settings.offlineModel = offline.value;
     markDirty(draft);
     refreshPills(draft);
+    refreshOfflineNote(draft);
   });
-  offlineLabel.append(
-    offline,
-    el(
-      "p",
-      "field-note",
-      "If Groq is rate limiting, down, or unreachable, Bolo transcribes this take on the PC with whisper.cpp and tries Groq again on the next one. The model downloads the first time it's needed.",
-    ),
-  );
+  offlineLabel.append(offline, offlineNote);
   panel.append(grid, offlineLabel);
   return panel;
 }
@@ -2008,9 +1999,28 @@ function accuracyPanel(draft: Draft): HTMLElement {
   panel.append(debugActions, debugNote);
 
   const head = el("h3", "", "Record the test sentences");
+  const setLabel = el("label", "stack");
+  setLabel.append(el("span", "label", "Sentence set"));
+  const setPicker = document.createElement("select");
+  setPicker.setAttribute("aria-label", "Sentence set");
+  for (const set of SCRIPT_SETS) {
+    const option = document.createElement("option");
+    option.value = set.id;
+    option.textContent = set.label;
+    setPicker.append(option);
+  }
+  setLabel.append(
+    setPicker,
+    el(
+      "p",
+      "field-note",
+      "The original 30 stay unchanged so older scores can be compared. The second set is Urdu, mixed Urdu and English, Hindi, and English names.",
+    ),
+  );
   const progress = el("p", "field-note", "");
   const cue = el("p", "card-body", "");
   const say = el("p", "accuracy-say", "Loading sentences…");
+  say.dir = "auto";
   const takeNote = el("p", "field-note", "");
   const actions = el("div", "share-actions");
   const record = button("Record", "primary");
@@ -2023,9 +2033,10 @@ function accuracyPanel(draft: Draft): HTMLElement {
   const openSet = button("Open recordings", "ghost");
   const clearSet = button("Delete recordings", "ghost");
   folderActions.append(openSet, clearSet);
-  panel.append(head, progress, cue, say, takeNote, actions, folderActions);
+  panel.append(head, setLabel, progress, cue, say, takeNote, actions, folderActions);
 
   let lines: ScriptLine[] = [];
+  let setId = "original";
   let saved = new Set<string>();
   let index = 0;
   let recording = false;
@@ -2036,13 +2047,18 @@ function accuracyPanel(draft: Draft): HTMLElement {
     const line = lines[index];
     const done = lines.filter((item) => saved.has(item.id)).length;
     progress.textContent = lines.length ? `${done} of ${lines.length} saved` : "";
+    if (!lines.length) {
+      cue.textContent = "";
+      record.disabled = true;
+      return;
+    }
     if (!line) {
       cue.textContent = "";
       say.textContent = "That's the set. The recordings are on this PC, not in the project folder.";
       record.disabled = true;
       return;
     }
-    cue.textContent = line.cue;
+    cue.textContent = sentenceCue(line.bucket || line.expectedLanguage, line.cue);
     say.textContent = line.say;
     record.disabled = starting;
     record.textContent = recording ? "Stop" : holding ? "Record again" : saved.has(line.id) ? "Record again" : "Record";
@@ -2156,21 +2172,49 @@ function accuracyPanel(draft: Draft): HTMLElement {
       });
   });
 
-  void api
-    .accuracyScript()
-    .then(async (script) => {
-      lines = script;
-      try {
-        saved = new Set(await api.accuracySaved());
-      } catch {
-        saved = new Set();
-      }
-      jumpToPending();
-    })
-    .catch((error) => {
-      say.textContent = messageOf(error);
-    });
+  const load = () => {
+    const requested = setId;
+    void api
+      .accuracyScript(requested)
+      .then(async (script) => {
+        if (requested !== setId) return;
+        lines = script;
+        try {
+          saved = new Set(await api.accuracySaved());
+        } catch {
+          saved = new Set();
+        }
+        jumpToPending();
+      })
+      .catch((error) => {
+        if (requested !== setId) return;
+        say.textContent = messageOf(error);
+      });
+  };
+  setPicker.addEventListener("change", () => {
+    setId = scriptSetId(setPicker.value);
+    if (recording) {
+      recording = false;
+      void api.accuracyDiscard();
+    }
+    holding = false;
+    starting = false;
+    save.disabled = true;
+    redo.disabled = true;
+    lines = [];
+    takeNote.textContent = "";
+    say.textContent = "Loading sentences…";
+    show();
+    load();
+  });
+  load();
   return panel;
+}
+
+function refreshOfflineNote(draft: Draft): void {
+  const note = document.querySelector<HTMLElement>("[data-offline-note]");
+  if (!note) return;
+  note.textContent = offlineModelNote(draft.settings.language, draft.settings.offlineModel);
 }
 
 function advancedPanel(draft: Draft): HTMLElement {

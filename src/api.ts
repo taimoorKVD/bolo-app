@@ -129,7 +129,7 @@ export const api = {
     call<void>("smoke_finished", { ok, detail }),
   openDebugFolder: () => call<void>("open_debug_folder"),
   clearDebugFolder: () => call<void>("clear_debug_folder"),
-  accuracyScript: () => call<ScriptLine[]>("accuracy_script"),
+  accuracyScript: (set?: string) => call<ScriptLine[]>("accuracy_script", { set: set ?? "original" }),
   accuracyRecordStart: () => call<void>("accuracy_record_start"),
   accuracyRecordStop: () => call<HeldInfo>("accuracy_record_stop"),
   accuracyDiscard: () => call<void>("accuracy_record_discard"),

@@ -46,6 +46,8 @@ export type ScriptLine = {
   id: string;
   kind: string;
   expectedLanguage: string;
+  /** `en`, `ur`, `mixed`, or `hi`. */
+  bucket?: string;
   cue: string;
   say: string;
 };

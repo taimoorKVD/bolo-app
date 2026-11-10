@@ -526,6 +526,9 @@ fn save_settings(
     if !settings.keep_recordings {
         spool::discard_all_audio(&state.config_dir);
     }
+    if previous.offline_model != settings.offline_model {
+        offline::prefetch(state.config_dir.clone(), settings.offline_model.clone());
+    }
     state.listener.set_hotkey(settings.hotkey.clone());
     state.listener.set_paste_hotkey(settings.paste_hotkey.clone());
     state.warm.retarget(settings.microphone.clone());
@@ -789,8 +792,8 @@ fn clear_debug_folder(state: tauri::State<'_, AppState>) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn accuracy_script() -> &'static [measure::ScriptLine] {
-    measure::script()
+fn accuracy_script(set: Option<String>) -> &'static [measure::ScriptLine] {
+    measure::script_set(set.as_deref())
 }
 
 #[tauri::command]
