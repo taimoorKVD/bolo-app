@@ -106,6 +106,8 @@ async function main() {
     try {
       const ip = (trustProxy ? String(req.headers["x-forwarded-for"] || "").split(",")[0].trim() : "") || req.socket.remoteAddress || "";
       const rawPath = (req.url || "/").split("?")[0];
+      // Set this before any /office return so errors and API routes stay out of indexes too.
+      if (rawPath === OFFICE || rawPath.startsWith(OFFICE + "/")) res.setHeader("x-robots-tag", "noindex, nofollow");
       // Public admin lives at /office; /admin only redirects. Internally the tested app still routes /admin.
       if (rawPath === "/admin" || rawPath.startsWith("/admin/")) { res.statusCode = 301; res.setHeader("location", OFFICE + rawPath.slice(6)); return res.end(); }
       const isApi = rawPath === "/v1" || rawPath.startsWith("/v1/") || rawPath === "/health" || rawPath === OFFICE || rawPath.startsWith(OFFICE + "/");
