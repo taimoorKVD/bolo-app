@@ -19,9 +19,13 @@ function htmlHeaders(): HeadersInit {
   };
 }
 
+function bootScript(admin: AdminService): string {
+  const boot = { mock: admin.isMock(), apiBase: "/admin/api", home: "/admin" };
+  return `<script>window.__BOLO_OFFICE__=${JSON.stringify(boot)};</script>`;
+}
+
 function page(admin: AdminService, extraHead = ""): Response {
-  const boot = `<script>window.__BOLO_OFFICE__=${JSON.stringify({ mock: admin.isMock() })};</script>`;
-  return new Response(ADMIN_HTML.replace("</head>", `${boot}${extraHead}</head>`), { headers: htmlHeaders() });
+  return new Response(ADMIN_HTML.replace("</head>", `${bootScript(admin)}${extraHead}</head>`), { headers: htmlHeaders() });
 }
 
 /** Admin routes under /admin (UI) and /admin/api/* (JSON). Returns null when not an admin path. */
@@ -55,7 +59,7 @@ window.addEventListener("load", function () {
   }
   if (req.method === "GET" && path === "/admin/setup") {
     if (!admin.setupAvailable()) return error(404, "not_found", "Not found.");
-    return new Response(SETUP_HTML, { headers: htmlHeaders() });
+    return new Response(SETUP_HTML.replace("</head>", `${bootScript(admin)}</head>`), { headers: htmlHeaders() });
   }
 
   if (!path.startsWith("/admin/api/")) return null;
@@ -78,9 +82,27 @@ window.addEventListener("load", function () {
     const b = await body(req);
     return out(await admin.login(str(b.email), str(b.password), str(b.code)));
   }
+  if (req.method === "POST" && route === "/login/code") {
+    const b = await body(req);
+    return out(await admin.completeEmailLogin(str(b.challenge), str(b.code)));
+  }
+  if (req.method === "POST" && route === "/login/resend") {
+    const b = await body(req);
+    return out(await admin.resendEmailLogin(str(b.challenge)));
+  }
+  if (req.method === "POST" && route === "/reauth/send") {
+    return out(await admin.sendReauthCode(token));
+  }
   if (req.method === "POST" && route === "/reauth") {
     const b = await body(req);
-    return out(await admin.reauth(token, str(b.code)));
+    return out(await admin.reauth(token, str(b.code), str(b.password)));
+  }
+  if (req.method === "POST" && route === "/me/email-2fa") {
+    return out(await admin.requestOwnEmail2fa(token));
+  }
+  if (req.method === "POST" && route === "/me/email-2fa/confirm") {
+    const b = await body(req);
+    return out(await admin.confirmOwnEmail2fa(token, str(b.code)));
   }
   if (req.method === "POST" && route === "/enroll") {
     const b = await body(req);
@@ -128,13 +150,14 @@ window.addEventListener("load", function () {
         password: str(b.password),
       }, reason));
     }
-    let tm = /^\/team\/([^/]+)\/(role|enabled)$/.exec(route);
+    let tm = /^\/team\/([^/]+)\/(role|enabled|email-2fa)$/.exec(route);
     if (tm) {
       const email = decodeURIComponent(tm[1]);
       const verb = tm[2];
       const g = await admin.authorizeTeamMutation(token, `staff:${email}`, reason);
       if (!g.ok) return out(g);
       if (verb === "role") return out(admin.setStaffRole(g.value, email, str(b.role) as AdminRole, reason));
+      if (verb === "email-2fa") return out(admin.setStaffEmail2fa(g.value, email, b.enabled === true, reason));
       return out(admin.setStaffEnabled(g.value, email, b.enabled !== false, reason));
     }
 

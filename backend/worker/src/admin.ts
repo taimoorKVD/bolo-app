@@ -1,4 +1,4 @@
-import { sha256Hex } from "./crypto";
+import { randomToken, sha256Hex } from "./crypto";
 import { evaluateCaps } from "./caps";
 import type { MockBackend } from "../mock/store";
 import type { Install, Plan, Profile, UsageEvent } from "./types";
@@ -48,6 +48,8 @@ export interface AdminAccount {
   totpSecret?: string;
   enabled: boolean;
   totpEnrolled: boolean;
+  /** Email sign-in code. Undefined in old snapshots until migration. */
+  email2fa?: boolean;
   createdAt: string;
   /** Env-bootstrap account (owner/support/viewer from ADMIN_ACCOUNTS). */
   bootstrap?: boolean;
@@ -60,6 +62,7 @@ export interface StaffPublic {
   label: string;
   enabled: boolean;
   totpEnrolled: boolean;
+  email2fa: boolean;
   createdAt: string;
   bootstrap: boolean;
 }
@@ -127,6 +130,37 @@ const LOGIN_FAIL_LIMIT = 5;
 const LOGIN_WINDOW_MS = 15 * 60 * 1000;
 const LOGIN_LOCK_MS = 15 * 60 * 1000;
 const GENERIC_LOGIN_ERROR = "Sign-in failed.";
+const EMAIL_CODE_TTL_MS = 10 * 60 * 1000;
+const EMAIL_CODE_MAX_ATTEMPTS = 5;
+const EMAIL_RESEND_MS = 60 * 1000;
+const EMAIL_MAX_SENDS = 5;
+/** Existing owner gets email 2FA when a snapshot has no explicit flag. */
+const OWNER_EMAIL_2FA = "info@kingdomvision.com";
+
+interface EmailCodeRow {
+  email: string;
+  purpose: "login" | "reauth" | "enable";
+  salt: string;
+  codeHash: string;
+  challengeId: string;
+  expiresAt: number;
+  attempts: number;
+  lastSentAt: number;
+  sends: number;
+}
+
+export interface LoginValue {
+  token?: string;
+  role: AdminRole;
+  email: string;
+  label: string;
+  needsEnrollment: boolean;
+  needsEmailCode?: boolean;
+  challenge?: string;
+  resendAfterSeconds?: number;
+  totpAvailable?: boolean;
+  enrollment?: StaffEnrollment;
+}
 
 export class AdminService {
   private admins = new Map<string, AdminAccount>();
@@ -147,6 +181,9 @@ export class AdminService {
   isMock() { return this.mode === "mock"; }
   /** Optional external verifier (e.g. env bootstrap secrets). Falls back to account.totpSecret. */
   codeVerifier?: (email: string, code: string) => Promise<boolean>;
+  /** Sends a 6-digit Office code. Production wires this to SMTP. Never log the code. */
+  officeMailer?: (email: string, code: string) => Promise<boolean>;
+  private emailCodes = new Map<string, EmailCodeRow>();
   private async codeOk(email: string, code: string) {
     if (this.mode === "mock") return code === MOCK_TOTP_CODE;
     const key = email.toLowerCase();
@@ -159,7 +196,7 @@ export class AdminService {
     return true;
   }
 
-  addAdmin(a: Omit<AdminAccount, "enabled" | "totpEnrolled" | "createdAt"> & Partial<Pick<AdminAccount, "enabled" | "totpEnrolled" | "createdAt" | "passwordHash" | "totpSecret" | "bootstrap">>) {
+  addAdmin(a: Omit<AdminAccount, "enabled" | "totpEnrolled" | "createdAt"> & Partial<Pick<AdminAccount, "enabled" | "totpEnrolled" | "createdAt" | "passwordHash" | "totpSecret" | "bootstrap" | "email2fa">>) {
     const email = a.email.toLowerCase();
     const existing = this.admins.get(email);
     const merged: AdminAccount = {
@@ -170,6 +207,7 @@ export class AdminService {
       totpSecret: a.totpSecret ?? existing?.totpSecret,
       enabled: a.enabled ?? existing?.enabled ?? true,
       totpEnrolled: a.totpEnrolled ?? existing?.totpEnrolled ?? (Boolean(a.totpSecret || existing?.totpSecret) || this.mode === "mock"),
+      email2fa: a.email2fa ?? existing?.email2fa,
       createdAt: a.createdAt ?? existing?.createdAt ?? new Date(this.now()).toISOString(),
       bootstrap: a.bootstrap ?? existing?.bootstrap,
     };
@@ -313,6 +351,7 @@ export class AdminService {
         existing.totpSecret = raw.totpSecret || existing.totpSecret;
         existing.enabled = raw.enabled !== false;
         existing.totpEnrolled = Boolean(raw.totpEnrolled || existing.totpEnrolled);
+        if (raw.email2fa === true || raw.email2fa === false) existing.email2fa = raw.email2fa;
         if (raw.createdAt) existing.createdAt = raw.createdAt;
         continue;
       }
@@ -324,10 +363,30 @@ export class AdminService {
         totpSecret: raw.totpSecret,
         enabled: raw.enabled !== false,
         totpEnrolled: Boolean(raw.totpEnrolled),
+        email2fa: raw.email2fa === true ? true : raw.email2fa === false ? false : undefined,
         createdAt: raw.createdAt || new Date(this.now()).toISOString(),
         bootstrap: false,
       });
     }
+    this.applyEmail2faMigration();
+  }
+
+  /**
+   * Old snapshots have no email2fa flag. The existing owner
+   * info@kingdomvision.com gets email codes on; an explicit false is kept.
+   */
+  applyEmail2faMigration() {
+    for (const acct of this.admins.values()) {
+      if (acct.email2fa === true || acct.email2fa === false) continue;
+      acct.email2fa = acct.email === OWNER_EMAIL_2FA && acct.role === "owner";
+    }
+  }
+
+  /** True when this account must enter an email code after the password. */
+  email2faOn(acct: AdminAccount): boolean {
+    if (acct.email2fa === false) return false;
+    if (acct.email2fa === true) return true;
+    return acct.email === OWNER_EMAIL_2FA && acct.role === "owner";
   }
 
   private toPublic(a: AdminAccount): StaffPublic {
@@ -337,6 +396,7 @@ export class AdminService {
       label: a.label,
       enabled: a.enabled,
       totpEnrolled: a.totpEnrolled,
+      email2fa: this.email2faOn(a),
       createdAt: a.createdAt,
       bootstrap: Boolean(a.bootstrap),
     };
@@ -396,9 +456,7 @@ export class AdminService {
   }
   auditLog(): readonly AuditEntry[] { return this.audit.slice().reverse(); }
 
-  async login(email: string, password: string, totp: string): Promise<AdminResult<{
-    token: string; role: AdminRole; email: string; label: string; needsEnrollment: boolean; enrollment?: StaffEnrollment;
-  }>> {
+  async login(email: string, password: string, totp = ""): Promise<AdminResult<LoginValue>> {
     const normalized = email.trim().toLowerCase();
     if (this.isLoginLocked(normalized)) {
       this.record({ adminEmail: normalized || "(blank)", role: "viewer", action: "login", target: "admin", reason: "", result: "denied", detail: "rate_limited" });
@@ -412,7 +470,6 @@ export class AdminService {
     };
 
     if (this.mode !== "mock") {
-      // Production always requires configured staff accounts (bootstrap and/or restored).
       if (this.admins.size === 0) return fail(503, "admin_auth_not_configured", "Admin sign-in is not configured.");
     }
 
@@ -423,25 +480,81 @@ export class AdminService {
     if (this.mode === "mock") {
       if (acct.passwordHash && !(await verifyPassword(password, acct.passwordHash))) return deny();
       if (!(await this.codeOk(acct.email, totp))) return deny();
-    } else {
-      if (!acct.passwordHash || !(await verifyPassword(password, acct.passwordHash))) return deny();
-      if (!acct.totpEnrolled) {
-        // Password ok; issue session and surface one-time authenticator enrollment.
-        const enrollment = this.ensureEnrollment(acct);
-        const bytes = crypto.getRandomValues(new Uint8Array(32));
-        const token = "adm_" + [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
-        const t = this.now();
-        this.sessions.push({
-          tokenHash: await sha256Hex(token), email: acct.email, role: acct.role,
-          expiresAt: t + SESSION_TTL_MS, recentAuthAt: t, needsEnrollment: true,
-        });
-        this.clearLoginFails(normalized);
-        this.record({ adminEmail: acct.email, role: acct.role, action: "login", target: "admin", reason: "", result: "ok", detail: "needs_enrollment" });
-        return { ok: true, value: { token, role: acct.role, email: acct.email, label: acct.label, needsEnrollment: true, enrollment } };
-      }
-      if (!(await this.codeOk(acct.email, totp))) return deny();
+      return this.issueSession(acct);
     }
 
+    if (!acct.passwordHash || !(await verifyPassword(password, acct.passwordHash))) return deny();
+
+    if (this.email2faOn(acct)) {
+      const given = totp.trim();
+      if (given) {
+        const emailHit = await this.takeEmailCode(given, "login", acct.email);
+        if (emailHit === "ok" || (acct.totpEnrolled && await this.codeOk(acct.email, given))) {
+          this.clearEmailCodes(acct.email, "login");
+          return this.issueSession(acct);
+        }
+        return deny();
+      }
+      const sent = await this.issueEmailCode(acct.email, "login", false);
+      if (!sent.ok) {
+        this.record({ adminEmail: acct.email, role: acct.role, action: "login", target: "admin", reason: "", result: "denied", detail: "email_send" });
+        return fail(sent.status, "admin_login_failed", GENERIC_LOGIN_ERROR);
+      }
+      this.clearLoginFails(normalized);
+      return {
+        ok: true,
+        value: {
+          role: acct.role, email: acct.email, label: acct.label, needsEnrollment: false,
+          needsEmailCode: true, challenge: sent.challenge, resendAfterSeconds: sent.resendAfterSeconds,
+          totpAvailable: acct.totpEnrolled,
+        },
+      };
+    }
+
+    return this.issueSession(acct);
+  }
+
+  async completeEmailLogin(challenge: string, code: string): Promise<AdminResult<LoginValue>> {
+    const row = this.findCode(challenge, "login");
+    const email = row?.email || "";
+    if (email && this.isLoginLocked(email)) {
+      return fail(429, "login_rate_limited", GENERIC_LOGIN_ERROR);
+    }
+    const deny = () => {
+      if (email) this.noteLoginFail(email);
+      this.record({ adminEmail: email || "(blank)", role: "viewer", action: "login", target: "admin", reason: "", result: "denied" });
+      return fail(401, "admin_login_failed", GENERIC_LOGIN_ERROR);
+    };
+    if (!row) return deny();
+    const acct = this.admins.get(row.email);
+    if (!acct || !acct.enabled || !this.email2faOn(acct)) return deny();
+    const hit = await this.takeEmailCode(code, "login", acct.email, challenge);
+    if (hit === "ok" || (acct.totpEnrolled && await this.codeOk(acct.email, code.trim()))) {
+      this.clearEmailCodes(acct.email, "login");
+      return this.issueSession(acct);
+    }
+    return deny();
+  }
+
+  async resendEmailLogin(challenge: string): Promise<AdminResult<{ sent: true; resendAfterSeconds: number }>> {
+    const row = this.findCode(challenge, "login");
+    if (!row) return fail(401, "admin_login_failed", GENERIC_LOGIN_ERROR);
+    if (this.isLoginLocked(row.email)) return fail(429, "login_rate_limited", GENERIC_LOGIN_ERROR);
+    const sent = await this.issueEmailCode(row.email, "login", true);
+    if (!sent.ok) return fail(sent.status, "admin_login_failed", GENERIC_LOGIN_ERROR);
+    return { ok: true, value: { sent: true, resendAfterSeconds: sent.resendAfterSeconds } };
+  }
+
+  /** True when a stored code row contains this plaintext (tests; always false in production storage). */
+  storesPlaintextCode(code: string): boolean {
+    for (const row of this.emailCodes.values()) {
+      const bag = row as EmailCodeRow & { code?: string };
+      if (bag.code === code || bag.codeHash === code || bag.salt === code) return true;
+    }
+    return false;
+  }
+
+  private async issueSession(acct: AdminAccount): Promise<AdminResult<LoginValue>> {
     const bytes = crypto.getRandomValues(new Uint8Array(32));
     const token = "adm_" + [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
     const t = this.now();
@@ -449,9 +562,86 @@ export class AdminService {
       tokenHash: await sha256Hex(token), email: acct.email, role: acct.role,
       expiresAt: t + SESSION_TTL_MS, recentAuthAt: t, needsEnrollment: false,
     });
-    this.clearLoginFails(normalized);
+    this.clearLoginFails(acct.email);
     this.record({ adminEmail: acct.email, role: acct.role, action: "login", target: "admin", reason: "", result: "ok" });
     return { ok: true, value: { token, role: acct.role, email: acct.email, label: acct.label, needsEnrollment: false } };
+  }
+
+  private randomDigits(): string {
+    const limit = 0x1_0000_0000 - (0x1_0000_0000 % 1_000_000);
+    const buf = new Uint32Array(1);
+    let n = 0;
+    do { crypto.getRandomValues(buf); n = buf[0]; } while (n >= limit);
+    return String(n % 1_000_000).padStart(6, "0");
+  }
+
+  private codeKey(email: string, purpose: EmailCodeRow["purpose"]) {
+    return `${purpose}:${email.toLowerCase()}`;
+  }
+
+  private findCode(challenge: string, purpose: EmailCodeRow["purpose"]): EmailCodeRow | undefined {
+    for (const row of this.emailCodes.values()) {
+      if (row.purpose === purpose && row.challengeId === challenge) return row;
+    }
+    return undefined;
+  }
+
+  private clearEmailCodes(email: string, purpose: EmailCodeRow["purpose"]) {
+    this.emailCodes.delete(this.codeKey(email, purpose));
+  }
+
+  private async issueEmailCode(email: string, purpose: EmailCodeRow["purpose"], resend: boolean): Promise<
+    { ok: true; challenge: string; resendAfterSeconds: number } | { ok: false; status: number }
+  > {
+    const key = this.codeKey(email, purpose);
+    const t = this.now();
+    const existing = this.emailCodes.get(key);
+    const live = existing && existing.expiresAt > t ? existing : undefined;
+    if (live && t - live.lastSentAt < EMAIL_RESEND_MS) {
+      if (!resend) return { ok: true, challenge: live.challengeId, resendAfterSeconds: Math.max(1, Math.ceil((EMAIL_RESEND_MS - (t - live.lastSentAt)) / 1000)) };
+      return { ok: false, status: 429 };
+    }
+    if (live && live.sends >= EMAIL_MAX_SENDS) return { ok: false, status: 429 };
+    if (!this.officeMailer) return { ok: false, status: 503 };
+    const code = this.randomDigits();
+    let delivered = false;
+    try { delivered = await this.officeMailer(email, code); } catch { delivered = false; }
+    if (!delivered) return { ok: false, status: 503 };
+    const salt = randomToken(8);
+    const codeHash = await sha256Hex(`${salt}:${code}`);
+    this.emailCodes.set(key, {
+      email: email.toLowerCase(),
+      purpose,
+      salt,
+      codeHash,
+      challengeId: live?.challengeId || randomToken(16),
+      expiresAt: t + EMAIL_CODE_TTL_MS,
+      attempts: live?.attempts ?? 0,
+      lastSentAt: t,
+      sends: (live?.sends ?? 0) + 1,
+    });
+    const row = this.emailCodes.get(key)!;
+    return { ok: true, challenge: row.challengeId, resendAfterSeconds: Math.ceil(EMAIL_RESEND_MS / 1000) };
+  }
+
+  /** ok, or fail. Deletes the row after max attempts or expiry. Does not accept TOTP. */
+  private async takeEmailCode(code: string, purpose: EmailCodeRow["purpose"], email: string, challenge?: string): Promise<"ok" | "fail"> {
+    const key = this.codeKey(email, purpose);
+    const row = this.emailCodes.get(key);
+    const t = this.now();
+    if (!row || row.purpose !== purpose || (challenge && row.challengeId !== challenge)) return "fail";
+    if (row.expiresAt <= t || row.attempts >= EMAIL_CODE_MAX_ATTEMPTS) {
+      this.emailCodes.delete(key);
+      return "fail";
+    }
+    const hash = await sha256Hex(`${row.salt}:${code.trim()}`);
+    if (timingSafeEqualString(hash, row.codeHash)) {
+      this.emailCodes.delete(key);
+      return "ok";
+    }
+    row.attempts += 1;
+    if (row.attempts >= EMAIL_CODE_MAX_ATTEMPTS) this.emailCodes.delete(key);
+    return "fail";
   }
 
   private ensureEnrollment(acct: AdminAccount): StaffEnrollment {
@@ -471,7 +661,7 @@ export class AdminService {
     return enrollment;
   }
 
-  private async session(token: string | null): Promise<AdminSession | null> {
+  private async session(token: string | null | undefined): Promise<AdminSession | null> {
     if (!token) return null;
     const h = await sha256Hex(token);
     const s = this.sessions.find((x) => x.tokenHash === h);
@@ -479,20 +669,36 @@ export class AdminService {
     return s;
   }
 
-  async reauth(token: string | null, totp: string): Promise<AdminResult<{ recentAuthUntil: string }>> {
+  async reauth(token: string | null | undefined, totp: string, password = ""): Promise<AdminResult<{ recentAuthUntil: string }>> {
     const s = await this.session(token);
     if (!s) return fail(401, "admin_unauthenticated", "Please sign in.");
-    if (!(await this.codeOk(s.email, totp))) {
+    const acct = this.admins.get(s.email.toLowerCase());
+    if (!acct || !acct.enabled) return fail(401, "admin_unauthenticated", "Please sign in.");
+    const code = totp.trim();
+    const emailOk = code ? await this.takeEmailCode(code, "reauth", acct.email) === "ok" : false;
+    const totpOk = code ? await this.codeOk(acct.email, code) : false;
+    const passwordOk = !this.email2faOn(acct) && !acct.totpEnrolled && password
+      ? await verifyPassword(password, acct.passwordHash || "")
+      : false;
+    if (!emailOk && !totpOk && !passwordOk) {
       this.record({ adminEmail: s.email, role: s.role, action: "reauth", target: "admin", reason: "", result: "denied" });
-      return fail(401, "reauth_failed", "Authenticator code is wrong.");
+      return fail(401, "reauth_failed", "That code did not work.");
     }
     s.recentAuthAt = this.now();
     this.record({ adminEmail: s.email, role: s.role, action: "reauth", target: "admin", reason: "", result: "ok" });
     return { ok: true, value: { recentAuthUntil: new Date(s.recentAuthAt + RECENT_AUTH_MS).toISOString() } };
   }
 
+  async sendReauthCode(token: string | null | undefined): Promise<AdminResult<{ sent: true; resendAfterSeconds: number }>> {
+    const s = await this.session(token);
+    if (!s) return fail(401, "admin_unauthenticated", "Please sign in.");
+    const sent = await this.issueEmailCode(s.email, "reauth", true);
+    if (!sent.ok) return fail(sent.status === 429 ? 429 : 400, "reauth_failed", "Could not email a code. Try again.");
+    return { ok: true, value: { sent: true, resendAfterSeconds: sent.resendAfterSeconds } };
+  }
+
   /** Central gate: role permission, reason and recent MFA for sensitive actions; audits denials. */
-  async authorize(token: string | null, action: AdminAction, target = "", reason = ""): Promise<AdminResult<AdminSession>> {
+  async authorize(token: string | null | undefined, action: AdminAction, target = "", reason = ""): Promise<AdminResult<AdminSession>> {
     const s = await this.session(token);
     if (!s) return fail(401, "admin_unauthenticated", "Please sign in.");
     const acct = this.admins.get(s.email.toLowerCase());
@@ -501,7 +707,7 @@ export class AdminService {
       return fail(status, code, message);
     };
     if (!acct || !acct.enabled) return deny(401, "admin_unauthenticated", "Please sign in.");
-    const needsEnrollment = Boolean(s.needsEnrollment || (!acct.totpEnrolled && this.mode !== "mock"));
+    const needsEnrollment = Boolean(s.needsEnrollment);
     if (needsEnrollment && action !== "view") {
       return deny(403, "enrollment_required", "Finish authenticator setup before using Office.");
     }
@@ -509,14 +715,14 @@ export class AdminService {
     if (!can(s.role, action)) return deny(403, "forbidden_role", `Your role (${s.role}) cannot do this.`);
     if (SENSITIVE.has(action)) {
       if (reason.trim().length < 5) return deny(400, "reason_required", "Please give a reason (at least 5 characters).");
-      if (this.now() - s.recentAuthAt > RECENT_AUTH_MS) return deny(401, "reauth_required", "Confirm with your authenticator code first.");
+      if (this.now() - s.recentAuthAt > RECENT_AUTH_MS) return deny(401, "reauth_required", "Confirm with a sign-in code first.");
     }
     return { ok: true, value: s };
   }
 
   me(s: AdminSession) {
     const acct = this.admins.get(s.email.toLowerCase());
-    const needsEnrollment = Boolean(s.needsEnrollment || (acct && !acct.totpEnrolled && this.mode !== "mock"));
+    const needsEnrollment = Boolean(s.needsEnrollment);
     return {
       email: s.email,
       role: s.role,
@@ -524,6 +730,8 @@ export class AdminService {
       recentAuthUntil: new Date(s.recentAuthAt + RECENT_AUTH_MS).toISOString(),
       permissions: needsEnrollment ? [] : [...PERMISSIONS[s.role]],
       needsEnrollment,
+      email2fa: acct ? this.email2faOn(acct) : false,
+      totpEnrolled: Boolean(acct?.totpEnrolled),
       production: this.mode !== "mock",
     };
   }
@@ -724,7 +932,7 @@ export class AdminService {
 
   // ---- team (owner only; server-enforced) ----
   /** Owner team mutations: permission + reason + fresh MFA (same bar as other sensitive ops). */
-  async authorizeTeamMutation(token: string | null, target = "", reason = ""): Promise<AdminResult<AdminSession>> {
+  async authorizeTeamMutation(token: string | null | undefined, target = "", reason = ""): Promise<AdminResult<AdminSession>> {
     const base = await this.authorize(token, "manage_team", target, reason);
     if (!base.ok) return base;
     const s = base.value;
@@ -733,7 +941,7 @@ export class AdminService {
       return fail(status, code, message);
     };
     if (reason.trim().length < 5) return deny(400, "reason_required", "Please give a reason (at least 5 characters).");
-    if (this.now() - s.recentAuthAt > RECENT_AUTH_MS) return deny(401, "reauth_required", "Confirm with your authenticator code first.");
+    if (this.now() - s.recentAuthAt > RECENT_AUTH_MS) return deny(401, "reauth_required", "Confirm with a sign-in code first.");
     return base;
   }
 
@@ -764,6 +972,7 @@ export class AdminService {
       totpSecret,
       enabled: true,
       totpEnrolled: false,
+      email2fa: false,
       createdAt: new Date(this.now()).toISOString(),
       bootstrap: false,
     };
@@ -816,8 +1025,47 @@ export class AdminService {
     return { ok: true, value: this.toPublic(acct) };
   }
 
+  setStaffEmail2fa(s: AdminSession, email: string, enabled: boolean, reason: string): AdminResult<StaffPublic> {
+    const key = email.trim().toLowerCase();
+    const acct = this.admins.get(key);
+    if (!acct) return fail(404, "staff_missing", "Staff account not found.");
+    acct.email2fa = enabled;
+    if (!enabled) this.clearEmailCodes(acct.email, "login");
+    this.record({
+      adminEmail: s.email, role: s.role, action: "team_email_2fa", target: `staff:${key}`,
+      reason, result: "ok", detail: enabled ? "on" : "off",
+    });
+    return { ok: true, value: this.toPublic(acct) };
+  }
+
+  async requestOwnEmail2fa(token: string | null | undefined): Promise<AdminResult<{ challenge?: string; resendAfterSeconds?: number; email2fa?: true }>> {
+    const s = await this.session(token);
+    if (!s) return fail(401, "admin_unauthenticated", "Please sign in.");
+    const acct = this.admins.get(s.email.toLowerCase());
+    if (!acct || !acct.enabled) return fail(401, "admin_unauthenticated", "Please sign in.");
+    if (this.email2faOn(acct)) return { ok: true, value: { email2fa: true } };
+    const sent = await this.issueEmailCode(acct.email, "enable", true);
+    if (!sent.ok) return fail(sent.status === 429 ? 429 : 400, "email_2fa_failed", "Could not email a code. Try again.");
+    return { ok: true, value: { challenge: sent.challenge, resendAfterSeconds: sent.resendAfterSeconds } };
+  }
+
+  async confirmOwnEmail2fa(token: string | null | undefined, code: string): Promise<AdminResult<{ email2fa: true }>> {
+    const s = await this.session(token);
+    if (!s) return fail(401, "admin_unauthenticated", "Please sign in.");
+    const acct = this.admins.get(s.email.toLowerCase());
+    if (!acct || !acct.enabled) return fail(401, "admin_unauthenticated", "Please sign in.");
+    if (this.email2faOn(acct)) return { ok: true, value: { email2fa: true } };
+    if (await this.takeEmailCode(code, "enable", acct.email) !== "ok") {
+      this.record({ adminEmail: s.email, role: s.role, action: "email_2fa", target: `staff:${acct.email}`, reason: "", result: "denied" });
+      return fail(401, "email_2fa_failed", "That code did not work.");
+    }
+    acct.email2fa = true;
+    this.record({ adminEmail: s.email, role: s.role, action: "email_2fa", target: `staff:${acct.email}`, reason: "turned on by the account", result: "ok" });
+    return { ok: true, value: { email2fa: true } };
+  }
+
   /** Confirm authenticator enrollment for the signed-in staff member. */
-  async confirmEnrollment(token: string | null, code: string): Promise<AdminResult<{ enrolled: true }>> {
+  async confirmEnrollment(token: string | null | undefined, code: string): Promise<AdminResult<{ enrolled: true }>> {
     const s = await this.session(token);
     if (!s) return fail(401, "admin_unauthenticated", "Please sign in.");
     const acct = this.admins.get(s.email.toLowerCase());
@@ -839,7 +1087,7 @@ export class AdminService {
     return { ok: true, value: { enrolled: true } };
   }
 
-  enrollmentFor(token: string | null): Promise<AdminResult<StaffEnrollment>> {
+  enrollmentFor(token: string | null | undefined): Promise<AdminResult<StaffEnrollment>> {
     return this.session(token).then((s) => {
       if (!s) return fail(401, "admin_unauthenticated", "Please sign in.");
       const acct = this.admins.get(s.email.toLowerCase());

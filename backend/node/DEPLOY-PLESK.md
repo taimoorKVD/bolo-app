@@ -3,14 +3,14 @@
 Primary: self-hosted Node service in `backend/node` (wraps the tested `backend/worker` code).
 Cloudflare Worker (`wrangler.toml`) is an archived alternative. Nothing here is deployed yet.
 
-## URLs (same domain as the existing static site)
+## URLs
 
 | URL | Served by |
 | --- | --- |
 | `https://bolo.thebetawebsite.com/` and all other paths | existing static website (unchanged) |
 | `https://bolo.thebetawebsite.com/v1/...` | Node API (desktop `base_url` = `https://bolo.thebetawebsite.com`) |
-| `https://bolo.thebetawebsite.com/office` | Admin portal (API at `/office/api/...`) |
-| `https://bolo.thebetawebsite.com/admin*` | 301 redirect to `/office` (handled by Node) |
+| `https://officebolo.thebetawebsite.com/` | Office UI (API at `/api/...`, setup at `/setup`) |
+| `https://bolo.thebetawebsite.com/office` and `/admin` | 301 to the same path on `https://officebolo.thebetawebsite.com` |
 
 Health check: `GET /v1/health`.
 
@@ -32,14 +32,23 @@ location ^~ /v1/ {
     client_max_body_size 36m;
     proxy_read_timeout 90s;
 }
-location ^~ /office {
+location = /office { return 301 https://officebolo.thebetawebsite.com/; }
+location ^~ /office/ { rewrite ^/office/?(.*)$ https://officebolo.thebetawebsite.com/$1 permanent; }
+location = /admin { return 301 https://officebolo.thebetawebsite.com/; }
+location ^~ /admin/ { rewrite ^/admin/?(.*)$ https://officebolo.thebetawebsite.com/$1 permanent; }
+```
+
+Office itself is the `officebolo` subdomain, one shared Node process (do not start a second Passenger app). On that subdomain's Additional nginx directives:
+
+```nginx
+location ^~ / {
     proxy_pass http://127.0.0.1:8787;
     proxy_set_header Host $host;
     proxy_set_header X-Forwarded-For $remote_addr;
     proxy_set_header X-Forwarded-Proto $scheme;
+    client_max_body_size 36m;
+    proxy_read_timeout 90s;
 }
-location = /admin { return 301 /office; }
-location ^~ /admin/ { return 301 /office; }
 ```
 
 Before saving, confirm the static site has no existing `/v1`, `/office` or `/admin` folders or
@@ -75,7 +84,9 @@ NOT used by the Node service; do not apply it.
 * `GROQ_API_KEYS` (comma-separated, one per pool)
 * `ADMIN_ACCOUNTS` (`role:email:Label;...`) — bootstrap Owner is `info@kingdomvision.com`
 * `ADMIN_TOTP_SECRETS` (`email:BASE32;...`) — owner authenticator secret
-* `OFFICE_SETUP_TOKEN` — random ≥24-char one-time token; open `/office/setup` to set the owner password (disables itself after success even if env remains)
+* `OFFICE_HOST` — optional, default `officebolo.thebetawebsite.com`. That host serves Office at `/`
+* `OFFICE_SETUP_TOKEN` — random ≥24-char one-time token; open `https://officebolo.thebetawebsite.com/setup` to set the owner password (disables itself after success even if env remains)
+* Office email codes use the mail settings already required above: `SMTP2GO_SENDER` and either `SMTP_HOST` (plus `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS` when the server needs auth) or `SMTP2GO_API_KEY`. The process exits listing any missing names and does not print values.
 * Optional `ADMIN_OWNER_PASSWORD_HASH` — `scrypt$...` only; persisted snapshot hash always wins over env
 * Additional Office staff are created in **Office → Team** (owner only); their password hashes and TOTP secrets persist in Supabase `bolo_state`
 * optional `ADMIN_ALLOWED_IPS`, fair-use limits

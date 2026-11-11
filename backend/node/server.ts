@@ -7,11 +7,12 @@ import { MockBackend } from "../worker/mock/store";
 import { AdminService } from "../worker/src/admin";
 import type { WorkerEnv } from "../worker/src/types";
 import { GroqGateway } from "./groq";
-import { Smtp2GoMailer, SmtpMailer, smtpConfigFromEnv, type Mailer } from "./mailer";
+import { missingOfficeMailEnv, Smtp2GoMailer, SmtpMailer, smtpConfigFromEnv, type Mailer } from "./mailer";
 import { TotpVerifier } from "./totp";
 import { FileStateStore, SupabaseStateStore, autosave, restore, snapshot } from "./persist";
 import { loadDotEnv } from "./load-env";
 import { boloProxyContactPhp as proxyContactPhp, tryStatic } from "./static";
+import { ROBOTS_TXT, normalizeHost, officeHostFromEnv, originAllowed, routeRequest } from "./office-host";
 
 // Named exactly as the website deploy's route patch searches, so a later
 // site publish leaves this file alone instead of inserting a second proxy.
@@ -52,8 +53,15 @@ class ProdBackend extends MockBackend {
   }
 }
 
+const missingMail = missingOfficeMailEnv(E);
+if (missingMail.length) {
+  console.error(`Office email codes need env: ${missingMail.join(", ")}`);
+  process.exit(1);
+}
 const smtp = smtpConfigFromEnv(E);
-const mailer: Mailer = smtp ? new SmtpMailer(smtp, need("SMTP2GO_SENDER")) : new Smtp2GoMailer(need("SMTP2GO_API_KEY"), need("SMTP2GO_SENDER"));
+const mailer: Mailer = smtp
+  ? new SmtpMailer(smtp, E.SMTP2GO_SENDER || "")
+  : new Smtp2GoMailer(E.SMTP2GO_API_KEY || "", E.SMTP2GO_SENDER || "");
 console.log(`mail: ${smtp ? `smtp ${smtp.host}:${smtp.port}` : "smtp2go api"}`);
 const backend = new ProdBackend(env, mailer);
 backend.requireDeviceProof = true;
@@ -83,6 +91,7 @@ if (ownerHashEnv) admin.setOwnerPasswordHash(ownerEmailFixed, ownerHashEnv);
 admin.configureOwnerSetup(E.OFFICE_SETUP_TOKEN);
 const totp = new TotpVerifier(secrets);
 admin.codeVerifier = (e, c) => totp.verify(e, c);
+admin.officeMailer = (email, code) => mailer.sendOfficeCode(email, code);
 
 const keys = need("GROQ_API_KEYS").split(",").map((s) => s.trim()).filter(Boolean);
 const ai = new GroqGateway(keys);
@@ -90,7 +99,7 @@ const store = E.SUPABASE_URL ? new SupabaseStateStore(E.SUPABASE_URL, need("SUPA
 const saver = autosave(store, () => snapshot(backend, admin));
 const allowIps = (E.ADMIN_ALLOWED_IPS || "").split(",").map((s) => s.trim()).filter(Boolean);
 const trustProxy = E.TRUST_PROXY !== "false";
-const OFFICE = "/office";
+const officeHost = officeHostFromEnv(E);
 const PUBLIC = E.PUBLIC_DIR || join(appRoot, "public");
 const MAX_BODY = 36 * 1024 * 1024;
 
@@ -104,6 +113,7 @@ async function main() {
     process.exit(1);
   }
   for (const [email, secret] of secrets) admin.setTotpSecret(email, secret, true);
+  admin.applyEmail2faMigration();
   for (const [i, k] of keys.entries()) await admin.addPool({ id: `pool_groq_${i + 1}`, label: `Groq · Pool ${i + 1}`, provider: "groq", status: "active" }, k);
   const handle = createApp(backend, ai, env, admin);
   const port = Number(E.PORT || 8787);
@@ -111,22 +121,46 @@ async function main() {
   createServer(async (req, res) => {
     try {
       const ip = (trustProxy ? String(req.headers["x-forwarded-for"] || "").split(",")[0].trim() : "") || req.socket.remoteAddress || "";
+      const methodEarly = req.method || "GET";
+      const onOffice = normalizeHost(req.headers.host) === normalizeHost(officeHost);
+      const decision = routeRequest({ host: req.headers.host, url: req.url || "/", method: methodEarly, officeHost });
+      if (onOffice || decision.type === "redirect" || decision.type === "robots") res.setHeader("x-robots-tag", "noindex, nofollow");
+      if (decision.type === "robots") {
+        res.statusCode = 200;
+        res.setHeader("content-type", "text/plain; charset=utf-8");
+        res.setHeader("cache-control", "no-store");
+        return res.end(ROBOTS_TXT);
+      }
+      if (decision.type === "redirect") {
+        res.statusCode = 301;
+        res.setHeader("location", decision.location);
+        res.setHeader("cache-control", "no-store");
+        return res.end();
+      }
+      let officeApiBase = "/api";
+      if (decision.type === "office") {
+        req.url = decision.internalPath;
+        officeApiBase = decision.apiBase;
+      }
       const rawPath = (req.url || "/").split("?")[0];
-      // Set this before any /office return so errors and API routes stay out of indexes too.
-      if (rawPath === OFFICE || rawPath.startsWith(OFFICE + "/")) res.setHeader("x-robots-tag", "noindex, nofollow");
-      // Public admin lives at /office; /admin only redirects. Internally the tested app still routes /admin.
-      if (rawPath === "/admin" || rawPath.startsWith("/admin/")) { res.statusCode = 301; res.setHeader("location", OFFICE + rawPath.slice(6)); return res.end(); }
-      const isApi = rawPath === "/v1" || rawPath.startsWith("/v1/") || rawPath === "/health" || rawPath === OFFICE || rawPath.startsWith(OFFICE + "/");
-      if (!isApi && (req.method === "GET" || req.method === "HEAD")) {
-        // Apache rewrites /contact to PHP. Proxy index.php when this process still sees the path.
+      const isApi = rawPath === "/v1" || rawPath.startsWith("/v1/") || rawPath === "/health" || rawPath === "/admin" || rawPath.startsWith("/admin/");
+      if (onOffice && decision.type === "next" && !isApi) { res.statusCode = 404; return res.end(); }
+      if (!onOffice && !isApi && (methodEarly === "GET" || methodEarly === "HEAD")) {
         if ((rawPath === "/contact" || rawPath === "/contact/") && await boloProxyContactPhp(req, res)) return;
         if (await tryStatic(req, res, PUBLIC)) return;
       }
       if (rawPath === "/v1/health") req.url = "/health";
-      if (rawPath === OFFICE || rawPath.startsWith(OFFICE + "/")) req.url = "/admin" + (req.url || "").slice(OFFICE.length);
       const path = (req.url || "/").split("?")[0];
       if (path.startsWith("/admin") && allowIps.length && !allowIps.includes(ip.replace(/^::ffff:/, ""))) { res.statusCode = 404; return res.end(); }
       if (path === "/admin/preview") { res.statusCode = 404; return res.end(); }
+      if (path.startsWith("/admin") && !["GET", "HEAD", "OPTIONS"].includes(methodEarly)) {
+        const origin = typeof req.headers.origin === "string" ? req.headers.origin : undefined;
+        if (!originAllowed(origin, typeof req.headers.host === "string" ? req.headers.host : undefined)) {
+          res.statusCode = 403;
+          res.setHeader("content-type", "application/json; charset=utf-8");
+          return res.end('{"error":"Sign-in failed.","code":"bad_origin"}');
+        }
+      }
       const chunks: Buffer[] = []; let size = 0;
       for await (const c of req) { size += c.length; if (size > MAX_BODY) { res.statusCode = 413; return res.end('{"error":"Audio too large.","code":"audio_too_large"}'); } chunks.push(Buffer.from(c)); }
       const method = req.method || "GET";
@@ -138,10 +172,20 @@ async function main() {
       response.headers.forEach((v, k) => res.setHeader(k, v));
       res.setHeader("strict-transport-security", "max-age=31536000");
       res.setHeader("x-content-type-options", "nosniff");
+      if (onOffice) res.setHeader("x-robots-tag", "noindex, nofollow");
       if (path.startsWith("/admin")) { res.setHeader("x-frame-options", "DENY"); res.setHeader("cache-control", "no-store"); }
       let out = Buffer.from(await response.arrayBuffer());
-      if (path.startsWith("/admin") && (response.headers.get("content-type") || "").includes("text/html")) {
-        out = Buffer.from(out.toString("utf8").replaceAll('"/admin/api"', `"${OFFICE}/api"`));
+      if (decision.type === "office" && path.startsWith("/admin") && (response.headers.get("content-type") || "").includes("text/html")) {
+        let html = out.toString("utf8").replaceAll('"/admin/api"', `"${officeApiBase}"`).replaceAll('"/office/api"', `"${officeApiBase}"`);
+        html = html.replace(/window\.__BOLO_OFFICE__=(\{.*?\})/, (m, json) => {
+          try {
+            const o = JSON.parse(json);
+            o.apiBase = officeApiBase;
+            o.home = "/";
+            return `window.__BOLO_OFFICE__=${JSON.stringify(o)}`;
+          } catch { return m; }
+        });
+        out = Buffer.from(html);
         res.setHeader("content-length", out.length);
       }
       res.end(out);

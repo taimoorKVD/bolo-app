@@ -1,7 +1,21 @@
 import nodemailer from "nodemailer";
 
 /** Sign-in code senders. The code is never logged. */
-export interface Mailer { sendOtp(email: string, code: string): Promise<boolean> }
+export interface Mailer {
+  sendOtp(email: string, code: string): Promise<boolean>;
+  sendOfficeCode(email: string, code: string): Promise<boolean>;
+}
+
+/**
+ * Env var names required to email an Office code. Returns names only, never values.
+ * SMTP (SMTP_HOST + SMTP2GO_SENDER) or the SMTP2GO HTTP API (SMTP2GO_API_KEY + SMTP2GO_SENDER).
+ */
+export function missingOfficeMailEnv(e: Record<string, string | undefined>): string[] {
+  const missing: string[] = [];
+  if (!e.SMTP2GO_SENDER) missing.push("SMTP2GO_SENDER");
+  if (!e.SMTP_HOST && !e.SMTP2GO_API_KEY) missing.push("SMTP_HOST", "SMTP2GO_API_KEY");
+  return missing;
+}
 
 export function buildOtpMessage(sender: string, email: string, code: string) {
   if (!/^\d{6}$/.test(code)) throw new Error("bad code");
@@ -12,6 +26,16 @@ export function buildOtpMessage(sender: string, email: string, code: string) {
     subject: `Your Bolo sign-in code: ${code}`,
     text: `Your Bolo sign-in code is ${code}\n\nIt expires in 10 minutes. If you did not ask for it, ignore this email.`,
     html: `<p>Your Bolo sign-in code is</p><p style="font-size:24px;font-weight:bold;letter-spacing:4px">${code}</p><p>It expires in 10 minutes. If you did not ask for it, ignore this email.</p>`,
+  };
+}
+
+export function buildOfficeCodeMessage(sender: string, email: string, code: string) {
+  const base = buildOtpMessage(sender, email, code);
+  return {
+    ...base,
+    subject: `Your Bolo Office code: ${code}`,
+    text: `Your Bolo Office sign-in code is ${code}\n\nIt expires in 10 minutes and can be used once. If you did not try to sign in, ignore this email.`,
+    html: `<p>Your Bolo Office sign-in code is</p><p style="font-size:24px;font-weight:bold;letter-spacing:4px">${code}</p><p>It expires in 10 minutes and can be used once. If you did not try to sign in, ignore this email.</p>`,
   };
 }
 
@@ -36,7 +60,13 @@ export class SmtpMailer implements Mailer {
     });
   }
   async sendOtp(email: string, code: string): Promise<boolean> {
-    try { const r = await this.t.sendMail(buildOtpMessage(this.sender, email, code)); return (r.accepted?.length ?? 0) > 0; }
+    return this.deliver(buildOtpMessage(this.sender, email, code));
+  }
+  async sendOfficeCode(email: string, code: string): Promise<boolean> {
+    return this.deliver(buildOfficeCodeMessage(this.sender, email, code));
+  }
+  private async deliver(msg: object): Promise<boolean> {
+    try { const r = await this.t.sendMail(msg); return (r.accepted?.length ?? 0) > 0; }
     catch { return false; }
   }
 }
@@ -44,11 +74,17 @@ export class SmtpMailer implements Mailer {
 export class Smtp2GoMailer implements Mailer {
   constructor(private apiKey: string, private sender: string, private base = "https://api.smtp2go.com/v3") {}
   async sendOtp(email: string, code: string): Promise<boolean> {
+    return this.deliver(buildOtpMessage(this.sender, email, code));
+  }
+  async sendOfficeCode(email: string, code: string): Promise<boolean> {
+    return this.deliver(buildOfficeCodeMessage(this.sender, email, code));
+  }
+  private async deliver(msg: { from: string; to: string; subject: string; text: string; html: string }): Promise<boolean> {
     try {
       const r = await fetch(`${this.base}/email/send`, {
         method: "POST",
         headers: { "content-type": "application/json", "X-Smtp2go-Api-Key": this.apiKey },
-        body: JSON.stringify((({ from, to, subject, text, html }) => ({ sender: from, to: [to], subject, text_body: text, html_body: html }))(buildOtpMessage(this.sender, email, code))),
+        body: JSON.stringify({ sender: msg.from, to: [msg.to], subject: msg.subject, text_body: msg.text, html_body: msg.html }),
         signal: AbortSignal.timeout(15_000),
       });
       if (!r.ok) return false;
@@ -59,7 +95,8 @@ export class Smtp2GoMailer implements Mailer {
 }
 
 export class MemoryMailer implements Mailer {
-  sent: { email: string; code: string }[] = [];
+  sent: { email: string; code: string; kind?: string }[] = [];
   ok = true;
-  async sendOtp(email: string, code: string) { if (this.ok) this.sent.push({ email, code }); return this.ok; }
+  async sendOtp(email: string, code: string) { if (this.ok) this.sent.push({ email, code, kind: "otp" }); return this.ok; }
+  async sendOfficeCode(email: string, code: string) { if (this.ok) this.sent.push({ email, code, kind: "office" }); return this.ok; }
 }

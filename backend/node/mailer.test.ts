@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildOtpMessage, SmtpMailer, smtpConfigFromEnv } from "./mailer";
+import { buildOfficeCodeMessage, buildOtpMessage, missingOfficeMailEnv, SmtpMailer, smtpConfigFromEnv } from "./mailer";
 
 describe("mailer", () => {
   it("builds the OTP message", () => {
@@ -11,6 +11,14 @@ describe("mailer", () => {
   it("rejects header injection and bad codes", () => {
     expect(() => buildOtpMessage("a@x.com", "u@x.com\r\nBcc: e@x.com", "123456")).toThrow();
     expect(() => buildOtpMessage("a@x.com", "u@x.com", "12ab")).toThrow();
+  });
+  it("names missing Office mail env without values", () => {
+    expect(missingOfficeMailEnv({})).toEqual(["SMTP2GO_SENDER", "SMTP_HOST", "SMTP2GO_API_KEY"]);
+    expect(missingOfficeMailEnv({ SMTP_HOST: "mail.example.com", SMTP2GO_SENDER: "Bolo <a@b.c>", SMTP_PASS: "secret" })).toEqual([]);
+    expect(JSON.stringify(missingOfficeMailEnv({ SMTP_PASS: "secret" }))).not.toContain("secret");
+    const office = buildOfficeCodeMessage("Bolo <a@b.c>", "u@b.c", "654321");
+    expect(office.subject).toContain("Office");
+    expect(office.text).toContain("654321");
   });
   it("reads SMTP env", () => {
     expect(smtpConfigFromEnv({})).toBeNull();
