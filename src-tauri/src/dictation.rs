@@ -694,6 +694,11 @@ pub fn end(app: &AppHandle) {
                 let dir = app.state::<AppState>().config_dir.clone();
                 let _ = crate::measure::commit(&dir, finish);
                 mark_idle(&app);
+                log_line(
+                    &app.state::<AppState>().config_dir,
+                    "info",
+                    "take audio kept for retry",
+                );
                 if err.hint {
                     hint(&app, &err.message);
                 } else {

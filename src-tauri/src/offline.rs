@@ -12,6 +12,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 const RELEASE: &str = "v1.8.2";
+/// SHA-256 of ggml-org/whisper.cpp release v1.8.2 `whisper-bin-x64.zip`.
+const WHISPER_BIN_SHA256: &str = "b1514ebc099765e39fa37eb780b92a140a94c86bb0b3b3d98226b38825979732";
 
 /// Shown instead of running an English-only model on Urdu, Hindi, or mixed speech.
 pub const URDU_OFFLINE_NOTICE: &str =
@@ -400,7 +402,16 @@ async fn download_binary(dir: &Path) -> Result<(), String> {
         return Err("whisper.cpp builds are downloaded on Windows. On this system, set BOLO_WHISPER_BIN.".into());
     };
     let bytes = fetch(&url).await?;
+    verify_whisper_zip(&bytes)?;
     extract_zip(&bytes, dir)
+}
+
+pub fn verify_whisper_zip(bytes: &[u8]) -> Result<(), String> {
+    let got = sha256_hex(bytes);
+    if got != WHISPER_BIN_SHA256 {
+        return Err("The whisper.cpp download didn't match its hash, so it was not saved.".into());
+    }
+    Ok(())
 }
 
 async fn download_model(model: &str, dest: &Path) -> Result<(), String> {
@@ -503,6 +514,8 @@ whisper_print_timings: load time = 10 ms\n";
         assert_eq!(english.sha256, "a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdfb897afe36c6d002");
         let err = verify_download("ggml-base", b"not the model").unwrap_err();
         assert!(err.contains("didn't match its hash"), "{err}");
+        assert!(verify_whisper_zip(b"not a zip").is_err());
+        assert_eq!(WHISPER_BIN_SHA256.len(), 64);
         assert!(err.contains("ggml-base.bin"), "{err}");
     }
 

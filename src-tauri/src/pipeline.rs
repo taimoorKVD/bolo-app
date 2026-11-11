@@ -664,16 +664,40 @@ async fn speech_raw(
             path: "transcribe".into(),
         }),
         SpeechRoute::Translate => {
-            let translated = via.translate_audio(audio, prompt).await?;
-            flags.doubtful |= translated.doubtful;
-            crate::measure::note_call("translate", model, language, prompt, &translated.language, &translated.text);
-            Ok(Recognized {
-                text: translated.text,
-                tries: spoken.tries.saturating_add(translated.tries),
-                engine: via.engine().into(),
-                language: source_language(language, &detected),
-                path: "translate".into(),
-            })
+            // A later translation failure must not throw away a transcript Groq
+            // already returned. That was dropping Urdu takes and showing the
+            // offline-model notice instead of pasting the words.
+            match via.translate_audio(audio, prompt).await {
+                Ok(translated) if !translated.text.trim().is_empty() => {
+                    flags.doubtful |= translated.doubtful;
+                    crate::measure::note_call("translate", model, language, prompt, &translated.language, &translated.text);
+                    Ok(Recognized {
+                        text: translated.text,
+                        tries: spoken.tries.saturating_add(translated.tries),
+                        engine: via.engine().into(),
+                        language: source_language(language, &detected),
+                        path: "translate".into(),
+                    })
+                }
+                Ok(_) | Err(_) if !spoken.text.trim().is_empty() => {
+                    crate::diag::note("translation failed; keeping the online transcript");
+                    Ok(Recognized {
+                        text: spoken.text,
+                        tries: spoken.tries,
+                        engine: via.engine().into(),
+                        language: source_language(language, &detected),
+                        path: "transcribe".into(),
+                    })
+                }
+                Ok(translated) => Ok(Recognized {
+                    text: translated.text,
+                    tries: spoken.tries.saturating_add(translated.tries),
+                    engine: via.engine().into(),
+                    language: source_language(language, &detected),
+                    path: "translate".into(),
+                }),
+                Err(err) => Err(err),
+            }
         }
         SpeechRoute::Mixed => {
             crate::diag::note(format!("llm translate input={}", spoken.text));
@@ -976,6 +1000,7 @@ pub(crate) mod fake {
         pub calls: Mutex<Vec<(String, String, Option<String>)>>,
         replies: Mutex<VecDeque<(String, String)>>,
         translation: Option<String>,
+        pub fail_translate: bool,
     }
 
     impl FakeVia {
@@ -984,6 +1009,7 @@ pub(crate) mod fake {
                 calls: Mutex::new(Vec::new()),
                 replies: Mutex::new(replies.iter().map(|(t, l)| (t.to_string(), l.to_string())).collect()),
                 translation: translation.map(str::to_string),
+                fail_translate: false,
             }
         }
         fn push(&self, kind: String, language: &str, prompt: Option<String>) {
@@ -996,6 +1022,9 @@ pub(crate) mod fake {
         }
         pub fn translate(&self, prompt: Option<&str>) -> anyhow::Result<Transcript> {
             self.push("translate".into(), "", prompt.map(str::to_string));
+            if self.fail_translate {
+                return Err(anyhow::anyhow!("couldn't reach Groq"));
+            }
             Ok(Transcript { text: "translated audio".into(), tries: 1, language: "en".into(), doubtful: false })
         }
         pub fn translate_text(&self, text: &str) -> CleanOutcome {
@@ -1133,6 +1162,16 @@ mod via_tests {
         assert_eq!(got.text, "आज मौसम अच्छा है");
         assert_eq!(got.language, "hi");
         assert!(got.path.ends_with("-repass"));
+    }
+
+    #[test]
+    fn online_transcript_is_kept_when_translation_fails() {
+        let mut fake = FakeVia::new(&[("आज मौसम अच्छा है", "hi")], None);
+        fake.fail_translate = true;
+        let got = run(&fake, "auto", "english", None);
+        assert_eq!(got.text, "आज मौसम अच्छा है");
+        assert_eq!(got.path, "transcribe");
+        assert!(!got.text.is_empty());
     }
 
     #[test]
