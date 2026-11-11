@@ -797,23 +797,35 @@ fn accuracy_script(set: Option<String>) -> &'static [measure::ScriptLine] {
 }
 
 #[tauri::command]
-async fn accuracy_record_start(state: tauri::State<'_, AppState>) -> Result<(), String> {
+async fn accuracy_record_start(state: tauri::State<'_, AppState>, id: String) -> Result<(), String> {
     let preference = state.settings.lock().unwrap_or_else(|err| err.into_inner()).microphone.clone();
-    tauri::async_runtime::spawn_blocking(move || measure::record_start(preference.as_deref()))
+    let warm = state.warm.clone();
+    let dir = state.config_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let take = match warm.begin(preference.as_deref()) {
+            Ok(take) => take,
+            Err(err) => {
+                crate::logbuf::log_line(&dir, "error", &format!("accuracy record start: {err}"));
+                return Err(err);
+            }
+        };
+        measure::begin_accuracy(&dir, &id, take)
+    })
+    .await
+    .map_err(|err| err.to_string())?
+}
+
+#[tauri::command]
+async fn accuracy_record_stop(state: tauri::State<'_, AppState>) -> Result<measure::HeldInfo, String> {
+    let dir = state.config_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || measure::stop_and_save(&dir))
         .await
         .map_err(|err| err.to_string())?
 }
 
 #[tauri::command]
-async fn accuracy_record_stop() -> Result<measure::HeldInfo, String> {
-    tauri::async_runtime::spawn_blocking(measure::record_stop)
-        .await
-        .map_err(|err| err.to_string())?
-}
-
-#[tauri::command]
-fn accuracy_record_discard() {
-    measure::record_discard();
+fn accuracy_record_discard(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    measure::discard_or_save(&state.config_dir)
 }
 
 #[tauri::command]

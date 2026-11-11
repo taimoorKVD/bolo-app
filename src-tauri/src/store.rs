@@ -660,6 +660,56 @@ mod carryover {
     }
 
     #[test]
+    fn every_settings_field_round_trips() {
+        let dir = std::env::temp_dir().join(format!("bolo-fields-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let mut settings = Settings::default();
+        settings.language = "ur".into();
+        settings.output = "same".into();
+        settings.offline_model = "ggml-base".into();
+        settings.model = "whisper-large-v3".into();
+        settings.verbatim = true;
+        settings.cleanup_enabled = false;
+        settings.cleanup_model = "openai/gpt-oss-20b".into();
+        settings.dictionary = vec!["RoomBoss".into(), "Grok".into()];
+        settings.character = "c04".into();
+        settings.sound_pack = "wood".into();
+        settings.sound_volume = 0.25;
+        settings.smart_time_of_day = true;
+        settings.smart_holiday = true;
+        settings.keep_learning = false;
+        settings.keep_recordings = true;
+        settings.debug_capture = true;
+        settings.history_enabled = false;
+        settings.launch_at_startup = false;
+        settings.microphone = Some("Microphone Array (2- Realtek(R) Audio)".into());
+        save_settings(&dir, &settings).unwrap();
+        let loaded = load_settings(&dir);
+        assert_eq!(loaded.language, "ur");
+        assert_eq!(loaded.output, "same");
+        assert_eq!(loaded.offline_model, "ggml-base");
+        assert_eq!(loaded.model, "whisper-large-v3");
+        assert!(loaded.verbatim);
+        assert!(!loaded.cleanup_enabled);
+        assert_eq!(loaded.dictionary, vec!["RoomBoss".to_string(), "Grok".into()]);
+        assert_eq!(loaded.character, "c04");
+        assert_eq!(loaded.sound_pack, "wood");
+        assert!((loaded.sound_volume - 0.25).abs() < 1e-9);
+        assert!(loaded.smart_time_of_day && loaded.smart_holiday);
+        assert!(!loaded.keep_learning);
+        assert!(loaded.keep_recordings);
+        assert!(loaded.debug_capture);
+        assert!(!loaded.history_enabled);
+        assert!(!loaded.launch_at_startup);
+        assert_eq!(
+            loaded.microphone.as_deref(),
+            Some("Microphone Array (2- Realtek(R) Audio)")
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn character_settings_default_and_normalize() {
         let old: Settings = serde_json::from_str("{}").unwrap();
         assert_eq!(old.character, "classic");

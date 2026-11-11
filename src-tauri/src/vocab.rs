@@ -428,6 +428,7 @@ mod tests {
         assert_eq!(intended_term("polo"), None);
     }
 
+    #[test]
     fn fixes_volo_to_bolo() {
         assert_eq!(correct("Open Volo and start dictating.", &seeds()), "Open Bolo and start dictating.");
         assert_eq!(correct("Visit Volo.com today", &seeds()), "Visit Bolo.com today");

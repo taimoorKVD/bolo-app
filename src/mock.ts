@@ -242,7 +242,7 @@ export async function mockInvoke<T>(command: string, args?: Record<string, unkno
           ? null
           : "Global hook preview is Windows-only in this browser session.";
       return {
-        version: "0.1.12",
+        version: "0.1.13",
         listenerRunning,
         listenerError,
         platform: "linux",
@@ -359,6 +359,7 @@ export async function mockInvoke<T>(command: string, args?: Record<string, unkno
       ] as T;
     }
     case "accuracy_record_start":
+      if (!String(args?.id ?? "").trim()) throw new Error("Choose a sentence first.");
       return undefined as T;
     case "accuracy_record_stop":
       return {

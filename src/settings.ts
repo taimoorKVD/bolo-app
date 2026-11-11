@@ -308,7 +308,7 @@ function showSection(form: HTMLElement, id: SectionId): void {
 
 function go(draft: Draft, id: SectionId): void {
   if (draft.section === "accuracy" && id !== "accuracy") {
-    void api.accuracyDiscard();
+    void api.accuracyDiscard().catch(() => {});
     void api.setHotkeyCapture(false);
   }
   if (id === "accuracy" && draft.section !== "accuracy") {
@@ -1684,6 +1684,17 @@ function markDirty(draft: Draft): void {
   }, 450);
 }
 
+function flushSave(): void {
+  const draft = currentDraft;
+  if (!draft?.dirty) return;
+  window.clearTimeout(saveTimer);
+  saveChain = saveChain.then(() => save(draft));
+}
+
+if (typeof window !== "undefined") {
+  window.addEventListener("pagehide", flushSave);
+}
+
 function keyPill(status: ApiKeyStatus): { value: string; tone: string } {
   if (status.configured) return { value: status.hint ?? "Saved", tone: "good" };
   if (status.builtin) return { value: "Built-in", tone: "good" };
@@ -2083,7 +2094,7 @@ function accuracyPanel(draft: Draft): HTMLElement {
       save.disabled = true;
       redo.disabled = true;
       show();
-      void api.accuracyRecordStart().then(() => {
+      void api.accuracyRecordStart(lines[index]?.id ?? "").then(() => {
         starting = false;
         show();
       }).catch((error) => {
@@ -2100,15 +2111,21 @@ function accuracyPanel(draft: Draft): HTMLElement {
       .accuracyRecordStop()
       .then((info: HeldInfo) => {
         recording = false;
-        holding = true;
+        holding = false;
         record.disabled = false;
         redo.disabled = false;
-        save.disabled = false;
+        save.disabled = true;
+        const line = lines[index];
+        if (line) saved.add(line.id);
         const peak = info.peak.toFixed(3);
         takeNote.textContent = info.silent
-          ? `${info.deviceName} looks silent (peak ${peak}). A headset jack often records nothing. Redo on another microphone.`
-          : `${info.deviceName} · ${info.sampleRate} Hz · peak ${peak} · clipping ${info.clippingPct.toFixed(2)}%`;
-        takeNote.className = info.silent ? "field-note bad" : "field-note";
+          ? `Saved on this PC. ${info.deviceName} looks silent (peak ${peak}). Redo on another microphone if this was not your voice.`
+          : `Saved on this PC. ${info.deviceName} · ${info.sampleRate} Hz · peak ${peak}.`;
+        takeNote.className = info.silent ? "field-note bad" : "field-note good";
+        if (!info.silent && line) {
+          const next = lines.findIndex((item, at) => at > index && !saved.has(item.id));
+          index = next === -1 ? lines.length : next;
+        }
         show();
       })
       .catch((error) => {
@@ -2193,9 +2210,13 @@ function accuracyPanel(draft: Draft): HTMLElement {
   };
   setPicker.addEventListener("change", () => {
     setId = scriptSetId(setPicker.value);
-    if (recording) {
+    if (recording || holding) {
       recording = false;
-      void api.accuracyDiscard();
+      holding = false;
+      void api.accuracyDiscard().catch((error) => {
+        takeNote.textContent = messageOf(error);
+        takeNote.className = "field-note bad";
+      });
     }
     holding = false;
     starting = false;

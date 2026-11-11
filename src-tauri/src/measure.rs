@@ -27,7 +27,7 @@ const CLIP_AFTER_GAIN: f32 = 0.915;
 
 static ARMED: AtomicBool = AtomicBool::new(false);
 static SESSION: Mutex<Option<Session>> = Mutex::new(None);
-static RECORDER: Mutex<Option<audio::RecordingSession>> = Mutex::new(None);
+static ACCURACY: Mutex<AccuracySlot> = Mutex::new(AccuracySlot::new());
 static HELD: Mutex<Option<Held>> = Mutex::new(None);
 
 thread_local! {
@@ -65,6 +65,79 @@ struct Held {
     device: String,
     peak: f32,
     clipping_pct: f32,
+}
+
+/// Accuracy recording uses the dictation microphone that is already open.
+/// It does not open a second capture stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecPhase {
+    Idle,
+    Recording,
+    Held,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecState {
+    pub phase: RecPhase,
+    pub sentence: Option<String>,
+}
+
+impl RecState {
+    pub fn idle() -> Self {
+        Self {
+            phase: RecPhase::Idle,
+            sentence: None,
+        }
+    }
+
+    pub fn start(&mut self, id: &str) -> Result<(), String> {
+        if id.trim().is_empty() {
+            return Err("Choose a sentence first.".into());
+        }
+        if self.phase == RecPhase::Recording {
+            return Err("Already recording. Stop this take first.".into());
+        }
+        self.phase = RecPhase::Recording;
+        self.sentence = Some(id.to_string());
+        Ok(())
+    }
+
+    pub fn stop(&mut self) -> Result<String, String> {
+        if self.phase != RecPhase::Recording {
+            return Err("Not recording.".into());
+        }
+        let id = self.sentence.clone().ok_or("Not recording.")?;
+        self.phase = RecPhase::Held;
+        Ok(id)
+    }
+
+    /// A take that is still open, or stopped but not written, must be saved
+    /// before the screen goes away.
+    pub fn needs_save(&self) -> bool {
+        matches!(self.phase, RecPhase::Recording | RecPhase::Held)
+    }
+
+    pub fn mark_saved(&mut self) {
+        self.phase = RecPhase::Idle;
+        self.sentence = None;
+    }
+}
+
+struct AccuracySlot {
+    state: RecState,
+    take: Option<crate::warm::LiveTake>,
+}
+
+impl AccuracySlot {
+    const fn new() -> Self {
+        Self {
+            state: RecState {
+                phase: RecPhase::Idle,
+                sentence: None,
+            },
+            take: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -835,31 +908,77 @@ const SCRIPT_LANGUAGES: &[ScriptLine] = &[
     line("sa-32-phone", "edges", "en", "Say plus nine two, then the digits.", "Call plus 92 300 555 0142 before noon."),
 ];
 
-pub fn record_start(preference: Option<&str>) -> Result<(), String> {
-    let mut slot = RECORDER.lock().unwrap_or_else(|err| err.into_inner());
-    if slot.is_some() {
-        return Err("Already recording. Stop this take first.".into());
+fn accuracy_lock() -> std::sync::MutexGuard<'static, AccuracySlot> {
+    ACCURACY.lock().unwrap_or_else(|err| err.into_inner())
+}
+
+fn log_accuracy(config: &Path, level: &str, message: &str) {
+    crate::logbuf::log_line(config, level, message);
+}
+
+/// Arm a sentence on the microphone dictation already has open.
+pub fn begin_accuracy(config: &Path, id: &str, take: crate::warm::LiveTake) -> Result<(), String> {
+    let mut slot = accuracy_lock();
+    if let Err(err) = slot.state.start(id) {
+        log_accuracy(config, "error", &format!("accuracy record start: {err}"));
+        return Err(err);
     }
-    *HELD.lock().unwrap_or_else(|err| err.into_inner()) = None;
-    let session = audio::start_recording(preference).map_err(|err| err.to_string())?;
-    *slot = Some(session);
+    log_accuracy(
+        config,
+        "info",
+        &format!(
+            "accuracy record start sentence={id} device=\"{}\"",
+            take.active_name
+        ),
+    );
+    slot.take = Some(take);
     Ok(())
 }
 
-pub fn record_stop() -> Result<HeldInfo, String> {
-    let session = RECORDER
-        .lock()
-        .unwrap_or_else(|err| err.into_inner())
-        .take()
-        .ok_or("Not recording.")?;
-    let device = session.active_name.clone();
-    let audio = session.finish()?;
+/// Stop the open take and write audio.wav, reference.txt, and meta.json.
+pub fn stop_and_save(config: &Path) -> Result<HeldInfo, String> {
+    let (id, take) = {
+        let mut slot = accuracy_lock();
+        let id = match slot.state.stop() {
+            Ok(id) => id,
+            Err(err) => {
+                log_accuracy(config, "error", &format!("accuracy record stop: {err}"));
+                return Err(err);
+            }
+        };
+        let take = match slot.take.take() {
+            Some(take) => take,
+            None => {
+                slot.state = RecState::idle();
+                let err = "Not recording.".to_string();
+                log_accuracy(config, "error", &format!("accuracy record stop: {err}"));
+                return Err(err);
+            }
+        };
+        (id, take)
+    };
+    let device = take.active_name.clone();
+    let started = take.started;
+    let audio = match take.finish() {
+        Ok(audio) => audio,
+        Err(err) => {
+            accuracy_lock().state = RecState::idle();
+            log_accuracy(config, "error", &format!("accuracy record stop: {err}"));
+            return Err(err);
+        }
+    };
+    let samples = audio.interleaved.len();
+    log_accuracy(
+        config,
+        "info",
+        &format!("accuracy record stop sentence={id} samples={samples} device=\"{device}\""),
+    );
     let (peak, clipping_pct) = levels(&audio.interleaved, CLIP_FULL_SCALE);
     let info = HeldInfo {
         device_name: device.clone(),
         sample_rate: audio.sample_rate,
         channels: audio.channels,
-        hold_ms: audio.elapsed_ms,
+        hold_ms: started.elapsed().as_millis() as u64,
         peak,
         clipping_pct,
         silent: peak < audio::SILENT_PEAK,
@@ -870,18 +989,66 @@ pub fn record_stop() -> Result<HeldInfo, String> {
         peak,
         clipping_pct,
     });
-    Ok(info)
+    match save_script(config, &id) {
+        Ok(path) => {
+            accuracy_lock().state.mark_saved();
+            log_accuracy(config, "info", &format!("accuracy record save sentence={id} path={path}"));
+            Ok(info)
+        }
+        Err(err) => {
+            log_accuracy(config, "error", &format!("accuracy record save: {err}"));
+            Err(err)
+        }
+    }
 }
 
-pub fn record_discard() {
-    if let Some(session) = RECORDER
-        .lock()
-        .unwrap_or_else(|err| err.into_inner())
-        .take()
-    {
-        let _ = session.finish();
+/// Leaving the screen saves an open or unsaved take. It does not delete files.
+pub fn discard_or_save(config: &Path) -> Result<(), String> {
+    let phase = accuracy_lock().state.phase;
+    if phase == RecPhase::Recording {
+        stop_and_save(config).map(|_| ())
+    } else if phase == RecPhase::Held {
+        let id = accuracy_lock()
+            .state
+            .sentence
+            .clone()
+            .ok_or("Record the sentence first.")?;
+        match save_script(config, &id) {
+            Ok(path) => {
+                accuracy_lock().state.mark_saved();
+                log_accuracy(config, "info", &format!("accuracy record save sentence={id} path={path}"));
+                Ok(())
+            }
+            Err(err) => {
+                log_accuracy(config, "error", &format!("accuracy record save: {err}"));
+                Err(err)
+            }
+        }
+    } else {
+        Ok(())
     }
-    *HELD.lock().unwrap_or_else(|err| err.into_inner()) = None;
+}
+
+/// Test helper: a stopped take with known samples, ready to save.
+pub fn stage_held(id: &str, samples: Vec<f32>, sample_rate: u32, device: &str) -> Result<(), String> {
+    let mut slot = accuracy_lock();
+    slot.state = RecState::idle();
+    slot.state.start(id)?;
+    slot.state.stop()?;
+    let (peak, clipping_pct) = levels(&samples, CLIP_FULL_SCALE);
+    *HELD.lock().unwrap_or_else(|err| err.into_inner()) = Some(Held {
+        audio: FinishedAudio {
+            interleaved: samples,
+            channels: 1,
+            sample_rate,
+            elapsed_ms: 400,
+            noise_rms: 0.0,
+        },
+        device: device.to_string(),
+        peak,
+        clipping_pct,
+    });
+    Ok(())
 }
 
 pub fn save_script(config: &Path, id: &str) -> Result<String, String> {
@@ -919,7 +1086,13 @@ pub fn save_script(config: &Path, id: &str) -> Result<String, String> {
         serde_json::to_vec_pretty(&meta).map_err(|err| err.to_string())?,
     )
     .map_err(|err| err.to_string())?;
-    Ok(dir.display().to_string())
+    let path = dir.display().to_string();
+    log_accuracy(
+        config,
+        "info",
+        &format!("accuracy record save sentence={} path={path}", line.id),
+    );
+    Ok(path)
 }
 
 pub fn saved_script_ids(config: &Path) -> Vec<String> {
@@ -2020,5 +2193,50 @@ mod tests {
             format!(r#"{{"expectedLanguage":"{bucket}","bucket":"{bucket}","kind":"test"}}"#),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn record_stop_save_state_machine_and_both_sets_write_files() {
+        let mut state = RecState::idle();
+        assert!(state.stop().is_err());
+        assert!(!state.needs_save());
+        state.start("01-bolo").unwrap();
+        assert!(state.start("sa-01-weather").is_err());
+        assert!(state.needs_save());
+        assert_eq!(state.stop().unwrap(), "01-bolo");
+        assert_eq!(state.phase, RecPhase::Held);
+        assert!(state.needs_save());
+        state.mark_saved();
+        assert_eq!(state.phase, RecPhase::Idle);
+        assert!(!state.needs_save());
+
+        let dir = std::env::temp_dir().join(format!("bolo-rec-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        for (id, bucket) in [("01-bolo", "en"), ("sa-01-weather", "ur")] {
+            stage_held(id, vec![0.2, -0.1, 0.05, 0.4], 16_000, "Microphone Array").unwrap();
+            let path = save_script(&dir, id).unwrap();
+            assert!(path.contains(id));
+            let folder = dir.join("accuracy-script").join(id);
+            assert!(folder.join("audio.wav").is_file(), "{id}");
+            let reference = fs::read_to_string(folder.join("reference.txt")).unwrap();
+            let line = find_script_line(id).unwrap();
+            assert_eq!(reference, line.say);
+            let meta: serde_json::Value =
+                serde_json::from_slice(&fs::read(folder.join("meta.json")).unwrap()).unwrap();
+            assert_eq!(meta["bucket"], bucket);
+            assert_eq!(meta["expectedLanguage"], bucket);
+            let log = fs::read_to_string(dir.join("bolo.log")).unwrap_or_default();
+            assert!(
+                save_script(&dir, id).is_err(),
+                "a second save without a held take must not pretend it recorded"
+            );
+            let _ = log;
+        }
+        let log = fs::read_to_string(dir.join("bolo.log")).unwrap();
+        assert!(log.contains("accuracy record save"));
+        assert!(log.contains("01-bolo"));
+        assert!(log.contains("sa-01-weather"));
+        let _ = fs::remove_dir_all(&dir);
     }
 }
