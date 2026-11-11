@@ -63,6 +63,8 @@ jobs:
         run: cargo test -- --test-threads=1
       - name: Build the NSIS installer
         shell: pwsh
+        env:
+          BOLO_BUILTIN_GROQ_KEY: ${{ secrets.GROQ_API_KEY }}
         run: |
           # Updater artifacts are signed in the next step, so the build never prompts for a password.
           '{"bundle":{"createUpdaterArtifacts":false}}' | Set-Content updater-off.conf.json -Encoding utf8NoBOM
@@ -151,6 +153,8 @@ jobs:
       - run: npm ci
       - name: Build MSIX (no in-app updater) and wrap it as .msixupload
         shell: pwsh
+        env:
+          BOLO_BUILTIN_GROQ_KEY: ${{ secrets.GROQ_API_KEY }}
         run: |
           $v = "${{ needs.build.outputs.version }}.0"
           ./scripts/build-msix.ps1 -IdentityName $env:STORE_IDENTITY_NAME -Publisher $env:STORE_PUBLISHER `

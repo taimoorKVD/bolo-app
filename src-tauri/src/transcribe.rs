@@ -26,6 +26,8 @@ pub enum FailKind {
 pub struct GroqFailure {
     pub message: String,
     pub kind: FailKind,
+    /// HTTP status when the server answered. Empty for a local or network failure.
+    pub status: Option<u16>,
     /// True when the body named a daily / TPD / quota limit explicitly.
     pub explicit_quota: bool,
     /// Parsed retry-after from the provider message, when present.
@@ -48,6 +50,40 @@ pub fn failure_kind(err: &anyhow::Error) -> Option<FailKind> {
 
 pub fn failure_details(err: &anyhow::Error) -> Option<&GroqFailure> {
     err.downcast_ref::<GroqFailure>()
+}
+
+/// One log line for a failed online take. No key material.
+pub fn online_failure_line(err: &anyhow::Error) -> String {
+    let raw = err.to_string();
+    if raw.contains("API key") || raw.contains("no Groq key") {
+        return "online failed kind=no_key detail=no Groq key is ready".into();
+    }
+    if let Some(failure) = failure_details(err) {
+        let kind = match failure.kind {
+            FailKind::RateLimit => "rate_limit",
+            FailKind::QuotaExhausted => "quota",
+            FailKind::Unavailable => "unavailable",
+            FailKind::Rejected => "rejected",
+            FailKind::Other => "other",
+        };
+        let status = failure
+            .status
+            .map(|code| format!(" status={code}"))
+            .unwrap_or_default();
+        let detail = one_line(&crate::builtin::redact_secrets(&failure.message), 160);
+        return format!("online failed kind={kind}{status} detail={detail}");
+    }
+    let detail = one_line(&crate::builtin::redact_secrets(&raw), 160);
+    format!("online failed kind=error detail={detail}")
+}
+
+fn one_line(text: &str, max: usize) -> String {
+    let one = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if one.chars().count() <= max {
+        one
+    } else {
+        one.chars().take(max).collect()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,9 +141,10 @@ pub fn http_client() -> &'static reqwest::Client {
             .pool_idle_timeout(Duration::from_secs(90))
             .pool_max_idle_per_host(4)
             .tcp_keepalive(Duration::from_secs(30))
-            .http2_keep_alive_interval(Duration::from_secs(20))
-            .http2_keep_alive_timeout(Duration::from_secs(10))
-            .http2_keep_alive_while_idle(true)
+            // The warmup GET and the audio POST share a connection pool.
+            // HTTP/2 was accepting the GET (status 200) and then failing the
+            // multipart upload, so every take fell through to the on-device model.
+            .http1_only()
             .user_agent(concat!("Bolo/", env!("CARGO_PKG_VERSION")))
             .build()
             .expect("http client")
@@ -125,10 +162,14 @@ pub async fn prewarm(log_dir: &std::path::Path) {
         let ms = started.elapsed().as_millis();
         match result {
             Ok(response) => {
+                let status = response.status().as_u16();
+                // An unread body leaves the pooled connection unusable. The next
+                // upload then fails even though this GET returned 200.
+                let _ = response.bytes().await;
                 crate::logbuf::log_line(
                     log_dir,
                     "info",
-                    &format!("groq prewarm ms={ms} attempt={attempt} status={}", response.status().as_u16()),
+                    &format!("groq prewarm ms={ms} attempt={attempt} status={status}"),
                 );
                 return;
             }
@@ -923,6 +964,7 @@ async fn request_audio_once(
             return Err(GroqFailure {
                 message: err.to_string(),
                 kind: FailKind::Other,
+                status: None,
                 explicit_quota: false,
                 retry_after_ms: None,
                 offline_hint: false,
@@ -965,6 +1007,7 @@ async fn request_audio_once(
                 } else {
                     FailKind::Other
                 },
+                status: Some(status.as_u16()),
                 explicit_quota: false,
                 retry_after_ms: None,
                 offline_hint: false,
@@ -978,6 +1021,7 @@ async fn request_audio_once(
     parse_attempt(&body).map_err(|err| GroqFailure {
         message: err.to_string(),
         kind: FailKind::Other,
+        status: Some(status.as_u16()),
         explicit_quota: false,
         retry_after_ms: None,
         offline_hint: false,
@@ -1490,12 +1534,28 @@ mod tests {
         assert!(!REJECTED_KEY_MESSAGE.to_lowercase().contains("settings"));
         assert!(!REJECTED_KEY_MESSAGE.to_lowercase().contains("windows"));
         let failure = GroqFailure {
-            message: "Groq is rate limiting requests right now".into(),
+            message: "Groq is rate limiting requests right now. token gsk_abcdefghijklmnopqrstuvwxyz".into(),
             kind: FailKind::RateLimit,
+            status: Some(429),
             explicit_quota: false,
             retry_after_ms: None,
             offline_hint: false,
         };
+        let line = online_failure_line(&anyhow::Error::from(GroqFailure {
+            message: failure.message.clone(),
+            kind: FailKind::Rejected,
+            status: Some(401),
+            explicit_quota: false,
+            retry_after_ms: None,
+            offline_hint: false,
+        }));
+        assert!(line.contains("kind=rejected"));
+        assert!(line.contains("status=401"));
+        assert!(!line.contains("gsk_"), "{line}");
+        assert_eq!(
+            online_failure_line(&anyhow::anyhow!("Add a Groq API key in Bolo settings.")),
+            "online failed kind=no_key detail=no Groq key is ready"
+        );
         assert_eq!(retry_plan(FailKind::QuotaExhausted, 0), RetryPlan::Stop { fallback: true });
         let wrapped = anyhow::Error::from(failure);
         assert_eq!(failure_kind(&wrapped), Some(FailKind::RateLimit));

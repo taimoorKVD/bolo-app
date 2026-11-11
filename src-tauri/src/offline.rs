@@ -320,8 +320,17 @@ fn find_binary(dir: &Path) -> Option<PathBuf> {
     None
 }
 
+/// Windows `CREATE_NO_WINDOW`. Without it, whisper-cli opens a black console on every take.
+pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 fn run_cli(binary: &Path, model: &Path, audio: &Path, language_args: &[&str]) -> Result<String, String> {
     let mut command = std::process::Command::new(binary);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command.stdin(std::process::Stdio::null());
     command
         .arg("-m")
         .arg(model)
@@ -527,6 +536,31 @@ whisper_print_timings: load time = 10 ms\n";
         assert!(err.contains("didn't match its hash"), "{err}");
         assert!(verify_whisper_zip(b"not a zip").is_err());
         assert_eq!(WHISPER_BIN_SHA256.len(), 64);
+        assert_eq!(CREATE_NO_WINDOW, 0x0800_0000);
+        let src = include_str!("offline.rs");
+        assert!(src.contains("Command::new"), "whisper.cpp is started with Command");
+        assert!(src.contains("creation_flags(CREATE_NO_WINDOW)"));
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        fn walk_rs(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            let Ok(entries) = std::fs::read_dir(dir) else { return };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() { walk_rs(&path, out); }
+                else if path.extension().is_some_and(|ext| ext == "rs") { out.push(path); }
+            }
+        }
+        let mut files = Vec::new();
+        walk_rs(&root, &mut files);
+        for entry in files {
+            let text = std::fs::read_to_string(&entry).unwrap_or_default();
+            if text.contains("std::process::Command::new") || text.contains("process::Command::new") {
+                assert!(
+                    text.contains("CREATE_NO_WINDOW"),
+                    "{} starts a process without CREATE_NO_WINDOW",
+                    entry.display()
+                );
+            }
+        }
         assert!(err.contains("ggml-base.bin"), "{err}");
     }
 

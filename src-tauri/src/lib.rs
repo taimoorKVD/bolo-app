@@ -336,6 +336,9 @@ fn create_windows(app: &tauri::App, smoke: bool) -> Result<(), String> {
         }
         let mut builder = tauri::WebviewWindowBuilder::from_config(app.handle(), &config)
             .map_err(|err| err.to_string())?;
+        if config.label == "overlay" {
+            builder = builder.background_color(tauri::window::Color(0, 0, 0, 0));
+        }
         if smoke {
             // from_config applies `center: true` and does not clear it when a
             // position is set afterwards. The window is created hidden; it is
@@ -459,10 +462,12 @@ fn build_window(app: &tauri::AppHandle, label: &str) -> Result<tauri::WebviewWin
         .find(|config| config.label == label)
         .cloned()
         .ok_or_else(|| format!("no window config for {label}"))?;
-    tauri::WebviewWindowBuilder::from_config(app, &config)
-        .map_err(|err| err.to_string())?
-        .build()
-        .map_err(|err| err.to_string())
+    let mut builder = tauri::WebviewWindowBuilder::from_config(app, &config)
+        .map_err(|err| err.to_string())?;
+    if label == "overlay" {
+        builder = builder.background_color(tauri::window::Color(0, 0, 0, 0));
+    }
+    builder.build().map_err(|err| err.to_string())
 }
 
 fn update_tooltip(app: &tauri::AppHandle, hotkey: &hotkey::Hotkey) {

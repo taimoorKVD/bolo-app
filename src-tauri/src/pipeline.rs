@@ -310,13 +310,16 @@ async fn recognize(bytes: Vec<u8>, env: &JobEnv, minutes: f64, _format: &str, sp
     // routing as the Groq path (vocabulary prompt, Urdu clean pass, Mixed
     // translation). Any failure falls through to the user's own key, then
     // on-device, exactly as before.
+    let mut online_failure: Option<String> = None;
     if crate::managed::is_configured() {
         let via = Via::Managed { minutes };
-        if let Ok(recognized) = speech_via(&via, bytes.clone(), &model, &language, &output, prompt.as_deref(), &cleanup_model).await {
-            if !recognized.text.trim().is_empty() {
+        match speech_via(&via, bytes.clone(), &model, &language, &output, prompt.as_deref(), &cleanup_model).await {
+            Ok(recognized) if !recognized.text.trim().is_empty() => {
                 log_speech(env, &recognized.language, &format!("managed-{}", recognized.path));
                 return Ok(recognized);
             }
+            Ok(_) => online_failure = Some("online failed kind=managed detail=empty transcript".into()),
+            Err(err) => online_failure = Some(transcribe::online_failure_line(&err)),
         }
     }
     match provider::load_ready_keys(&env.config_dir) {
@@ -347,6 +350,7 @@ async fn recognize(bytes: Vec<u8>, env: &JobEnv, minutes: f64, _format: &str, sp
                         return Ok(recognized);
                     }
                     Err(err) => {
+                        online_failure = Some(transcribe::online_failure_line(&err));
                         let action = match transcribe::failure_details(&err) {
                             Some(failure) => store.record_failure(&key.id, failure),
                             None => RouterAction::Switch,
@@ -372,6 +376,7 @@ async fn recognize(bytes: Vec<u8>, env: &JobEnv, minutes: f64, _format: &str, sp
                 }
             }
             let err = last_err.unwrap_or_else(|| anyhow::anyhow!("No Groq API key is ready."));
+            log_online_failure(env, online_failure.as_deref().unwrap_or(&transcribe::online_failure_line(&err)));
             let offline_ok = offline::normalize_model(&offline_model) != "off"
                 && (force_offline || saw_outage || should_fallback(&err));
             if offline_ok {
@@ -393,6 +398,7 @@ async fn recognize(bytes: Vec<u8>, env: &JobEnv, minutes: f64, _format: &str, sp
             Err(err.to_string())
         }
         Err(err) => {
+            log_online_failure(env, &transcribe::online_failure_line(&err));
             if offline::normalize_model(&offline_model) == "off" {
                 return Err(err.to_string());
             }
@@ -562,7 +568,30 @@ async fn speech_raw(
         prompt.map(str::to_string)
     };
     crate::diag::note(format!("whisper#1 model={model} lang={language} prompt={:?}", first_prompt));
-    let mut spoken = via.transcribe(audio.clone(), model, language, first_prompt.clone()).await?;
+    let mut spoken = match via.transcribe(audio.clone(), model, language, first_prompt.clone()).await {
+        Ok(spoken) => spoken,
+        Err(err)
+            if model != transcribe::WHISPER_TURBO
+                && !matches!(
+                    transcribe::failure_kind(&err),
+                    Some(
+                        transcribe::FailKind::Unavailable
+                            | transcribe::FailKind::RateLimit
+                            | transcribe::FailKind::QuotaExhausted
+                            | transcribe::FailKind::Rejected
+                    )
+                ) =>
+        {
+            // whisper-large-v3 is used for auto/Urdu. A rejected request
+            // (unknown model, bad prompt) still has the turbo model the user picked.
+            crate::diag::note("primary model failed; trying turbo");
+            match via.transcribe(audio.clone(), transcribe::WHISPER_TURBO, language, first_prompt.clone()).await {
+                Ok(spoken) => spoken,
+                Err(_) => return Err(err),
+            }
+        }
+        Err(err) => return Err(err),
+    };
     crate::measure::note_call("raw", model, language, first_prompt.as_deref(), &spoken.language, &spoken.text);
     crate::diag::note(format!("whisper#1 detected={} text={}", spoken.language, spoken.text));
     if prefer_english_pass(language, output, &spoken.text, &spoken.language, spoken.doubtful) {
@@ -849,6 +878,10 @@ fn source_language(setting: &str, detected: &str) -> String {
     transcribe::normalize_language(setting).unwrap_or_else(|| "unknown".into())
 }
 
+fn log_online_failure(env: &JobEnv, line: &str) {
+    log_line(&env.config_dir, "info", line);
+}
+
 fn log_speech(env: &JobEnv, language: &str, path: &str) {
     let language = if language.is_empty() { "unknown" } else { language };
     log_line(
@@ -963,6 +996,7 @@ mod tests {
         let err = anyhow::Error::from(transcribe::GroqFailure {
             message: transcribe::REJECTED_KEY_MESSAGE.into(),
             kind: FailKind::Rejected,
+            status: Some(401),
             explicit_quota: false,
             retry_after_ms: None,
             offline_hint: false,

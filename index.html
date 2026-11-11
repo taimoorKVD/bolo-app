@@ -3,8 +3,15 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="color-scheme" content="dark" />
     <title>Bolo</title>
+    <script>
+      if (new URLSearchParams(location.search).get("view") === "overlay") {
+        document.documentElement.classList.add("view-overlay");
+      }
+    </script>
+    <style>
+      html.view-overlay, html.view-overlay body { background: transparent !important; color-scheme: normal; }
+    </style>
     <link rel="stylesheet" href="/src/styles.css" />
   </head>
   <body>

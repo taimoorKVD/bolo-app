@@ -170,6 +170,7 @@ pub fn classify_to_failure(status: u16, body: &str, using_builtin: bool) -> Groq
     GroqFailure {
         message,
         kind: class.fail_kind(),
+        status: Some(status),
         explicit_quota: class.explicit_quota(),
         retry_after_ms: transcribe::retry_after_ms(body),
         offline_hint: class.offline_hint(),
@@ -181,6 +182,7 @@ pub fn network_to_failure(chain: String) -> GroqFailure {
     GroqFailure {
         message: format!("couldn't reach Groq: {chain}"),
         kind: class.fail_kind(),
+        status: None,
         explicit_quota: false,
         retry_after_ms: None,
         offline_hint: class.offline_hint(),
@@ -447,8 +449,9 @@ impl ProviderStore {
                 }
             }
             FailKind::Rejected => {
-                key.state = KeyState::Dead;
-                key.cooldown_until_ms = None;
+                // One 401 used to mark the key dead for the rest of the
+                // session, so later takes never called Groq at all. Try again
+                // next take. This take still moves on to the next key.
                 RouterAction::Switch
             }
             FailKind::Unavailable => {
@@ -540,7 +543,12 @@ pub fn load_ready_keys(config_dir: &Path) -> anyhow::Result<(ProviderStore, Vec<
     }
     let _ = store.save(config_dir);
     if materials.is_empty() {
-        anyhow::bail!("Add a Groq API key in Bolo settings.");
+        let reason = store
+            .keys
+            .iter()
+            .find_map(|key| key.last_error.clone())
+            .unwrap_or_else(|| "Add a Groq API key in Bolo settings.".into());
+        anyhow::bail!(crate::builtin::redact_secrets(&reason));
     }
     Ok((store, materials))
 }
@@ -812,6 +820,7 @@ mod tests {
         GroqFailure {
             message: format!("{kind:?}"),
             kind,
+            status: None,
             explicit_quota: explicit,
             retry_after_ms: retry_ms,
             offline_hint: offline,
@@ -958,7 +967,11 @@ mod tests {
         let order = store.ready_ids(now_ms());
         let winner = run_router(&mut store, &order, &mut mock).unwrap();
         assert_eq!(winner, "b");
-        assert_eq!(store.keys.iter().find(|k| k.id == "a").unwrap().state, KeyState::Dead);
+        assert_eq!(
+            store.keys.iter().find(|k| k.id == "a").unwrap().state,
+            KeyState::Ok,
+            "a rejected key is tried again on the next take"
+        );
         assert_eq!(store.preferred.as_deref(), Some("b"));
         assert_eq!(mock.calls, vec!["a".to_string(), "b".to_string()]);
     }

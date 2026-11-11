@@ -33,7 +33,9 @@ body.view-settings {
   color: var(--ink);
 }
 
-body.view-overlay { background: transparent; overflow: hidden; }
+html.view-overlay { color-scheme: normal; background: transparent; }
+html.view-overlay, body.view-overlay { background: transparent; }
+body.view-overlay { overflow: hidden; }
 body.view-overlay.browser-preview { background: #2a2722; min-height: 100vh; }
 
 button, input, select, textarea { font: inherit; color: inherit; }

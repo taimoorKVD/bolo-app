@@ -1680,6 +1680,8 @@ fn publish(app: &AppHandle, event: &DictationEvent) {
         (268.0, 150.0)
     };
     let _ = overlay.set_size(LogicalSize::new(width, height));
+    // A transparent window otherwise clears to black for a frame when it is shown.
+    let _ = overlay.set_background_color(Some(tauri::window::Color(0, 0, 0, 0)));
     position_overlay(&overlay);
     let _ = overlay.show();
 }
