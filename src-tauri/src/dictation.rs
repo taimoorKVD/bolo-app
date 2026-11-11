@@ -702,7 +702,13 @@ pub fn end(app: &AppHandle) {
                 if err.hint {
                     hint(&app, &err.message);
                 } else {
-                    fail(&app, &err.message);
+                    log_line(
+                        &app.state::<AppState>().config_dir,
+                        "error",
+                        &format!("take failed: {}", err.message),
+                    );
+                    fail(&app, pipeline::plain_take_notice(&err.message));
+                    schedule_online_retry(app.clone());
                 }
             }
         }
@@ -849,11 +855,95 @@ pub fn recover_spool(app: &AppHandle) {
             &state.config_dir,
             "info",
             &format!(
-                "recovered take {} audio that hadn't been transcribed; paste-again will retry it",
+                "recovered take {} audio that hadn't been transcribed; it will be tried again when the connection is back",
                 recovered.id
             ),
         );
+        schedule_online_retry(app.clone());
     }
+}
+
+fn schedule_online_retry(app: AppHandle) {
+    static BUSY: AtomicBool = AtomicBool::new(false);
+    if BUSY.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    tauri::async_runtime::spawn(async move {
+        for wait_secs in [4u64, 15, 45, 90] {
+            let _ = tauri::async_runtime::spawn_blocking(move || {
+                std::thread::sleep(Duration::from_secs(wait_secs));
+            })
+            .await;
+            if !is_idle(app.state::<AppState>().inner()) {
+                continue;
+            }
+            let state = app.state::<AppState>();
+            let Some(saved) = spool::untranscribed(&state.config_dir) else {
+                break;
+            };
+            let saved_id = saved.id.clone();
+            let config_dir = state.config_dir.clone();
+            let env = pipeline::JobEnv {
+                settings: lock(&state.settings).clone(),
+                recent: Vec::new(),
+                config_dir: config_dir.clone(),
+                spool_id: saved_id.clone(),
+            };
+            drop(state);
+            let mut parts = Vec::new();
+            let mut failed = false;
+            for chunk in saved.audio {
+                match pipeline::retry_encoded(chunk, &env).await {
+                    Ok(got) if pipeline::has_words(&got.text) => parts.push(got.text),
+                    Ok(_) => {}
+                    Err(err) => {
+                        log_line(&config_dir, "info", &format!("retry still waiting: {err}"));
+                        failed = true;
+                        break;
+                    }
+                }
+            }
+            if failed || parts.is_empty() {
+                spool::note_retry(&config_dir, &saved_id);
+                continue;
+            }
+            if !is_idle(app.state::<AppState>().inner()) {
+                continue;
+            }
+            let text = parts.join(" ");
+            spool::write_text(&config_dir, &saved_id, &text);
+            *lock(&app.state::<AppState>().last_text) = Some(text.clone());
+            log_line(
+                &config_dir,
+                "info",
+                &format!("retried take {saved_id} ({} chars)", text.chars().count()),
+            );
+            let pasted = text.clone();
+            match tauri::async_runtime::spawn_blocking(move || insert::insert_text(&pasted)).await {
+                Ok(Ok(inserted)) => {
+                    let word = insert::status_word(inserted.method, inserted.verified);
+                    if word == "Inserted" {
+                        spool::mark_pasted(&config_dir, &saved_id);
+                    }
+                    publish(
+                        &app,
+                        &DictationEvent {
+                            phase: "done".into(),
+                            message: Some(word.into()),
+                            elapsed_ms: 0,
+                            level: 0.0,
+                            engine: None,
+                        },
+                    );
+                }
+                _ => {
+                    log_line(&config_dir, "info", "retried take is saved for paste-again");
+                }
+            }
+            break;
+        }
+        BUSY.store(false, Ordering::Release);
+    });
 }
 
 fn spawn_meter(

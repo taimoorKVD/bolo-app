@@ -144,7 +144,59 @@ pub fn prune(config: &Path, current: &str, keep: usize) {
     }
 }
 
-/// Newest spool that still has text or audio. Pasted takes are deleted.
+/// How many times a saved recording is sent again after the online service
+/// was unreachable. After this, the audio stays on disk but is not retried.
+pub const RETRY_LIMIT: u32 = 4;
+
+fn retry_count(dir: &Path) -> u32 {
+    fs::read_to_string(dir.join("retries"))
+        .ok()
+        .and_then(|text| text.trim().parse().ok())
+        .unwrap_or(0)
+}
+
+pub fn note_retry(config: &Path, id: &str) {
+    if id.is_empty() {
+        return;
+    }
+    let dir = root(config).join(id);
+    if fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let next = retry_count(&dir).saturating_add(1);
+    let _ = fs::write(dir.join("retries"), next.to_string());
+}
+
+/// Newest take that has audio, no transcript, and retries left.
+/// That recording is tried again when the online service is back.
+pub fn untranscribed(config: &Path) -> Option<Recovered> {
+    let entries = fs::read_dir(root(config)).ok()?;
+    let mut best: Option<(SystemTime, Recovered)> = None;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() || path.join("pasted").is_file() || path.join("text.txt").is_file() {
+            continue;
+        }
+        if retry_count(&path) >= RETRY_LIMIT {
+            continue;
+        }
+        let id = entry.file_name().to_string_lossy().to_string();
+        let audio = read_audio(&path);
+        if audio.is_empty() {
+            continue;
+        }
+        let stamp = entry
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        if best.as_ref().is_none_or(|(prev, _)| stamp >= *prev) {
+            best = Some((stamp, Recovered { id, text: None, audio }));
+        }
+    }
+    best.map(|(_, recovered)| recovered)
+}
+
+/// Newest spool that still has text or audio. Pasted takes are skipped.
 pub fn latest(config: &Path) -> Option<Recovered> {
     let entries = fs::read_dir(root(config)).ok()?;
     let mut best: Option<(SystemTime, PathBuf, String)> = None;
@@ -211,6 +263,16 @@ mod tests {
         assert!(audio(&dir, "..").is_empty());
         remove(&dir, "take-a");
         assert!(audio(&dir, "take-a").is_empty());
+        write_audio(&dir, "take-c", 0, b"held");
+        let pending = untranscribed(&dir).expect("audio without text can be retried");
+        assert_eq!(pending.id, "take-c");
+        assert!(pending.text.is_none());
+        for _ in 0..RETRY_LIMIT {
+            note_retry(&dir, "take-c");
+        }
+        assert!(untranscribed(&dir).is_none(), "retries stop after the limit");
+        write_text(&dir, "take-c", "caught it");
+        assert!(untranscribed(&dir).is_none(), "a transcript is not sent again");
         let _ = fs::remove_dir_all(&dir);
     }
 

@@ -30,9 +30,10 @@ assert(small?.label.includes("488 MB") === true, "small size");
 assert(base?.englishOnly === false && small?.englishOnly === false, "multilingual");
 
 const urduNote = offlineModelNote("ur", "base.en");
-assert(urduNote.includes(URDU_OFFLINE_NOTICE), "urdu settings show the notice");
-assert(offlineModelNote("en", "base.en").includes(URDU_OFFLINE_NOTICE) === false, "english stays quiet");
+assert(urduNote.includes(URDU_OFFLINE_NOTICE) === false, "settings do not tell the user to download a model");
+assert(!urduNote.toLowerCase().includes("whisper"), "no engine names in the note");
+assert(offlineModelNote("en", "base.en").includes("downloads what it needs"), "english fallback stays plain");
 assert(offlineModelNote("hi", "ggml-small").includes("488 MB"), "chosen model shows its size");
-assert(offlineModelNote("auto", "ggml-base").includes("hash"), "download checks the hash");
+assert(offlineModelNote("auto", "ggml-base").includes("downloads it when needed"), "multilingual downloads itself");
 
 console.log("offline-models ok");

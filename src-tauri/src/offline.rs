@@ -137,9 +137,10 @@ pub fn verify_download(model: &str, bytes: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
-/// English-only models are not used for Urdu, Hindi, or mixed speech.
-/// A multilingual file already on disk is used instead. Otherwise the caller
-/// shows [`URDU_OFFLINE_NOTICE`] and does not run the English model.
+/// A multilingual file already on disk is preferred for Urdu, Hindi, or mixed
+/// speech. Otherwise the installed model runs (English `base.en` is enough
+/// for a take that is probably English). The caller downloads a multilingual
+/// model in the background when [`multilingual_download_wanted`] is true.
 pub fn resolve_fallback(config: &Path, selected: &str, language: &str) -> Result<&'static str, String> {
     let selected = normalize_model(selected);
     if selected == "off" {
@@ -154,7 +155,17 @@ pub fn resolve_fallback(config: &Path, selected: &str, language: &str) -> Result
     if model_present(config, "ggml-base") {
         return Ok("ggml-base");
     }
-    Err(URDU_OFFLINE_NOTICE.into())
+    Ok(selected)
+}
+
+/// True when this take may need Urdu or Hindi and no multilingual file is on disk.
+pub fn multilingual_download_wanted(config: &Path, selected: &str, language: &str) -> bool {
+    let selected = normalize_model(selected);
+    language_needs_multilingual(language)
+        && selected != "off"
+        && is_english_only(selected)
+        && !model_present(config, "ggml-base")
+        && !model_present(config, "ggml-small")
 }
 
 /// whisper.cpp language flag. English-only models are not pinned to Urdu or Hindi.
@@ -520,15 +531,17 @@ whisper_print_timings: load time = 10 ms\n";
     }
 
     #[test]
-    fn urdu_hindi_and_mixed_do_not_silently_use_an_english_model() {
+    fn installed_english_model_runs_while_multilingual_downloads() {
         let dir = std::env::temp_dir().join(format!("bolo-offline-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         for language in ["ur", "hi", "auto", "mixed"] {
-            let err = resolve_fallback(&dir, "base.en", language).unwrap_err();
-            assert_eq!(err, URDU_OFFLINE_NOTICE, "{language}");
-            assert!(is_multilingual_notice(&err));
+            assert_eq!(resolve_fallback(&dir, "base.en", language).unwrap(), "base.en", "{language}");
+            assert!(multilingual_download_wanted(&dir, "base.en", language), "{language}");
+            assert_ne!(resolve_fallback(&dir, "base.en", language).unwrap(), URDU_OFFLINE_NOTICE);
         }
+        assert!(!multilingual_download_wanted(&dir, "base.en", "en"));
+        assert!(!multilingual_download_wanted(&dir, "off", "ur"));
         assert_eq!(resolve_fallback(&dir, "base.en", "en").unwrap(), "base.en");
         assert_eq!(resolve_fallback(&dir, "small.en", "en").unwrap(), "small.en");
         assert_eq!(resolve_fallback(&dir, "ggml-base", "ur").unwrap(), "ggml-base");
@@ -539,6 +552,7 @@ whisper_print_timings: load time = 10 ms\n";
         assert!(cli_language_args("ggml-base", "mixed").is_empty());
         fs::create_dir_all(dir.join("whisper")).unwrap();
         fs::write(dir.join("whisper").join("ggml-base.bin"), b"present").unwrap();
+        assert!(!multilingual_download_wanted(&dir, "base.en", "auto"));
         assert_eq!(resolve_fallback(&dir, "small.en", "ur").unwrap(), "ggml-base");
         fs::write(dir.join("whisper").join("ggml-small.bin"), b"present").unwrap();
         assert_eq!(resolve_fallback(&dir, "base.en", "hi").unwrap(), "ggml-small");

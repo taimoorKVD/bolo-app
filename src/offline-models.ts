@@ -29,13 +29,13 @@ export function needsMultilingualOffline(language: string | null | undefined): b
   return code === "ur" || code === "hi" || code === "auto" || code === "mixed";
 }
 
-export function offlineModelNote(language: string, model: string): string {
+export function offlineModelNote(_language: string, model: string): string {
   const choice = OFFLINE_MODELS.find((item) => item.id === knownOfflineModel(model));
-  if (choice && !choice.englishOnly && choice.id !== "off") {
-    return `${choice.label}. Bolo downloads it the first time Groq can't take a request, and checks the file hash before saving it.`;
+  if (choice?.id === "off") {
+    return "Bolo uses the online speech service for every take.";
   }
-  if (needsMultilingualOffline(language) && choice?.englishOnly) {
-    return `${URDU_OFFLINE_NOTICE} The English on-device model is not used for that speech. Pick ggml-base or ggml-small to download one. If you only dictate in English, set I speak to English.`;
+  if (choice && !choice.englishOnly) {
+    return `${choice.label}. Bolo downloads it when needed.`;
   }
-  return "If Groq is rate limiting, down, or unreachable, Bolo transcribes this take on the PC with whisper.cpp and tries Groq again on the next one. The model downloads the first time it's needed.";
+  return "If the online service is busy, Bolo transcribes on this PC and downloads what it needs in the background.";
 }

@@ -565,7 +565,26 @@ async fn speech_raw(
     let mut spoken = via.transcribe(audio.clone(), model, language, first_prompt.clone()).await?;
     crate::measure::note_call("raw", model, language, first_prompt.as_deref(), &spoken.language, &spoken.text);
     crate::diag::note(format!("whisper#1 detected={} text={}", spoken.language, spoken.text));
-    if unlikely_language(language, &spoken.language) {
+    if prefer_english_pass(language, output, &spoken.text, &spoken.language, spoken.doubtful) {
+        // A short or low-confidence tag (often Urdu or Hindi on an English
+        // phrase) must not throw the words away or send them through
+        // translation. Hear it once more as English. If that pass fails,
+        // the text we already have is what gets inserted.
+        crate::diag::note("short or unclear language tag; transcribing again in English");
+        if let Ok(pinned) = via.transcribe(audio.clone(), model, "en", prompt.map(str::to_string)).await {
+            crate::diag::note(format!("english pass text={}", pinned.text));
+            if !pinned.text.trim().is_empty() {
+                let tries = spoken.tries.saturating_add(pinned.tries);
+                spoken = pinned;
+                spoken.tries = tries;
+                if transcribe::language_code(&spoken.language).is_empty() {
+                    spoken.language = "en".into();
+                }
+                flags.repass = true;
+                crate::measure::note_call("redecode", model, "en", prompt, &spoken.language, &spoken.text);
+            }
+        }
+    } else if unlikely_language(language, &spoken.language) {
         // Short or accented English is sometimes detected as Spanish, Welsh,
         // etc., which then got translated and came out garbled. Bolo users
         // speak English and Urdu, so pin English and transcribe again.
@@ -786,6 +805,20 @@ pub(crate) fn keep_repass(first: &transcribe::Transcript, second: &transcribe::T
     !(second.doubtful && !first.doubtful)
 }
 
+/// Auto language, English output, and a tag other than English on a short
+/// or low-confidence take. Urdu is kept only when the take is long enough
+/// and Whisper was sure.
+pub(crate) fn prefer_english_pass(setting: &str, output: &str, text: &str, detected: &str, doubtful: bool) -> bool {
+    if transcribe::normalize_language(setting).is_some() || transcribe::normalize_output(output) != "english" {
+        return false;
+    }
+    let code = transcribe::language_code(detected);
+    if code.is_empty() || code == "en" {
+        return false;
+    }
+    doubtful || text.split_whitespace().count() < 3
+}
+
 /// Auto language and Whisper picked something other than English or Urdu.
 pub(crate) fn unlikely_language(setting: &str, detected: &str) -> bool {
     if transcribe::normalize_language(setting).is_some() {
@@ -826,8 +859,24 @@ fn log_speech(env: &JobEnv, language: &str, path: &str) {
 }
 
 async fn on_device_text(config: &Path, selected: &str, language: &str, bytes: &[u8]) -> Result<String, String> {
+    if offline::multilingual_download_wanted(config, selected, language) {
+        crate::diag::note("multilingual model missing; downloading in the background");
+        offline::prefetch(config.to_path_buf(), "ggml-base".into());
+    }
     let model = offline::resolve_fallback(config, selected, language)?;
     offline::transcribe_encoded(config, model, language, bytes).await
+}
+
+/// Shown when a take produced no words. The real cause stays in the log.
+pub const PLAIN_MISS: &str = "Couldn't catch that, please try again";
+
+pub fn plain_take_notice(raw: &str) -> &'static str {
+    let _ = raw;
+    PLAIN_MISS
+}
+
+pub async fn retry_encoded(bytes: Vec<u8>, env: &JobEnv) -> Result<Recognized, String> {
+    recognize(bytes, env, 0.05, "flac", 1.0).await
 }
 
 fn offline_error(groq: &str, local: String) -> String {
@@ -886,6 +935,16 @@ mod tests {
         assert!(!keep_repass(&sure, &worse));
         assert!(keep_repass(&sure, &better));
         assert!(keep_repass(&worse, &better));
+        assert!(prefer_english_pass("auto", "english", "ہاں", "ur", false), "a short Urdu tag is retried in English");
+        assert!(prefer_english_pass("auto", "english", "please send the long invoice today", "ur", true), "low confidence is retried");
+        assert!(!prefer_english_pass("auto", "english", "آج meeting ہے", "ur", false), "a clear Urdu sentence stays");
+        assert!(!prefer_english_pass("auto", "same", "ہاں", "ur", false));
+        assert!(!prefer_english_pass("en", "english", "ہاں", "ur", false));
+        let notice = plain_take_notice(offline::URDU_OFFLINE_NOTICE);
+        assert_eq!(notice, PLAIN_MISS);
+        assert!(!notice.to_lowercase().contains("model"));
+        assert!(!notice.to_lowercase().contains("urdu"));
+        assert!(!notice.to_lowercase().contains("groq"));
     }
     #[test]
     fn urdu_capable_takes_use_the_full_model() {
@@ -1001,6 +1060,7 @@ pub(crate) mod fake {
         replies: Mutex<VecDeque<(String, String)>>,
         translation: Option<String>,
         pub fail_translate: bool,
+        pub doubt: bool,
     }
 
     impl FakeVia {
@@ -1010,6 +1070,7 @@ pub(crate) mod fake {
                 replies: Mutex::new(replies.iter().map(|(t, l)| (t.to_string(), l.to_string())).collect()),
                 translation: translation.map(str::to_string),
                 fail_translate: false,
+                doubt: false,
             }
         }
         fn push(&self, kind: String, language: &str, prompt: Option<String>) {
@@ -1018,7 +1079,7 @@ pub(crate) mod fake {
         pub fn transcribe(&self, model: &str, language: &str, prompt: Option<String>) -> anyhow::Result<Transcript> {
             self.push(format!("transcribe:{model}"), language, prompt);
             let (text, language) = self.replies.lock().unwrap().pop_front().ok_or_else(|| anyhow::anyhow!("no reply"))?;
-            Ok(Transcript { text, tries: 1, language, doubtful: false })
+            Ok(Transcript { text, tries: 1, language, doubtful: self.doubt })
         }
         pub fn translate(&self, prompt: Option<&str>) -> anyhow::Result<Transcript> {
             self.push("translate".into(), "", prompt.map(str::to_string));
@@ -1162,6 +1223,38 @@ mod via_tests {
         assert_eq!(got.text, "आज मौसम अच्छा है");
         assert_eq!(got.language, "hi");
         assert!(got.path.ends_with("-repass"));
+    }
+
+    #[test]
+    fn short_urdu_tag_is_heard_again_in_english_and_that_text_is_kept() {
+        let fake = FakeVia::new(&[("ہاں", "ur"), ("yes", "en")], None);
+        let got = run(&fake, "auto", "english", None);
+        let calls = fake.calls.lock().unwrap();
+        assert_eq!(calls.len(), 2, "{calls:?}");
+        assert_eq!(calls[1].1, "en");
+        assert_eq!(got.text, "yes");
+        assert!(got.path.contains("repass"));
+    }
+
+    #[test]
+    fn unclear_urdu_keeps_the_online_words_when_the_english_pass_fails() {
+        let mut fake = FakeVia::new(&[("ہاں جی", "ur")], None);
+        fake.fail_translate = true;
+        let got = run(&fake, "auto", "english", None);
+        assert_eq!(got.text, "ہاں جی");
+        assert!(!got.text.is_empty());
+    }
+
+    #[test]
+    fn low_confidence_urdu_prefers_the_english_pass() {
+        let mut fake = FakeVia::new(
+            &[("آج meeting ہے اور ہم دفتر جائیں گے", "ur"), ("There is a meeting and we will go to the office", "en")],
+            None,
+        );
+        fake.doubt = true;
+        let got = run(&fake, "auto", "english", None);
+        assert_eq!(got.text, "There is a meeting and we will go to the office");
+        assert!(got.path.contains("repass"));
     }
 
     #[test]
