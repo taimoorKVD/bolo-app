@@ -21,6 +21,8 @@ permissions:
 jobs:
   store:
     name: Rebuild the Store package
+    # Push runs only for the one rebuild commit. Later edits of this file do not upload again.
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, 'Rebuild the Store package')
     runs-on: windows-latest
     env:
       STORE_IDENTITY_NAME: TaimoorHussain.Bolo.com
@@ -48,7 +50,11 @@ jobs:
           $v = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version + ".0"
           ./scripts/build-msix.ps1 -IdentityName $env:STORE_IDENTITY_NAME -Publisher $env:STORE_PUBLISHER `
             -PublisherDisplayName $env:STORE_PUBLISHER_DISPLAY_NAME -Version $v
+          $msix = "target-msix/Bolo_${v}_x64.msix"
+          if (-not (Test-Path $msix)) { throw "Missing $msix" }
           $upload = "target-msix/Bolo_${v}_x64.msixupload"
+          Compress-Archive -Path $msix -DestinationPath "target-msix/Bolo_${v}_x64.zip" -Force
+          Move-Item "target-msix/Bolo_${v}_x64.zip" $upload -Force
           if (-not (Test-Path $upload)) { throw "Missing $upload" }
           $tmp = Join-Path $env:RUNNER_TEMP "msix-check"
           $inner = Join-Path $env:RUNNER_TEMP "msix-inner"
