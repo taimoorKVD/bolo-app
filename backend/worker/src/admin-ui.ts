@@ -21,19 +21,29 @@ radial-gradient(900px 480px at 12% -10%,rgba(224,184,90,.22),transparent 55%),li
 .facts li{margin:0 0 10px;padding-left:16px;position:relative}
 .facts li:before{content:"";position:absolute;left:0;top:.65em;width:6px;height:6px;border-radius:99px;background:var(--gold)}
 .wave{position:absolute;left:0;right:0;bottom:18px;width:100%;color:rgba(224,184,90,.4)}
-.panel{flex:.92;display:flex;align-items:center;justify-content:center;padding:48px 32px;background:#0e0d0b}
-#panel{width:100%;max-width:420px}
+#gate{position:relative;overflow:hidden;background:#0b0a09}
+#gate:before{content:"";position:absolute;inset:-20%;background:radial-gradient(420px 280px at 20% 20%,rgba(228,194,122,.22),transparent 60%),radial-gradient(380px 260px at 80% 70%,rgba(228,194,122,.12),transparent 55%);animation:drift 10s ease-in-out infinite alternate}
+.panel{flex:.92;display:flex;align-items:center;justify-content:center;padding:48px 32px;background:transparent;position:relative}
+#panel{width:100%;max-width:420px;background:rgba(20,18,16,.72);border:1px solid rgba(255,255,255,.08);border-radius:20px;padding:28px 26px 22px;box-shadow:0 24px 60px rgba(0,0,0,.35);backdrop-filter:blur(18px)}
+@keyframes drift{from{transform:translate3d(0,0,0)}to{transform:translate3d(2%,-2%,0)}}
 h1{font-size:28px;line-height:1.2;margin:0 0 8px;font-weight:650}
 .k{display:block;color:var(--mute);font-size:12px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;margin:16px 0 6px}
-input,select{width:100%;height:48px;background:#0c0b09;border:1px solid var(--line);border-radius:12px;padding:0 14px}
+input,select{width:100%;height:40px;background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:0 12px}
 input:focus,select:focus{outline:none;border-color:var(--gold);box-shadow:0 0 0 3px rgba(224,184,90,.28)}
 .pw{position:relative}.pw input{padding-right:76px}
 .textbtn{position:absolute;right:8px;top:8px;height:32px;border:0;background:transparent;color:var(--gold2);cursor:pointer;padding:0 8px}
 .links .textbtn{position:static;height:auto;padding:8px 0}
-.btn{width:100%;height:48px;margin-top:18px;border:0;border-radius:12px;background:linear-gradient(180deg,#f3d48a,#d4af37);color:#1a1408;font-weight:750;cursor:pointer}
-.btn[disabled]{opacity:.55;cursor:not-allowed}
-.btn.ghost{background:transparent;color:var(--gold2);border:1px solid #5c4c22;width:auto;height:40px;margin-top:0;padding:0 14px}
-.btn.bad{background:#e07a68;color:#1a100e}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;height:36px;padding:0 12px;margin:0;width:auto;border-radius:8px;border:1px solid transparent;background:linear-gradient(180deg,#f8e3a8,#d4af37);color:#1a1408;font-weight:650;font-size:13px;letter-spacing:.01em;cursor:pointer;box-shadow:0 0 0 1px rgba(224,184,90,.28),0 8px 18px rgba(212,175,55,.16);transition:transform .18s ease,box-shadow .18s ease}
+.btn:hover{transform:translateY(-1px)}
+.btn[disabled]{opacity:.5;cursor:not-allowed;transform:none}
+.btn.ghost{background:transparent;color:var(--text);border-color:transparent;box-shadow:none}
+.btn.sec{background:var(--elev);color:var(--text);border:1px solid rgba(255,255,255,.08);box-shadow:none}
+.btn.bad{background:transparent;color:#e7a090;border:1px solid rgba(231,160,144,.45);box-shadow:none}
+.btn.solid-danger{background:#b42318;color:#fff;border-color:transparent;box-shadow:none}
+#panel .btn{width:100%;height:40px;margin-top:16px}
+.pop .btn,.pop .btn.bad,.pop .btn.ghost{display:flex;width:100%;height:32px;margin:0;justify-content:flex-start;background:transparent;border:0;box-shadow:none;color:var(--text);border-radius:8px}
+.pop .btn.bad{color:#e7a090}
+.pop .btn:hover{background:rgba(255,255,255,.05)}
 .err{color:var(--bad);margin:12px 0 0}
 .hint{color:var(--mute);font-size:13px;margin:8px 0 0}
 .codes{display:grid;grid-template-columns:repeat(6,1fr);gap:8px}
@@ -46,7 +56,13 @@ input:focus,select:focus{outline:none;border-color:var(--gold);box-shadow:0 0 0 
 #nav{display:flex;flex-direction:column;gap:2px;overflow:auto}
 #nav button{display:flex;align-items:center;gap:10px;width:100%;text-align:left;background:transparent;border:0;color:var(--mute);border-radius:10px;padding:8px 10px;cursor:pointer;transition:background .18s ease,color .18s ease}
 #nav button .i{width:16px;height:16px;flex:none}
-#nav button.on{color:var(--text);background:var(--elev);box-shadow:inset 2px 0 0 var(--gold)}
+.navlabel{font-size:11px;font-weight:650;letter-spacing:.08em;text-transform:uppercase;color:var(--mute);padding:14px 10px 4px}
+#nav button.on{color:#1a1408;background:linear-gradient(180deg,#f6de9a,#e0b85a);box-shadow:none}
+#nav button.on .i{color:#1a1408}
+#shell.collapsed .navlabel{display:none}
+.sidefoot{margin-top:auto;display:flex;flex-direction:column;gap:8px}
+.side .acct{margin:0}
+.side .menu{top:auto;bottom:calc(100% + 8px)}
 #nav button:hover{color:var(--text);background:var(--elev)}
 #shell.collapsed #nav button span,#shell.collapsed .logo span{display:none}
 .workspace{min-width:0;display:flex;flex-direction:column}
@@ -82,8 +98,43 @@ main{max-width:1120px;margin:0 auto;padding:22px 22px 72px;width:100%}
 @media (prefers-reduced-motion:reduce){*{animation:none !important;transition:none !important}}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px}
 .card{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:16px 18px}
-.stat .k{margin:0}.stat .v{font-size:28px;font-weight:700;margin-top:4px}
-h2{font-size:20px;margin:28px 0 12px;font-weight:650}
+.stat{background:var(--elev);transition:transform .18s ease,box-shadow .18s ease}
+.stat:hover{transform:translateY(-2px);box-shadow:var(--shadow)}
+.stat .k{margin:0;display:flex;align-items:center;gap:8px}
+.stat .v{font-size:28px;font-weight:650;margin-top:8px;letter-spacing:-.03em}
+h2{font-size:22px;margin:4px 0 16px;font-weight:650;letter-spacing:-.02em;text-transform:none;color:var(--text)}
+.brand h2{font-size:40px;line-height:1.12;max-width:14ch;margin:22px 0 12px}
+.section{font-size:13px;font-weight:650;letter-spacing:.08em;text-transform:uppercase;color:var(--mute);margin:28px 0 12px}
+.hello{font-size:22px;font-weight:650;letter-spacing:-.02em;margin:0}
+.sub{color:var(--mute);font-size:12px;margin-top:2px}
+.who{display:flex;align-items:center;gap:10px;min-width:0}
+.who .em{font-size:14px;font-weight:600}
+.chip{display:inline-flex;align-items:center;height:22px;padding:0 8px;border-radius:99px;font-size:12px;font-weight:650;background:rgba(255,255,255,.04);color:var(--mute)}
+.chip.active,.chip.ok{color:#8fceab;background:rgba(143,206,171,.14)}
+.chip.suspended,.chip.revoked,.chip.bad{color:#e7b15a;background:rgba(231,177,90,.14)}
+.chip.paid{color:#e4c27a;background:rgba(228,194,122,.16)}
+.meter{height:6px;width:88px;background:rgba(255,255,255,.08);border-radius:99px;overflow:hidden}
+.meter>i{display:block;height:100%;background:linear-gradient(90deg,#e4c27a,#f3d48a)}
+.toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0 0 12px}
+.chipbtn{height:28px;padding:0 10px;border-radius:99px;border:1px solid rgba(255,255,255,.08);background:transparent;color:var(--mute);cursor:pointer;font-size:12px}
+.chipbtn.on{color:#1a1408;background:#e4c27a;border-color:transparent}
+.pager{display:flex;justify-content:space-between;align-items:center;padding:10px 4px;color:var(--mute);font-size:13px}
+.tl{display:flex;flex-direction:column;gap:0}
+.tl-item{display:grid;grid-template-columns:16px 1fr;gap:10px;padding:8px 0}
+.tl-item .dot{width:8px;height:8px;margin-top:6px;border-radius:99px;background:var(--gold)}
+.poolgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}
+.dot{width:8px;height:8px;border-radius:99px;background:#8fceab;display:inline-block}
+.dot.bad{background:#e7b15a}
+.switch{width:42px;height:24px;border-radius:99px;border:1px solid rgba(255,255,255,.12);background:#2a261f;position:relative;cursor:pointer}
+.switch.on{background:#e4c27a}
+.switch i{position:absolute;top:2px;left:2px;width:18px;height:18px;border-radius:99px;background:#fff;transition:transform .18s ease}
+.switch.on i{transform:translateX(18px)}
+.quick{opacity:0;transition:opacity .15s ease}
+tr:hover .quick{opacity:1}
+#app.rise{animation:rise .18s ease}
+@keyframes rise{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+.toast{animation:tin .2s ease}
+@keyframes tin{from{transform:translateY(10px);opacity:0}to{transform:none;opacity:1}}
 table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:10px 8px;border-bottom:1px solid var(--line);vertical-align:top}
 th{color:var(--mute);font-size:12px;letter-spacing:.05em;text-transform:uppercase}
 tr.click{cursor:pointer}tr:hover td{background:color-mix(in srgb,var(--gold) 8%,transparent)}
@@ -132,34 +183,39 @@ code{font-family:Consolas,ui-monospace,monospace;color:var(--gold2);font-size:13
 <aside class="side">
   <div class="logo">Bolo<span>Office</span></div>
   <nav id="nav" aria-label="Office">
+    <div class="navlabel">Overview</div>
     <button type="button" data-v="dash" class="on"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10.5 12 4l8 6.5V20h-6v-5H10v5H4z" fill="none" stroke="currentColor" stroke-width="1.6"/></svg><span>Dashboard</span></button>
-    <button type="button" data-v="users"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 11a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm8 1a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5ZM3 19c.4-2.4 2.4-4 5-4s4.6 1.6 5 4m1-4c2.2 0 4 1.3 4.5 3.5" fill="none" stroke="currentColor" stroke-width="1.6"/></svg><span>Users</span></button>
+    <button type="button" data-v="health"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l2-5 4 10 2-5h6" fill="none" stroke="currentColor" stroke-width="1.6"/></svg><span>Health</span></button>
+    <div class="navlabel">People</div>
+    <button type="button" data-v="users"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 11a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm8 1a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5ZM3 19c.4-2.4 2.4-4 5-4s4.6 1.6 5 4" fill="none" stroke="currentColor" stroke-width="1.6"/></svg><span>Users</span></button>
     <button type="button" data-v="team" id="navTeam" hidden><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 12a3 3 0 1 0 0-6 3 3 0 0 0 0 6ZM5 19c.5-3 3-5 7-5s6.5 2 7 5" fill="none" stroke="currentColor" stroke-width="1.6"/></svg><span>Team</span></button>
     <button type="button" data-v="devices"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="3" width="16" height="18" rx="2" fill="none" stroke="currentColor" stroke-width="1.6"/></svg><span>Devices</span></button>
-    <button type="button" data-v="keys" data-perm="view_keys" hidden><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 7a4 4 0 1 0-3.5 6.6L14 17h2v2h2v-2l1-1-4.4-4.4A4 4 0 0 0 14 7Z" fill="none" stroke="currentColor" stroke-width="1.6"/></svg><span>Keys</span></button>
-    <button type="button" data-v="health"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l2-5 4 10 2-5h6" fill="none" stroke="currentColor" stroke-width="1.6"/></svg><span>Health</span></button>
-    <button type="button" data-v="limits"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19V5M4 19h16M8 15v-4m4 4V8m4 7v-2" fill="none" stroke="currentColor" stroke-width="1.6"/></svg><span>Limits</span></button>
-    <button type="button" data-v="releases"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 4 7v10l8 4 8-4V7l-8-4Zm0 8 8-4M12 11v10M12 11 4 7" fill="none" stroke="currentColor" stroke-width="1.6"/></svg><span>Releases</span></button>
     <button type="button" data-v="feedback" data-perm="manage_feedback" hidden><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 6h14v9H8l-3 3V6Z" fill="none" stroke="currentColor" stroke-width="1.6"/></svg><span>Feedback</span></button>
+    <div class="navlabel">System</div>
+    <button type="button" data-v="keys" data-perm="view_keys" hidden><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 7a4 4 0 1 0-3.5 6.6L14 17h2v2h2v-2l1-1-4.4-4.4A4 4 0 0 0 14 7Z" fill="none" stroke="currentColor" stroke-width="1.6"/></svg><span>Keys</span></button>
+    <button type="button" data-v="limits"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19V5M4 19h16M8 15v-4m4 4V8m4 7v-2" fill="none" stroke="currentColor" stroke-width="1.6"/></svg><span>Limits</span></button>
+    <button type="button" data-v="releases"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 4 7v10l8 4 8-4V7l-8-4Z" fill="none" stroke="currentColor" stroke-width="1.6"/></svg><span>Releases</span></button>
     <button type="button" data-v="errors" data-perm="manage_feedback" hidden><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8v5m0 3h.01M12 3 2 20h20L12 3Z" fill="none" stroke="currentColor" stroke-width="1.6"/></svg><span>Errors</span></button>
     <button type="button" data-v="audit"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 6h11M8 12h11M8 18h11M5 6h.01M5 12h.01M5 18h.01" fill="none" stroke="currentColor" stroke-width="1.6"/></svg><span>Audit log</span></button>
-    <button type="button" data-v="settings" data-perm="manage_settings" hidden><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M12 3v2m0 14v2M3 12h2m14 0h2" fill="none" stroke="currentColor" stroke-width="1.6"/></svg><span>Settings</span></button>
+    <button type="button" data-v="settings" data-perm="manage_settings" hidden><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="1.6"/></svg><span>Settings</span></button>
   </nav>
-  <button type="button" id="collapse" class="btn ghost" style="margin-top:auto">Collapse</button>
+  <div class="sidefoot">
+    <div class="acct">
+      <button type="button" id="who" aria-haspopup="menu" aria-expanded="false" aria-controls="menu"></button>
+      <div id="menu" class="menu" role="menu" hidden>
+        <button type="button" id="m2fa" role="menuitem">Email codes</button>
+        <button type="button" id="mtotp" role="menuitem">Authenticator</button>
+        <button type="button" id="mout" role="menuitem">Sign out</button>
+      </div>
+    </div>
+    <button type="button" id="collapse" class="btn ghost">Collapse</button>
+  </div>
 </aside>
 <div class="workspace">
 <header>
   <button type="button" id="find" aria-haspopup="dialog">Search or jump to a page <kbd>Ctrl K</kbd></button>
   <span class="pill example" id="ex" hidden>Example data</span>
   <button type="button" id="theme" class="btn ghost" aria-label="Toggle color theme">Theme</button>
-  <div class="acct">
-    <button type="button" id="who" aria-haspopup="menu" aria-expanded="false" aria-controls="menu"></button>
-    <div id="menu" class="menu" role="menu" hidden>
-      <button type="button" id="m2fa" role="menuitem">Email codes</button>
-      <button type="button" id="mtotp" role="menuitem">Authenticator</button>
-      <button type="button" id="mout" role="menuitem">Sign out</button>
-    </div>
-  </div>
 </header>
 <main id="app"></main>
 </div>
@@ -333,7 +389,7 @@ $("#m2fa").onclick=async()=>{
   }catch(e){toast(e.message)}
 };
 function closeDrawer(){const d=$("#drawer");if(!d)return;d.classList.remove("open");d.hidden=true}
-function show(v){location.hash=v;$("#app").replaceChildren(h("div",{class:"card"},h("div",{class:"skel"})));document.querySelectorAll("#nav button[data-v]").forEach(b=>b.classList.toggle("on",b.dataset.v===v.split("/")[0]));if(!String(v).startsWith("user/"))closeDrawer();if(String(v).startsWith("user/")){users();return userView(v.slice(5))}({dash,users,audit,team,health,devices,limits,releases,keys,errors,feedback,settings}[v]||dash)()}
+function show(v){location.hash=v;const app=$("#app");app.classList.remove("rise");void app.offsetWidth;app.classList.add("rise");app.replaceChildren(h("div",{class:"card"},h("div",{class:"skel"})));document.querySelectorAll("#nav button[data-v]").forEach(b=>b.classList.toggle("on",b.dataset.v===v.split("/")[0]));if(!String(v).startsWith("user/"))closeDrawer();if(String(v).startsWith("user/")){users();return userView(v.slice(5))}({dash,users,audit,team,health,devices,limits,releases,keys,errors,feedback,settings}[v]||dash)()}
 const stat=(k,v,extra)=>h("div",{class:"card stat"},h("div",{class:"k"},k),h("div",{class:"v"},v),extra||"");
 function askSecret(title,text,mode){
   return new Promise((resolve)=>{
@@ -357,11 +413,17 @@ async function ensureRecent(){
     ME.recentAuthUntil=j.recentAuthUntil; return true;
   }catch(e){toast(e.message);return false}
 }
-function confirmAction(title,text,extra,run){const del=/^Delete/.test(title);$("#dtitle").textContent=title;$("#dtext").textContent=text;$("#dextra").replaceChildren(extra||"");$("#dreason").value="";$("#dconfirm").value="";$("#dconfirmwrap").hidden=!del;$("#dconfirm").hidden=!del;const d=$("#dlg");d.showModal();d.onclose=async()=>{if(d.returnValue!=="ok")return;if(del&&$("#dconfirm").value!=="DELETE"){toast("Type DELETE to confirm.");return}if(!(await ensureRecent()))return;try{await run($("#dreason").value);toast("Done. Recorded in the audit log.");show(location.hash.slice(1)||"dash")}catch(e){toast(e.message)}}}
+function confirmAction(title,text,extra,run){const del=/^Delete/.test(title);$("#dok").classList.toggle("solid-danger",del);$("#dtitle").textContent=title;$("#dtext").textContent=text;$("#dextra").replaceChildren(extra||"");$("#dreason").value="";$("#dconfirm").value="";$("#dconfirmwrap").hidden=!del;$("#dconfirm").hidden=!del;const d=$("#dlg");d.showModal();d.onclose=async()=>{if(d.returnValue!=="ok")return;if(del&&$("#dconfirm").value!=="DELETE"){toast("Type DELETE to confirm.");return}if(!(await ensureRecent()))return;try{await run($("#dreason").value);toast("Done. Recorded in the audit log.");show(location.hash.slice(1)||"dash")}catch(e){toast(e.message)}}}
 function empty(text){return h("p",{class:"empty"},text)}
 function stop(fn){return (e)=>{e.stopPropagation();fn()}}
 function go(title,text,path,body){return stop(()=>confirmAction(title,text,null,(r)=>api(path,{method:"POST",body:JSON.stringify(Object.assign({reason:r},body||{}))})))}
-function btn(label,cls,fn){return h("button",{type:"button",class:"btn "+(cls||"ghost"),style:"width:auto",on:{click:fn}},label)}
+function btn(label,cls,fn){return h("button",{type:"button",class:"btn "+(cls||"ghost"),on:{click:fn}},label)}
+function initials(email){const p=String(email||"?").split("@")[0];const bits=p.split(/[.\s_-]/).filter(Boolean);return (((bits[0]||p)[0]||"?")+((bits[1]||"")[0]||"")).toUpperCase()}
+function chip(text,kind){return h("span",{class:"chip "+(kind||"")},text)}
+function meter(pct){return h("div",{class:"meter"},h("i",{style:"width:"+Math.max(0,Math.min(100,pct))+"%"}))}
+function kebab(nodes){const pop=h("div",{class:"pop",role:"menu",hidden:true},...nodes);const b=h("button",{type:"button",class:"kebab","aria-label":"Row actions"},"⋯");b.addEventListener("click",(e)=>{e.stopPropagation();document.querySelectorAll(".pop").forEach(p=>{if(p!==pop)p.hidden=true});pop.hidden=!pop.hidden});return h("div",{class:"kebabwrap"},b,pop)}
+function relTime(iso){const t=new Date(iso).getTime();if(!t)return "";const s=Math.max(0,Math.round((Date.now()-t)/1000));if(s<60)return "just now";if(s<3600)return Math.round(s/60)+" min ago";if(s<86400)return Math.round(s/3600)+" h ago";return Math.round(s/86400)+" d ago"}
+function humanAction(a){const map={login:"Signed in",feedback_add:"Added feedback",feedback_update:"Updated feedback",feedback_delete:"Deleted feedback",owner_setup:"Finished setup",team_create:"Invited a teammate",team_invite:"Resent an invite",team_role:"Changed a role",team_enable:"Changed access",key_add:"Added a key",key_primary:"Set a primary key",key_retire:"Revoked a key",key_rotate:"Rotated a key",revoke:"Revoked a device",revoke_all:"Revoked tokens",reset_usage:"Reset usage",set_plan:"Changed a plan",suspend:"Changed suspension",kill_switch:"Changed the kill switch",settings:"Saved settings"};return map[a]||String(a||"").replaceAll("_"," ")}
 function save(path,body,done){return stop(async()=>{try{await api(path,{method:"POST",body:JSON.stringify(Object.assign({reason:"updated in Office"},body))});toast("Saved");if(done)done();else show(location.hash.slice(1)||"dash")}catch(e){toast(e.message)}})}
 async function health(){
   const d=await api("/ops/health");
@@ -380,11 +442,11 @@ async function devices(){
   function draw(list){
     const rows=list.map(x=>h("tr",{class:"click",on:{click:()=>{drawer.hidden=false;drawer.replaceChildren(h("b",{},x.id),h("p",{class:"mute"},(x.version||"No version")+" · "+(x.engine||"engine unknown")+" · "+(x.lastSeenAt||"never seen")))}}},
       h("td",{},x.id),h("td",{},x.version||"—"),h("td",{},x.lastSeenAt?new Date(x.lastSeenAt).toLocaleString():"—"),h("td",{},x.engine||"—"),h("td",{},x.blocked?"blocked":x.status),
-      h("td",{},h("div",{class:"row"},
+      h("td",{},kebab([
         btn(x.blocked?"Unblock":"Block",x.blocked?"ghost":"bad",go(x.blocked?"Unblock device":"Block device","This device's managed access changes now.","/ops/devices/"+x.id+"/block",{blocked:!x.blocked})),
         btn("Sign out","bad",go("Sign out device","Its access tokens stop now.","/installs/"+x.id+"/revoke",{})),
         btn("Renew key","ghost",go("Renew access key","The old key stops and the device reconnects.","/installs/"+x.id+"/reissue",{}))
-      ))
+      ]))
     ));
     box.replaceChildren(rows.length?h("table",{},h("tr",{},h("th",{},"Install"),h("th",{},"Version"),h("th",{},"Last seen"),h("th",{},"Engine"),h("th",{},"State"),h("th",{},"Actions")),...rows):empty("No devices match."));
   }
@@ -424,12 +486,12 @@ async function keys(){
   const cap=h("input",{id:"kcap",type:"number",placeholder:"Daily minute cap",value:"0"});
   const rows=(d.keys||[]).map(k=>h("tr",{},
     h("td",{},k.poolId),h("td",{},h("code",{},k.fingerprint)),h("td",{},k.status),h("td",{},k.dailyMinuteCap?k.minutesToday+" / "+k.dailyMinuteCap:"no cap"),
-    h("td",{},h("div",{class:"row"},
+    h("td",{},kebab([
       btn("Primary","ghost",go("Make primary","Other live keys in this pool become backups.","/ops/keys",{op:"primary",id:k.id})),
       btn(k.status==="backup"?"Enable":"Disable","ghost",go(k.status==="backup"?"Enable key":"Disable key","Disabled keys stay stored but are not used.","/ops/keys",{op:k.status==="backup"?"enable":"disable",id:k.id})),
       btn("Rotate","ghost",stop(async()=>{const next=await askSecret("Rotate key","Paste the new key. It will not be shown again.","password");if(!next)return;confirmAction("Rotate key","The previous secret is replaced.",null,(r)=>api("/ops/keys",{method:"POST",body:JSON.stringify({op:"rotate",id:k.id,secret:next,reason:r})}))})),
       btn("Revoke","bad",go("Revoke key","This key is retired and the secret is dropped.","/ops/keys",{op:"retire",id:k.id}))
-    ))
+    ]))
   ));
   $("#app").replaceChildren(h("h2",{style:"margin-top:0"},"Provider keys"),
     h("div",{class:"card"},h("div",{class:"grid"},h("div",{},h("label",{class:"k"},"Pool"),pool),h("div",{},h("label",{class:"k"},"Key"),secret),h("div",{},h("label",{class:"k"},"Daily cap"),cap)),btn("Add key","",(e)=>{e.stopPropagation();api("/ops/keys",{method:"POST",body:JSON.stringify({poolId:pool.value,secret:secret.value,dailyMinuteCap:Number(cap.value)||0,reason:"add pool key"})}).then(()=>{toast("Key added");secret.value="";keys()}).catch(er=>toast(er.message))})),
@@ -442,11 +504,11 @@ async function errors(){
   const box=h("div",{class:"card"});
   function draw(list){
     const rows=list.map(r=>h("tr",{},h("td",{},r.kind),h("td",{},r.version||"—"),h("td",{},r.line),h("td",{},r.fixedIn||(r.note||"—")),
-      h("td",{},h("div",{class:"row"},
+      h("td",{},kebab([
         btn(r.fixedIn?"Reopen":"Resolved","ghost",go(r.fixedIn?"Reopen report":"Mark resolved","Set the release this was fixed in, or clear it.", "/ops/errors/"+r.id+"/fixed", r.fixedIn?{version:""}:{version:r.version||"next"})),
         btn("Note","ghost",stop(async()=>{const note=await askSecret("Note","Assignee or note for this report.","text");if(!note)return;await api("/ops/errors/"+r.id+"/fixed",{method:"POST",body:JSON.stringify({op:"note",note,reason:"updated in Office"})});toast("Saved");errors()})),
         btn("Delete","bad",go("Delete report","Remove this report from Office.","/ops/errors/"+r.id+"/fixed",{op:"delete"}))
-      ))));
+      ]))));
     box.replaceChildren(rows.length?h("table",{},h("tr",{},h("th",{},"Kind"),h("th",{},"Version"),h("th",{},"Line"),h("th",{},"Status"),h("th",{},"Actions")),...rows):empty("No reports match."));
   }
   q.oninput=()=>{const n=q.value.toLowerCase();draw((d.reports||[]).filter(r=>(r.kind+" "+r.line).toLowerCase().includes(n)))};
@@ -461,12 +523,12 @@ async function feedback(){
   const kind=h("select",{id:"fbk"},...["contact","accuracy","bug","billing","other"].map(v=>h("option",{value:v},v)));
   function draw(list){
     const rows=list.map(r=>h("tr",{},h("td",{},r.source),h("td",{},r.issueType),h("td",{},r.text),h("td",{},r.resolved?"resolved":"open"),
-      h("td",{},h("div",{class:"row"},
+      h("td",{},kebab([
         btn(r.resolved?"Reopen":"Resolve","ghost",save("/ops/feedback",{id:r.id,resolved:!r.resolved})),
         btn("Assign","ghost",stop(async()=>{const assignee=await askSecret("Assign","Who should handle this?","text");if(!assignee)return;await api("/ops/feedback",{method:"POST",body:JSON.stringify({id:r.id,assignee,reason:"updated in Office"})});toast("Saved");feedback()})),
         btn("Reply","ghost",stop(async()=>{const note=await askSecret("Reply note","Saved on the item. It is not emailed.","text");if(!note)return;await api("/ops/feedback",{method:"POST",body:JSON.stringify({id:r.id,note,reason:"updated in Office"})});toast("Saved");feedback()})),
         btn("Delete","bad",go("Delete feedback","Remove this item.","/ops/feedback",{id:r.id,op:"delete"}))
-      ))));
+      ]))));
     box.replaceChildren(rows.length?h("table",{},h("tr",{},h("th",{},"From"),h("th",{},"Type"),h("th",{},"Note"),h("th",{},"State"),h("th",{},"Actions")),...rows):empty("No feedback matches."));
   }
   q.oninput=()=>{const n=q.value.toLowerCase();draw((d.items||[]).filter(r=>(r.text+" "+r.issueType).toLowerCase().includes(n)))};
@@ -502,31 +564,86 @@ async function dash(){
   const health=await api("/ops/health").catch(()=>null);
   const log=await api("/audit").catch(()=>({entries:[]}));
   const alert=d.healthAlert?h("div",{class:"card"},"Online speech failures are high. Open Health."):null;
-  const pools=d.pools&&d.pools.length?h("table",{},h("tr",{},h("th",{},"Pool"),h("th",{},"Provider"),h("th",{},"Key fingerprint"),h("th",{},"Devices"),h("th",{},"State")),d.pools.map(p=>h("tr",{},h("td",{},p.label),h("td",{},p.provider),h("td",{},h("code",{},p.fingerprint)),h("td",{},p.installs),h("td",{},h("span",{class:"tag "+(p.full?"revoked":"active")},p.full?"full":p.status))))):h("p",{class:"empty"},"No provider pools yet.");
+  const when=new Date();
+  const hello=when.getHours()<12?"Good morning":when.getHours()<18?"Good afternoon":"Good evening";
+  const feed=(log.entries||[]).slice(0,8);
+  const maxPool=Math.max(1,...(d.pools||[]).map(p=>Number(p.installs)||0));
   app.replaceChildren(alert||"",
-    h("div",{class:"row"},health&&health.alert?h("span",{class:"tag revoked"},"Speech failures high"):h("span",{class:"tag active"},health&&health.samples?"Speech steady":"No speech samples")),
-    h("div",{class:"grid"},stat("Users",d.users,h("div",{},h("div",{class:"mute"},d.freeUsers+" free · "+d.paidUsers+" paid"),spark())),stat("Active devices",d.activeInstalls,spark()),stat("Minutes today",d.todayMinutes,h("div",{},h("div",{class:"bar"},h("i",{style:"width:"+Math.max(0,Math.min(100,d.budgetUsedPct))+"%"})),h("div",{class:"mute"},d.budgetUsedPct+"% of "+d.dailyBudgetMinutes+" min"))),stat("This month",d.monthMinutes+" min",spark()),stat("Errors today",d.errorsToday,spark())),
-    h("h2",{},"Recent activity"),h("div",{class:"card"},(log.entries&&log.entries.length)?auditTable(log.entries.slice(0,8)):empty("No audit entries yet.")),
-    h("h2",{},"Safety controls"),
-    h("div",{class:"card row",style:"justify-content:space-between"},h("div",{},h("b",{},"Kill switch "),h("span",{class:"tag "+(d.killSwitch?"revoked":"active")},d.killSwitch?"On — managed dictation paused":"Off")),
-      h("button",{class:"btn "+(d.killSwitch?"":"bad"),disabled:!allowed("kill_switch")||undefined,style:"width:auto",on:{click:()=>confirmAction(d.killSwitch?"Turn kill switch off":"Turn kill switch on","This affects every user immediately.",null,(r)=>api("/kill-switch",{method:"POST",body:JSON.stringify({on:!d.killSwitch,reason:r})}))}},d.killSwitch?"Resume managed dictation":"Pause managed dictation")),
-    h("h2",{},"Provider pools"),h("div",{class:"card"},pools)
+    h("div",{class:"row",style:"justify-content:space-between;align-items:flex-end"},
+      h("div",{},h("div",{class:"hello"},hello),h("div",{class:"sub"},when.toLocaleDateString(undefined,{weekday:"long",month:"long",day:"numeric"}))),
+      h("div",{class:"row"},btn("Users","sec",()=>show("users")),btn("Keys","sec",()=>show("keys")),btn("Settings","ghost",()=>show("settings")))
+    ),
+    h("div",{class:"row",style:"margin:12px 0"},health&&health.alert?chip("Speech failures high","bad"):chip(health&&health.samples?"Speech steady":"No speech samples",health&&health.samples?"active":"")),
+    h("div",{class:"grid"},stat("Users",d.users,h("div",{class:"sub"},d.freeUsers+" free · "+d.paidUsers+" paid")),stat("Active devices",d.activeInstalls),stat("Minutes today",d.todayMinutes,h("div",{},meter(d.budgetUsedPct),h("div",{class:"sub"},d.budgetUsedPct+"% of "+d.dailyBudgetMinutes+" min"))),stat("This month",d.monthMinutes+" min"),stat("Errors today",d.errorsToday)),
+    h("div",{class:"section"},"Recent activity"),h("div",{class:"card"},feed.length?h("div",{class:"tl"},feed.map(a=>h("div",{class:"tl-item"},h("i",{class:"dot"}),h("div",{},h("b",{},humanAction(a.action)),h("div",{class:"sub",title:new Date(a.at).toLocaleString()},relTime(a.at)+" · "+a.adminEmail))))):empty("No audit entries yet.")),
+    h("div",{class:"section"},"Safety controls"),
+    h("div",{class:"card row",style:"justify-content:space-between"},
+      h("div",{},h("b",{},"Kill switch"),h("div",{class:"sub"},d.killSwitch?"Managed dictation is paused for everyone.":"Managed dictation is available.")),
+      h("button",{type:"button",class:"switch"+(d.killSwitch?" on":""),"aria-pressed":d.killSwitch?"true":"false","aria-label":"Kill switch",disabled:!allowed("kill_switch")||undefined,on:{click:()=>confirmAction(d.killSwitch?"Turn kill switch off":"Turn kill switch on","This affects every user immediately.",null,(r)=>api("/kill-switch",{method:"POST",body:JSON.stringify({on:!d.killSwitch,reason:r})}))}},h("i"))
+    ),
+    h("div",{class:"section"},"Provider pools"),
+    h("div",{class:"poolgrid"},(d.pools||[]).length?(d.pools||[]).map(p=>h("div",{class:"card"},h("div",{class:"row"},h("i",{class:"dot"+(p.full?" bad":"")}),h("b",{},p.label),h("span",{class:"sub"},p.status)),h("div",{class:"sub",style:"margin:8px 0"},h("code",{},p.fingerprint)),meter(((Number(p.installs)||0)/maxPool)*100),h("div",{class:"sub"},(p.installs||0)+" devices"))):empty("No provider pools yet."))
   );
 }
 async function users(){
-  const app=$("#app"); const q=h("input",{placeholder:"Search by email",style:"max-width:340px","aria-label":"Search users"}); const box=h("div",{class:"card"});
-  async function load(){const j=await api("/users?q="+encodeURIComponent(q.value));
-    box.replaceChildren(j.users&&j.users.length?h("table",{},h("tr",{},h("th",{},"Email"),h("th",{},"Plan"),h("th",{},"Status"),h("th",{},"Devices"),h("th",{},"Today"),h("th",{},"Actions")),j.users.map(u=>h("tr",{},
-      h("td",{},h("button",{type:"button",class:"btn ghost",style:"width:auto",on:{click:()=>show("user/"+u.userId)}},u.email)),
-      h("td",{},h("span",{class:"tag "+u.plan},u.plan)),h("td",{},h("span",{class:"tag "+u.status},u.status)),h("td",{},u.activeInstalls+"/"+u.installs),h("td",{},u.dailyMinutes+" min"),
-      h("td",{},h("div",{class:"row"},
-        btn(u.status==="suspended"?"Reactivate":"Suspend","ghost",go(u.status==="suspended"?"Reactivate user":"Suspend user","Managed dictation stops while they are suspended.","/users/"+u.userId+"/suspend",{suspended:u.status!=="suspended"})),
-        btn("Revoke tokens","bad",go("Revoke tokens","Every device for this user must sign in again.","/users/"+u.userId+"/revoke-all",{})),
-        btn("Reset usage","ghost",go("Reset usage","Clears this user's recorded minutes.","/users/"+u.userId+"/reset-usage",{})),
-        btn("Delete","bad",go("Delete user","Their profile is marked deleted and their devices are revoked.","/ops/users/"+u.userId+"/delete",{}))
-      ))))):h("p",{class:"empty"},q.value?"No users match that search.":"No users yet."));
+  const app=$("#app");
+  const q=h("input",{placeholder:"Search by email","aria-label":"Search users",style:"max-width:280px"});
+  const box=h("div",{class:"card",style:"padding:0"});
+  const foot=h("div",{class:"pager"});
+  const filters=h("div",{class:"row"});
+  const count=h("span",{class:"sub"});
+  const bulk=h("div",{class:"row"});
+  let all=[], page=0, plan="all", status="all";
+  const picked=new Set();
+  const PAGE=8;
+  function chipFilter(label, group, value){
+    const b=h("button",{type:"button",class:"chipbtn"+( (group==="plan"?plan:status)===value?" on":"" )},label);
+    b.addEventListener("click",()=>{ if(group==="plan")plan=value; else status=value; page=0; draw(); });
+    return b;
   }
-  q.oninput=load; app.replaceChildren(h("h2",{style:"margin-top:0"},"Users"),h("div",{class:"row",style:"margin-bottom:12px"},q),box); load();
+  function draw(){
+    filters.replaceChildren(chipFilter("All plans","plan","all"),chipFilter("Free","plan","free"),chipFilter("Paid","plan","paid"),chipFilter("All statuses","status","all"),chipFilter("Active","status","active"),chipFilter("Suspended","status","suspended"));
+    const nq=q.value.trim().toLowerCase();
+    let list=all.filter(u=>(!nq||String(u.email).toLowerCase().includes(nq)||String(u.userId).toLowerCase().includes(nq))&&(plan==="all"||u.plan===plan)&&(status==="all"||u.status===status));
+    const maxMin=Math.max(1,...list.map(u=>Number(u.dailyMinutes)||0));
+    const pages=Math.max(1,Math.ceil(list.length/PAGE));
+    if(page>pages-1)page=pages-1;
+    const slice=list.slice(page*PAGE,page*PAGE+PAGE);
+    count.textContent=list.length+" users";
+    const rows=slice.map(u=>{
+      const id=u.userId;
+      const menu=kebab([
+        btn("Open","ghost",()=>show("user/"+id)),
+        btn(u.status==="suspended"?"Reactivate":"Suspend","ghost",go(u.status==="suspended"?"Reactivate user":"Suspend user","Managed dictation stops while they are suspended.","/users/"+id+"/suspend",{suspended:u.status!=="suspended"})),
+        btn("Revoke tokens","bad",go("Revoke tokens","Every device for this user must sign in again.","/users/"+id+"/revoke-all",{})),
+        btn("Reset usage","ghost",go("Reset usage","Clears this user's recorded minutes.","/users/"+id+"/reset-usage",{})),
+        btn("Delete","bad",go("Delete user","Their profile is marked deleted and their devices are revoked.","/ops/users/"+id+"/delete",{}))
+      ]);
+      const check=h("input",{type:"checkbox","aria-label":"Select "+u.email,style:"width:16px;height:16px"});
+      check.checked=picked.has(id);
+      check.addEventListener("click",(e)=>e.stopPropagation());
+      check.addEventListener("change",()=>{ if(check.checked)picked.add(id); else picked.delete(id); bulkBar(); });
+      return h("tr",{class:"click",on:{click:()=>show("user/"+id)}},
+        h("td",{},check),
+        h("td",{},h("div",{class:"who"},h("span",{class:"ava"},initials(u.email)),h("div",{},h("div",{class:"em"},u.email),h("div",{class:"sub"},String(id).slice(0,8)+" · "+(u.createdAt?new Date(u.createdAt).toLocaleDateString():""))))),
+        h("td",{},chip(u.plan,u.plan)),
+        h("td",{},chip(u.status,u.status==="active"?"active":"suspended")),
+        h("td",{},h("span",{},"▣ "+u.activeInstalls+"/"+u.installs)),
+        h("td",{},h("div",{},meter(((Number(u.dailyMinutes)||0)/maxMin)*100),h("div",{class:"sub"},(u.dailyMinutes||0)+" min"))),
+        h("td",{},h("div",{class:"row"},h("button",{type:"button",class:"kebab quick","aria-label":"Open",on:{click:(e)=>{e.stopPropagation();show("user/"+id)}}},"↗"),menu))
+      );
+    });
+    box.replaceChildren(rows.length?h("table",{},h("tr",{},h("th",{}),h("th",{},"User"),h("th",{},"Plan"),h("th",{},"Status"),h("th",{},"Devices"),h("th",{},"Today"),h("th",{})),...rows):empty(nq?"No users match.":"No users yet."));
+    foot.replaceChildren(h("span",{},"Page "+(page+1)+" of "+pages),h("div",{class:"row"},btn("Prev","ghost",()=>{if(page>0){page--;draw()}}),btn("Next","ghost",()=>{if(page<pages-1){page++;draw()}})));
+    bulkBar();
+  }
+  function bulkBar(){
+    bulk.replaceChildren(picked.size?btn("Suspend "+picked.size,"sec",()=>confirmAction("Suspend selected","Managed dictation stops for the selected users.",null,async(r)=>{for(const id of picked)await api("/users/"+id+"/suspend",{method:"POST",body:JSON.stringify({suspended:true,reason:r})})})):"");
+  }
+  async function load(){const j=await api("/users?q="); all=j.users||[]; draw();}
+  q.oninput=()=>{page=0;draw()};
+  app.replaceChildren(h("h2",{style:"margin-top:0"},"Users"),h("div",{class:"toolbar"},q,filters,count,bulk),box,foot);
+  load();
 }
 async function userView(id){
   const {user:u}=await api("/users/"+id);
