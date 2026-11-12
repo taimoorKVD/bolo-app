@@ -4,6 +4,7 @@ use anyhow::Context;
 use serde::Deserialize;
 use std::sync::OnceLock;
 use std::time::Duration;
+use zeroize::Zeroize;
 
 pub const WHISPER_TURBO: &str = "whisper-large-v3-turbo";
 pub const WHISPER_LARGE: &str = "whisper-large-v3";
@@ -152,6 +153,58 @@ pub fn http_client() -> &'static reqwest::Client {
             .user_agent(concat!("Bolo/", env!("CARGO_PKG_VERSION")))
             .build()
             .expect("http client")
+    })
+}
+
+fn preview_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            // A live caption that waits on the 45s transcription client would
+            // freeze the words for the rest of the hold.
+            .timeout(Duration::from_millis(2_800))
+            .connect_timeout(Duration::from_secs(2))
+            .pool_idle_timeout(Duration::from_secs(30))
+            .http1_only()
+            .user_agent(concat!("Bolo/", env!("CARGO_PKG_VERSION")))
+            .build()
+            .expect("preview http client")
+    })
+}
+
+struct PreviewKey(String);
+
+impl Drop for PreviewKey {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
+}
+
+/// One short Whisper pass over audio captured so far. The final paste still
+/// uses the normal pipeline. Failures return a redacted provider note.
+pub fn preview_transcript(bytes: Vec<u8>, language: &str) -> Result<String, String> {
+    let key = crate::credentials::SecretKey::load().map_err(|err| crate::builtin::redact_secrets(&err.to_string()))?;
+    let using_builtin = key.is_builtin();
+    let api_key = PreviewKey(key.expose().to_string());
+    drop(key);
+    let language = language.to_string();
+    tauri::async_runtime::block_on(async move {
+        let result = request_audio_once(
+            preview_client(),
+            &api_key.0,
+            bytes,
+            TRANSCRIPTIONS,
+            WHISPER_TURBO,
+            &language,
+            None,
+            0.0,
+            using_builtin,
+        )
+        .await
+        .map(|attempt| attempt.text.trim().to_string())
+        .map_err(|failure| crate::builtin::redact_secrets(&failure.log_detail));
+        drop(api_key);
+        result
     })
 }
 

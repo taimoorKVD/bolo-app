@@ -20,7 +20,7 @@ use crate::transcribe;
 use crate::warm::{self, LiveTake};
 use serde::Serialize;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, PhysicalSize, WebviewWindow};
 
@@ -44,6 +44,9 @@ pub struct DictationEvent {
     /// 80–300, 300–1100, 1100–3200, 3200–8000 Hz, each 0..1.
     #[serde(default)]
     pub bands: [f32; 4],
+    /// Words heard so far during this hold. Empty until the first preview returns.
+    #[serde(default)]
+    pub partial: Option<String>,
 }
 
 enum Phase {
@@ -288,6 +291,7 @@ fn instant_listen_event(level: f32, bands: [f32; 4]) -> DictationEvent {
         level,
         engine: None,
         bands,
+        partial: None,
     }
 }
 
@@ -344,6 +348,7 @@ fn on_press(app: &AppHandle) {
                     level: 0.0,
                     engine: None,
                     bands: [0.0; 4],
+            partial: None,
                 },
             );
         }
@@ -451,6 +456,7 @@ pub fn begin(app: &AppHandle) {
         engine.overlay_visible_ms = 0;
         (engine.generation, keydown)
     };
+    clear_live();
     *lock(&state.last_error) = None;
     let settings = lock(&state.settings).clone();
     if settings.debug_capture {
@@ -507,6 +513,7 @@ pub fn begin(app: &AppHandle) {
 
 fn on_armed(app: &AppHandle, take: LiveTake, generation: u64) {
     let state = app.state::<AppState>();
+    let preview = take.preview_handle();
     let (level, bands, stop_flag) = take.meter();
     let started = take.started;
     let note = take.device_note.clone();
@@ -537,9 +544,11 @@ fn on_armed(app: &AppHandle, take: LiveTake, generation: u64) {
     }
     match action {
         AfterArm::Listen => {
+            spawn_live_words(app.clone(), preview);
             spawn_meter(app.clone(), level, bands.clone(), stop_flag, started, None, generation);
         }
         AfterArm::WaitSecondTap => {
+            spawn_live_words(app.clone(), preview);
             spawn_meter(app.clone(), level, bands.clone(), stop_flag, started, None, generation);
             {
                 let mut engine = lock(&state.engine);
@@ -547,7 +556,10 @@ fn on_armed(app: &AppHandle, take: LiveTake, generation: u64) {
             }
             arm_double_tap(app.clone(), generation);
         }
-        AfterArm::EndTake => end(app),
+        AfterArm::EndTake => {
+            drop(preview);
+            end(app);
+        }
     }
 }
 
@@ -683,6 +695,7 @@ pub fn end(app: &AppHandle) {
             level: 0.0,
             engine: None,
             bands: [0.0; 4],
+            partial: None,
         },
     );
     let app = app.clone();
@@ -818,6 +831,7 @@ pub fn paste_last(app: &AppHandle) {
                         level: 0.0,
                         engine: None,
                         bands: [0.0; 4],
+            partial: None,
                     },
                 );
                 let generation = lock(&app.state::<AppState>().engine).generation;
@@ -833,6 +847,7 @@ pub fn paste_last(app: &AppHandle) {
                         level: 0.0,
                         engine: None,
                         bands: [0.0; 4],
+            partial: None,
                     },
                 );
                 schedule_hide(app.clone(), lock(&app.state::<AppState>().engine).generation, hide_delay(&app));
@@ -942,6 +957,7 @@ fn schedule_online_retry(app: AppHandle) {
                             level: 0.0,
                             engine: None,
                             bands: [0.0; 4],
+            partial: None,
                         },
                     );
                     if store::listener_is_animated(&lock(&app.state::<AppState>().settings).listener) {
@@ -956,6 +972,134 @@ fn schedule_online_retry(app: AppHandle) {
             break;
         }
         BUSY.store(false, Ordering::Release);
+    });
+}
+
+fn live_slot() -> &'static Mutex<String> {
+    static SLOT: OnceLock<Mutex<String>> = OnceLock::new();
+    SLOT.get_or_init(|| Mutex::new(String::new()))
+}
+
+fn clear_live() {
+    if let Ok(mut slot) = live_slot().lock() {
+        slot.clear();
+    }
+}
+
+fn set_live(text: &str) {
+    let trimmed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if let Ok(mut slot) = live_slot().lock() {
+        *slot = trimmed;
+    }
+}
+
+fn current_live() -> Option<String> {
+    let slot = live_slot().lock().ok()?;
+    let text = slot.trim();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text.to_string())
+    }
+}
+
+fn attach_live(event: &mut DictationEvent) {
+    if matches!(event.phase.as_str(), "arming" | "recording" | "transcribing" | "inserting") {
+        event.partial = current_live();
+    }
+}
+
+/// Whether the caption thread should spend another Whisper call.
+/// One request at a time, and only after more speech has arrived.
+pub(crate) fn preview_due(
+    frames: usize,
+    last_frames: usize,
+    sample_rate: u32,
+    since_last: Duration,
+    attempted: bool,
+) -> bool {
+    let rate = usize::try_from(sample_rate.max(1)).unwrap_or(48_000);
+    if frames < rate * 45 / 100 {
+        return false;
+    }
+    if attempted && since_last < Duration::from_millis(1_000) {
+        return false;
+    }
+    if last_frames > 0 && frames.saturating_sub(last_frames) < rate * 50 / 100 {
+        return false;
+    }
+    true
+}
+
+/// Keep the newest audio so a long hold does not re-upload the whole take.
+pub(crate) fn preview_tail(audio: FinishedAudio, max_secs: f32) -> FinishedAudio {
+    let channels = usize::from(audio.channels.max(1));
+    let rate = audio.sample_rate.max(1);
+    let max_frames = (rate as f32 * max_secs).floor() as usize;
+    let frames = audio.interleaved.len() / channels.max(1);
+    if max_frames == 0 || frames <= max_frames {
+        return audio;
+    }
+    let start = (frames - max_frames) * channels;
+    FinishedAudio {
+        interleaved: audio.interleaved[start..].to_vec(),
+        channels: audio.channels,
+        sample_rate: audio.sample_rate,
+        elapsed_ms: audio.elapsed_ms,
+        noise_rms: audio.noise_rms,
+    }
+}
+
+fn spawn_live_words(app: AppHandle, preview: warm::PreviewMic) {
+    let _ = std::thread::Builder::new().name("bolo-live".into()).spawn(move || {
+        let dir = app.state::<AppState>().config_dir.clone();
+        let mut last_frames = 0usize;
+        let mut last_request = Instant::now() - Duration::from_secs(5);
+        let mut attempted = false;
+        let mut last_error = String::new();
+        loop {
+            if preview.stopped() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(180));
+            if preview.stopped() {
+                break;
+            }
+            let Some(audio) = preview.snapshot() else {
+                continue;
+            };
+            let channels = usize::from(audio.channels.max(1));
+            let frames = audio.interleaved.len() / channels;
+            if !preview_due(frames, last_frames, audio.sample_rate, last_request.elapsed(), attempted) {
+                continue;
+            }
+            let audio = preview_tail(audio, 16.0);
+            let encoded = match crate::audio::prepare_speech(&audio) {
+                Ok(encoded) if encoded.speech_secs >= 0.35 => encoded,
+                _ => continue,
+            };
+            attempted = true;
+            last_request = Instant::now();
+            let language = app
+                .state::<AppState>()
+                .settings
+                .lock()
+                .map(|settings| settings.language.clone())
+                .unwrap_or_else(|_| "auto".into());
+            match transcribe::preview_transcript(encoded.bytes, &language) {
+                Ok(text) if !text.is_empty() => {
+                    set_live(&text);
+                    last_frames = frames;
+                }
+                Ok(_) => {}
+                Err(err) => {
+                    if err != last_error {
+                        last_error = err.clone();
+                        log_line(&dir, "info", &format!("live preview: {err}"));
+                    }
+                }
+            }
+        }
     });
 }
 
@@ -979,17 +1123,17 @@ fn spawn_meter(
                 .map(|engine| engine.hands_free)
                 .unwrap_or(false);
             let rms = f32::from_bits(level.load(Ordering::Relaxed));
-            let _ = app.emit(
-                "dictation-state",
-                DictationEvent {
-                    phase: "recording".into(),
-                    message: recording_caption(hands_free, &note),
-                    elapsed_ms: elapsed.as_millis() as u64,
-                    level: (rms * 4.5).clamp(0.0, 1.0),
-                    engine: None,
-                    bands: crate::bands::read_bands(&bands),
-                },
-            );
+            let mut event = DictationEvent {
+                phase: "recording".into(),
+                message: recording_caption(hands_free, &note),
+                elapsed_ms: elapsed.as_millis() as u64,
+                level: (rms * 4.5).clamp(0.0, 1.0),
+                engine: None,
+                bands: crate::bands::read_bands(&bands),
+                partial: None,
+            };
+            attach_live(&mut event);
+            let _ = app.emit("dictation-state", &event);
             std::thread::sleep(Duration::from_millis(80));
         }
         pump_chunks(&app);
@@ -1328,6 +1472,7 @@ async fn deliver(app: &AppHandle, mut outcome: Outcome, generation: u64) {
             level: 0.0,
             engine: outcome.engine.clone(),
             bands: [0.0; 4],
+            partial: None,
         },
     );
     if let Some(why) = outcome.unsure {
@@ -1362,6 +1507,7 @@ fn schedule_fix_offer(app: AppHandle, generation: u64) {
                 level: 0.0,
                 engine: None,
                 bands: [0.0; 4],
+            partial: None,
             },
         );
         schedule_hide(app, generation, FIX_OFFER_MS);
@@ -1397,6 +1543,7 @@ pub(crate) fn show_phase(app: &AppHandle, phase: &str, message: Option<String>) 
             level: 0.0,
             engine: None,
             bands: [0.0; 4],
+            partial: None,
         },
     );
 }
@@ -1630,6 +1777,7 @@ fn hint(app: &AppHandle, message: &str) {
             level: 0.0,
             engine: None,
             bands: [0.0; 4],
+            partial: None,
         },
     );
 }
@@ -1646,6 +1794,7 @@ fn show_problem(app: &AppHandle, message: &str, hide_ms: u64) {
             level: 0.0,
             engine: None,
             bands: [0.0; 4],
+            partial: None,
         },
     );
     schedule_hide(app.clone(), generation, hide_ms);
@@ -1680,6 +1829,7 @@ fn schedule_hide(app: AppHandle, generation: u64, delay_ms: u64) {
                     level: 0.0,
                     engine: None,
                     bands: [0.0; 4],
+            partial: None,
                 },
             );
         }
@@ -1699,8 +1849,10 @@ fn mark_idle(app: &AppHandle) {
 }
 
 fn publish(app: &AppHandle, event: &DictationEvent) {
+    let mut event = event.clone();
+    attach_live(&mut event);
     crate::listener::FIX_CARD_ESC.store(event.phase == "fix", std::sync::atomic::Ordering::SeqCst);
-    let _ = app.emit("dictation-state", event);
+    let _ = app.emit("dictation-state", &event);
     let Some(overlay) = app.get_webview_window("overlay") else {
         return;
     };
@@ -1864,5 +2016,39 @@ mod tests {
         assert_eq!(after_arm(true, 800), AfterArm::EndTake);
         assert_eq!(after_arm(true, 80), AfterArm::WaitSecondTap);
         assert!(crate::chunk::recording_cap().is_none());
+    }
+
+    #[test]
+    fn live_preview_waits_for_speech_and_does_not_restamp_the_same_audio() {
+        let rate = 48_000u32;
+        assert!(!preview_due(rate as usize / 5, 0, rate, Duration::from_secs(2), false));
+        assert!(preview_due(rate as usize, 0, rate, Duration::from_millis(0), false));
+        assert!(!preview_due(rate as usize, 0, rate, Duration::from_millis(200), true));
+        assert!(preview_due(rate as usize, 0, rate, Duration::from_millis(1_100), true));
+        let have = rate as usize * 2;
+        assert!(!preview_due(have + rate as usize / 4, have, rate, Duration::from_millis(1_100), true));
+        assert!(preview_due(have + rate as usize, have, rate, Duration::from_millis(1_100), true));
+    }
+
+    #[test]
+    fn live_preview_keeps_the_newest_audio() {
+        let audio = FinishedAudio {
+            interleaved: (0..48_000).map(|n| n as f32).collect(),
+            channels: 1,
+            sample_rate: 16_000,
+            elapsed_ms: 3_000,
+            noise_rms: 0.01,
+        };
+        let tail = preview_tail(audio, 1.0);
+        assert_eq!(tail.interleaved.len(), 16_000);
+        assert_eq!(tail.interleaved[0], 32_000.0);
+        let short = FinishedAudio {
+            interleaved: vec![1.0, 2.0],
+            channels: 1,
+            sample_rate: 16_000,
+            elapsed_ms: 1,
+            noise_rms: 0.0,
+        };
+        assert_eq!(preview_tail(short, 16.0).interleaved, vec![1.0, 2.0]);
     }
 }

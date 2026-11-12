@@ -169,11 +169,11 @@ pub async fn model_fix(
                 }
             }
         }
-        Err(CleanupFail::Missing) => SenseOutcome {
+        Err(CleanupFail::Missing { detail }) => SenseOutcome {
             text: text.to_string(),
             used_model: false,
             latency_ms,
-            why: format!("sense model missing {latency_ms}ms; kept transcript"),
+            why: format!("sense model missing {latency_ms}ms; {detail}"),
         },
         Err(CleanupFail::Other(err)) => SenseOutcome {
             text: text.to_string(),

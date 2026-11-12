@@ -328,6 +328,17 @@ body.view-overlay #app {
   font-size: 12px;
   line-height: 1.35;
 }
+.listener-live {
+  margin: 0;
+  max-width: 280px;
+  text-align: center;
+  color: #f3eee6;
+  background: linear-gradient(180deg, rgba(44, 41, 38, 0.88), rgba(30, 28, 26, 0.88));
+  border-radius: 12px;
+  padding: 6px 10px;
+  font: 13px/1.35 "Segoe UI", system-ui, sans-serif;
+}
+.listener-live[hidden] { display: none; }
 .listener[data-pose="error"] .clip-listen { animation: worry 0.45s ease; }
 /* Re-made characters: real transparency, no box, sized to the 640x560 clip. */
 .listener.alpha .clip {

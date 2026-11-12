@@ -7,6 +7,7 @@ import {
   dprFor,
   nextQuality,
   pillModel,
+  liveCaption,
   prefersReducedMotion,
   shapeVoice,
   wantsFrames,
@@ -75,6 +76,7 @@ export function mountBlobOverlay(root: HTMLElement, listener: ListenerId = "blob
   let state: CharacterState = "hidden";
   let phase: DictationPhase = "idle";
   let message: string | null = null;
+  let partial: string | null = null;
   let level = 0;
   let bands: number[] | null = null;
   let quality: Quality = "full";
@@ -111,7 +113,7 @@ export function mountBlobOverlay(root: HTMLElement, listener: ListenerId = "blob
   void api.getSettings().then(applyPrefs).catch((error) => console.warn("overlay could not read settings", error));
 
   const paintPill = () => {
-    const model = pillModel(phase, message);
+    const model = pillModel(phase, message, partial);
     const show = state !== "hidden" && state !== "fix" && actor.pill.x > 0.04 && !actor.hidden;
     pill.hidden = !show;
     if (!show) return;
@@ -238,10 +240,12 @@ export function mountBlobOverlay(root: HTMLElement, listener: ListenerId = "blob
     const prev = state;
     phase = event.phase;
     message = event.message;
+    partial = event.partial ?? null;
     level = Number.isFinite(event.level) ? event.level : 0;
     bands = event.bands && event.bands.length >= 4 ? event.bands : null;
     stage.dataset.pose = next;
-    stage.setAttribute("aria-label", announce(event.phase, event.message));
+    const words = liveCaption(event.phase, event.message, event.partial);
+    stage.setAttribute("aria-label", words || announce(event.phase, event.message));
     if (next !== prev) {
       if (next === "listening") {
         tucked = false;
@@ -364,7 +368,14 @@ function previewEvent(demo: string | null): DictationEvent {
   }
   if (demo === "fix") return { phase: "fix", message: null, elapsedMs: 0, level: 0 };
   if (demo === "idle") return { phase: "idle", message: null, elapsedMs: 0, level: 0 };
-  return { phase: "recording", message: null, elapsedMs: 4200, level: 0.72, bands: [0.35, 0.82, 0.28, 0.08] };
+  return {
+    phase: "recording",
+    message: null,
+    elapsedMs: 4200,
+    level: 0.72,
+    bands: [0.35, 0.82, 0.28, 0.08],
+    partial: "ship the notes to Sam by Friday",
+  };
 }
 
 function runCycle(apply: (event: DictationEvent) => void, dead: () => boolean): () => void {

@@ -1,5 +1,12 @@
 //! Decide when Bolo is unsure about a take, so the overlay offers Fix last.
 //! The tray item and the History Fix button are always available.
+//!
+//! Cleanup falling back is not, by itself, a reason to offer Fix last. The
+//! paste in that case is still the speaker's words (local filler cleanup of
+//! the transcript). Fix last is for a take whose inserted text is the doubtful
+//! part: a failed chunk, the on-device fallback, low confidence, a collapsed
+//! repeat, a translation or mixed-language pass, a second pass, or a cleanup
+//! rewrite that changed a lot of the words.
 
 /// What one finished take looked like.
 #[derive(Default, Clone)]
@@ -13,6 +20,9 @@ pub struct Signals {
     /// Cleanup was supposed to run.
     pub cleanup_wanted: bool,
     /// `CleanOutcome.why`, or empty when cleanup never ran.
+    /// Kept on the signal so a log can name the fallback. It does not, by
+    /// itself, open Fix last: the pasted words are still the speaker's.
+    #[allow(dead_code)]
     pub cleanup_why: String,
     /// Text before cleanup.
     pub raw: String,
@@ -40,17 +50,10 @@ pub fn reason(s: &Signals) -> Option<&'static str> {
     if s.paths.iter().any(|p| p.contains("lowconf")) {
         return Some("low speech confidence");
     }
-    if s.cleanup_wanted && !cleanup_ok(&s.cleanup_why) {
-        return Some("cleanup fell back");
-    }
     if s.cleanup_wanted && heavy_change(&s.raw, &s.pasted) {
         return Some("cleanup changed a lot");
     }
     None
-}
-
-fn cleanup_ok(why: &str) -> bool {
-    why.starts_with("applied") || matches!(why, "off" | "verbatim" | "empty" | "brief")
 }
 
 fn words(text: &str) -> Vec<String> {
@@ -142,11 +145,33 @@ mod tests {
     }
 
     #[test]
-    fn cleanup_fallback_is_unsure() {
-        for why in ["rejected empty rewrite", "timeout", ""] {
+    fn cleanup_fallback_alone_does_not_offer_fix_last() {
+        // The words were inserted. Only the rewrite failed, so Fix last would
+        // fire on every take while Groq cleanup is down.
+        for why in [
+            "rejected empty rewrite",
+            "timeout",
+            "",
+            "http 403 The model is blocked at the organization level",
+            "model missing: openai/gpt-oss-20b; http 403 blocked",
+        ] {
             let s = Signals { cleanup_why: why.into(), ..fine() };
-            assert_eq!(reason(&s), Some("cleanup fell back"), "{why:?}");
+            assert_eq!(reason(&s), None, "{why:?}");
         }
+    }
+
+    #[test]
+    fn a_failed_cleanup_still_offers_fix_last_when_the_words_are_doubtful() {
+        let s = Signals {
+            cleanup_why: "http 403 The model is blocked".into(),
+            paths: vec!["transcribe-lowconf".into()],
+            ..fine()
+        };
+        assert_eq!(reason(&s), Some("low speech confidence"));
+        assert_eq!(
+            reason(&Signals { partial: true, cleanup_why: "timeout".into(), ..fine() }),
+            Some("part of the take failed")
+        );
     }
 
     #[test]

@@ -18,7 +18,8 @@ const TRANSLATE_MODEL: &str = "openai/gpt-oss-120b";
 pub const CLEANUP_MODELS: &[&str] = &[
     "openai/gpt-oss-20b",
     "openai/gpt-oss-120b",
-    "qwen/qwen3.6-27b",
+    // qwen/qwen3.6-27b was shut down for developer keys on 14 Sep 2026.
+    "qwen/qwen3.8-27b",
 ];
 /// Punctuation cleanup gives up after 1.2s and pastes the transcript it already has.
 pub const CLEANUP_TIMEOUT_MS: u64 = 1_200;
@@ -46,17 +47,48 @@ fn is_missing_model(status: u16, body: &str) -> bool {
     if status == 404 {
         return true;
     }
-    if status == 400 {
-        let lower = body.to_ascii_lowercase();
-        return lower.contains("does not exist")
-            || lower.contains("model_not_found")
-            || lower.contains("you do not have access");
+    // 400: the id is gone. 403: org or project permissions block that model
+    // while the same key still transcribes with Whisper. A bare 401/403
+    // ("invalid api key") is a real key failure and stays here as false.
+    if status == 400 || status == 403 {
+        return model_unavailable_body(body);
     }
     false
 }
 
+fn model_unavailable_body(body: &str) -> bool {
+    let lower = body.to_ascii_lowercase();
+    const MARKERS: &[&str] = &[
+        "does not exist",
+        "do not have access",
+        "model_not_found",
+        "model_not_available",
+        "unknown model",
+        "invalid model",
+        "decommissioned",
+        "no longer supported",
+        "has been deprecated",
+        "model_permission",
+        "permissions_error",
+        "is blocked",
+        "blocked at the",
+    ];
+    if MARKERS.iter().any(|marker| lower.contains(marker)) {
+        return true;
+    }
+    lower.contains("not found") && lower.contains("model")
+}
+
+/// HTTP status plus a short redacted body for the stage log. Never the API key,
+/// and never the user-facing "brief problem" sentence that used to hide it.
+pub(crate) fn provider_detail(status: u16, body: &str) -> String {
+    let failure = crate::provider::classify_to_failure(status, body, false);
+    crate::builtin::redact_secrets(&failure.log_detail)
+}
+
 pub(crate) enum CleanupFail {
-    Missing,
+    /// This model id is gone or not allowed. `detail` is safe to log.
+    Missing { detail: String },
     Other(String),
 }
 
@@ -125,9 +157,11 @@ pub async fn clean_transcript(
     }
     let models = model_order(model);
     let mut missed = Vec::new();
+    let mut last_detail = String::new();
     for model_id in &models {
         match request_cleanup(client, api_key, transcript, tone, false, model_id, using_builtin).await {
-            Err(CleanupFail::Missing) => {
+            Err(CleanupFail::Missing { detail }) => {
+                last_detail = detail;
                 missed.push(model_id.clone());
                 continue;
             }
@@ -141,10 +175,11 @@ pub async fn clean_transcript(
                 if !should_retry_cleanup(&first_outcome.why) {
                     return note_fallback(first_outcome, &missed);
                 }
-                // A 404 already moved on. Any other failure gets one simpler retry
-                // on this model, then the local edit. Timeouts do not walk the list.
+                // A removed model already moved on. Any other failure gets one
+                // simpler retry on this model, then the local edit.
                 match request_cleanup(client, api_key, transcript, tone, true, model_id, using_builtin).await {
-                    Err(CleanupFail::Missing) => {
+                    Err(CleanupFail::Missing { detail }) => {
+                        last_detail = detail;
                         missed.push(model_id.clone());
                         continue;
                     }
@@ -180,11 +215,15 @@ pub async fn clean_transcript(
             }
         }
     }
+    let mut why = format!("model missing: {}", missed.join(", "));
+    if !last_detail.is_empty() {
+        why = format!("{why}; {last_detail}");
+    }
     CleanOutcome {
         text: polish_locally(transcript),
         used_model: false,
         note: None,
-        why: compact_why(&format!("model missing: {}", missed.join(", "))),
+        why: compact_why(&why),
     }
 }
 
@@ -199,6 +238,11 @@ fn note_fallback(mut outcome: CleanOutcome, missed: &[String]) -> CleanOutcome {
 /// An empty or rejected rewrite may still be worth one simpler retry.
 pub(crate) fn should_retry_cleanup(why: &str) -> bool {
     let lower = why.to_ascii_lowercase();
+    // A 4xx from the provider will not succeed by repeating the same body.
+    // Model-not-available responses never reach here: they walk the model list.
+    if lower.contains("http 400") || lower.contains("http 401") || lower.contains("http 403") {
+        return false;
+    }
     if lower.contains("timed out") || lower.contains("timeout") {
         return true;
     }
@@ -210,7 +254,9 @@ pub(crate) fn should_retry_cleanup(why: &str) -> bool {
 fn cleanup_result(result: Result<String, CleanupFail>) -> anyhow::Result<String> {
     match result {
         Ok(text) => Ok(text),
-        Err(CleanupFail::Missing) => Err(anyhow!("model missing")),
+        Err(CleanupFail::Missing { detail }) => {
+            Err(anyhow!(if detail.is_empty() { "model missing".to_string() } else { detail }))
+        }
         Err(CleanupFail::Other(message)) => Err(anyhow!(message)),
     }
 }
@@ -289,10 +335,10 @@ fn outcome_from_model(transcript: &str, result: anyhow::Result<String>) -> Clean
 
 fn compact_why(value: &str) -> String {
     let flat = value.split_whitespace().collect::<Vec<_>>().join(" ");
-    if flat.chars().count() <= 220 {
+    if flat.chars().count() <= 360 {
         flat
     } else {
-        let cut: String = flat.chars().take(220).collect();
+        let cut: String = flat.chars().take(360).collect();
         format!("{cut}…")
     }
 }
@@ -515,9 +561,11 @@ pub async fn translate_preserving(
         models.insert(0, big);
     }
     let mut missed = Vec::new();
+    let mut last_detail = String::new();
     for model_id in &models {
         match post_chat(client, api_key, model_id, system, original, max_tokens, using_builtin, TRANSLATE_TIMEOUT, 768).await {
-            Err(CleanupFail::Missing) => {
+            Err(CleanupFail::Missing { detail }) => {
+                last_detail = detail;
                 missed.push(model_id.clone());
                 continue;
             }
@@ -558,11 +606,15 @@ pub async fn translate_preserving(
             }
         }
     }
+    let mut why = format!("model missing: {}", missed.join(", "));
+    if !last_detail.is_empty() {
+        why = format!("{why}; {last_detail}");
+    }
     CleanOutcome {
         text: original.to_string(),
         used_model: false,
         note: None,
-        why: compact_why(&format!("model missing: {}", missed.join(", "))),
+        why: compact_why(&why),
     }
 }
 
@@ -805,7 +857,7 @@ async fn post_chat(
     system: &str,
     user: &str,
     max_tokens: u32,
-    using_builtin: bool,
+    _using_builtin: bool,
     timeout: std::time::Duration,
     reasoning_pad: u32,
 ) -> Result<String, CleanupFail> {
@@ -858,11 +910,14 @@ async fn post_chat(
     };
     if !status.is_success() {
         let code = status.as_u16();
+        // Log the status and a redacted body. The friendly key sentence hid
+        // every 401 and 403, including a model the org has not allowed, so the
+        // next model was never tried and the stage log could not say why.
+        let detail = provider_detail(code, &bytes);
         if is_missing_model(code, &bytes) {
-            return Err(CleanupFail::Missing);
+            return Err(CleanupFail::Missing { detail });
         }
-        let failure = crate::provider::classify_to_failure(code, &bytes, using_builtin);
-        return Err(CleanupFail::Other(failure.message));
+        return Err(CleanupFail::Other(detail));
     }
     let parsed: ChatResponse = match serde_json::from_str(&bytes) {
         Ok(parsed) => parsed,
@@ -1424,11 +1479,11 @@ mod tests {
         assert_eq!(order[0], "llama-3.1-8b-instant");
         assert_eq!(order[1], "openai/gpt-oss-20b");
         assert_eq!(order[2], "openai/gpt-oss-120b");
-        assert_eq!(order[3], "qwen/qwen3.6-27b");
+        assert_eq!(order[3], "qwen/qwen3.8-27b");
         assert_eq!(model_order(""), vec![
             "openai/gpt-oss-20b".to_string(),
             "openai/gpt-oss-120b".to_string(),
-            "qwen/qwen3.6-27b".to_string(),
+            "qwen/qwen3.8-27b".to_string(),
         ]);
         assert_eq!(model_order("openai/gpt-oss-20b").len(), 3);
         let gone = r#"{"error":{"message":"The model `llama-3.1-8b-instant` does not exist or you do not have access to it."}}"#;
@@ -1436,6 +1491,19 @@ mod tests {
         assert!(is_missing_model(400, "The model does not exist"));
         assert!(!is_missing_model(429, gone));
         assert!(!is_missing_model(401, "invalid api key"));
+        // A blocked model is HTTP 403, which used to be reported as a rejected
+        // key. Whisper on the same key still returns 200. Walk the list.
+        let blocked = r#"{"error":{"message":"The model `openai/gpt-oss-20b` is blocked at the organization level.","type":"permissions_error","code":"model_permission_blocked_org"}}"#;
+        assert!(is_missing_model(403, blocked));
+        assert!(is_missing_model(403, "The model has been decommissioned"));
+        assert!(!is_missing_model(403, "invalid api key"));
+        assert!(!is_missing_model(403, ""));
+        assert!(!is_missing_model(401, blocked));
+        let detail = provider_detail(403, &format!("{blocked} gsk_testsecretvalue123"));
+        assert!(detail.starts_with("http 403"), "{detail}");
+        assert!(detail.to_ascii_lowercase().contains("blocked"), "{detail}");
+        assert!(!detail.contains("gsk_"), "{detail}");
+        assert!(!detail.contains(crate::transcribe::REJECTED_KEY_MESSAGE), "{detail}");
         assert_eq!(CLEANUP_MODEL, "openai/gpt-oss-20b");
     }
 
@@ -1572,6 +1640,8 @@ mod tests {
         assert!(!should_retry_cleanup("couldn't reach Groq"));
         assert!(should_retry_cleanup("rejected empty rewrite"));
         assert!(should_retry_cleanup("rejected rewrite (40 chars, transcript 12 chars)"));
+        assert!(!should_retry_cleanup("http 403 The model is blocked"));
+        assert!(!should_retry_cleanup("http 401 invalid api key"));
         let saved = salvage_homophones(
             "I roots the email yesterday",
             "I wrote the email yesterday",

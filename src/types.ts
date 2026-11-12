@@ -174,6 +174,8 @@ export type DictationEvent = {
   engine?: string | null;
   /** 80–300, 300–1100, 1100–3200, 3200–8000 Hz, each 0..1. Present while recording. */
   bands?: number[];
+  /** Words heard so far. Empty until the first live preview returns. */
+  partial?: string | null;
 };
 
 export interface AudioHealth {

@@ -2,8 +2,10 @@ import {
   characterState,
   dprFor,
   nextQuality,
+  liveCaption,
   pillModel,
   poseImpulse,
+  tailWords,
   publicProblem,
   shapeVoice,
   wantsFrames,
@@ -65,8 +67,23 @@ const listening = pillModel("recording", null);
 assert(listening.line === "Listening" && listening.showLine, "listening names its state");
 const hands = pillModel("recording", "Hands-free — tap the hotkey to stop");
 assert(hands.line.includes("Hands-free"), "a live caption replaces the generic label");
+const heard = pillModel("recording", null, "ship the notes to Sam");
+assert(heard.line === "ship the notes to Sam" && heard.showLine, "spoken words replace Listening");
+const heardOverHands = pillModel("recording", "Hands-free — tap the hotkey to stop", "ship the notes");
+assert(heardOverHands.line === "ship the notes", "words win over the hands-free caption");
+assert(pillModel("recording", null, "   ").line === "Listening", "blank preview stays Listening");
 const writing = pillModel("transcribing", null);
 assert(writing.status === "Writing…" && writing.showStatus, "transcribing is the thinking pose");
+const writingWords = pillModel("transcribing", null, "ship the notes to Sam");
+assert(writingWords.line === "ship the notes to Sam" && writingWords.showLine, "words stay up while the take is written");
+assert(liveCaption("recording", null, "ship the notes to Sam") === "ship the notes to Sam", "classic shows the same words");
+assert(liveCaption("recording", null, null) === "", "classic stays quiet until words arrive");
+assert(liveCaption("idle", null, "leftover") === "", "a hidden overlay does not keep the caption");
+const long = "one two three four five six seven eight nine ten eleven twelve";
+assert(tailWords(long).startsWith("…") && tailWords(long).endsWith("twelve"), "a long caption keeps the newest words");
+for (const phase of ["recording", "arming", "transcribing", "inserting"]) {
+  assert(liveCaption(phase, null, "ship it").includes("ship it"), `${phase} shows the words`);
+}
 assert(pillModel("inserting", null).status === "Inserting…", "inserting stays distinct");
 assert(pillModel("done", "Inserted").status === "Inserted", "done uses the app's word");
 assert(pillModel("typed", null).status === "Typed", "an unconfirmed paste says Typed");

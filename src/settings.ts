@@ -1113,7 +1113,7 @@ function cleanupPanel(draft: Draft): HTMLElement {
   const modelChoices: Array<[string, string]> = [
     ["openai/gpt-oss-20b", "openai/gpt-oss-20b — fast"],
     ["openai/gpt-oss-120b", "openai/gpt-oss-120b"],
-    ["qwen/qwen3.6-27b", "qwen/qwen3.6-27b"],
+    ["qwen/qwen3.8-27b", "qwen/qwen3.8-27b"],
   ];
   if (!modelChoices.some(([id]) => id === draft.settings.cleanupModel)) {
     modelChoices.unshift([draft.settings.cleanupModel, draft.settings.cleanupModel]);
