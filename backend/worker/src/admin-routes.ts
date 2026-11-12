@@ -122,7 +122,7 @@ window.addEventListener("load", function () {
     // Enrollment-gated sessions may only hit /me and /enroll.
     if (admin.me(s).needsEnrollment) return error(403, "enrollment_required", "Finish authenticator setup before using Office.");
     if (route === "/dashboard") return json({ ok: true, ...admin.dashboard() });
-    if (route === "/ops/health") return json({ ok: true, ...admin.ops.health() });
+    if (route === "/ops/health") return json({ ok: true, ...admin.ops.health(), announcement: admin.ops.state.settings.announcement });
     if (route === "/ops/limits") return json({ ok: true, ...admin.ops.limits() });
     if (route === "/ops/releases") return json({ ok: true, channels: admin.ops.state.settings.channels, paused: admin.ops.state.settings.paused, pinned: Boolean(admin.ops.pinnedLatest()) });
     if (route === "/ops/devices") return json({ ok: true, ...admin.devicesView() });
@@ -141,7 +141,7 @@ window.addEventListener("load", function () {
     if (route === "/ops/settings") {
       if (!can(s.role, "manage_settings") && !can(s.role, "owner_settings")) return error(403, "forbidden_role", "Your role cannot view Office settings.");
       const st = admin.ops.state.settings;
-      return json({ ok: true, retentionDays: st.retentionDays, privacyPolicyVersion: st.privacyPolicyVersion, requireEmail2fa: st.requireEmail2fa, ipAllowlist: st.ipAllowlist, sessions: can(s.role, "owner_settings") ? admin.listSessions() : [] });
+      return json({ ok: true, retentionDays: st.retentionDays, privacyPolicyVersion: st.privacyPolicyVersion, announcement: st.announcement, requireEmail2fa: st.requireEmail2fa, ipAllowlist: st.ipAllowlist, sessions: can(s.role, "owner_settings") ? admin.listSessions() : [] });
     }
     if (route === "/users") return json({ ok: true, users: admin.listUsers(s, new URL(req.url).searchParams.get("q") ?? "") });
     if (route === "/audit") return json({ ok: true, entries: admin.auditLog().slice(0, 200) });
@@ -171,12 +171,13 @@ window.addEventListener("load", function () {
         password: str(b.password),
       }, reason));
     }
-    let tm = /^\/team\/([^/]+)\/(role|enabled|email-2fa)$/.exec(route);
+    let tm = /^\/team\/([^/]+)\/(role|enabled|email-2fa|invite)$/.exec(route);
     if (tm) {
       const email = decodeURIComponent(tm[1]);
       const verb = tm[2];
       const g = await admin.authorizeTeamMutation(token, `staff:${email}`, reason);
       if (!g.ok) return out(g);
+      if (verb === "invite") { admin.wrote(g.value, "team_invite", `staff:${email}`, reason); return json({ ok: true, invited: true }); }
       if (verb === "role") return out(admin.setStaffRole(g.value, email, str(b.role) as AdminRole, reason));
       if (verb === "email-2fa") return out(admin.setStaffEmail2fa(g.value, email, b.enabled === true, reason));
       return out(admin.setStaffEnabled(g.value, email, b.enabled !== false, reason));
@@ -192,20 +193,35 @@ window.addEventListener("load", function () {
       if (verb === "reissue") return out(admin.reissue(g.value, id, reason));
       return out(admin.movePool(g.value, id, str(b.poolId), reason));
     }
-    m = /^\/users\/([\w-]+)\/(plan|suspend|notice)$/.exec(route);
+    m = /^\/users\/([\w-]+)\/(plan|suspend|notice|revoke-all|reset-usage|limit)$/.exec(route);
     if (m) {
       const [, id, verb] = m;
-      const action: AdminAction = verb === "plan" ? "set_plan" : verb === "suspend" ? "suspend" : "notice";
-      const g = await gate(action, `user:${id}`, reason);
+      const action: AdminAction = verb === "plan" || verb === "limit" ? "set_plan" : verb === "notice" ? "notice" : verb === "reset-usage" ? "set_plan" : "suspend";
+      const g = await gate(verb === "revoke-all" ? "revoke" : action, `user:${id}`, reason);
       if (!g.ok) return out(g);
       if (verb === "plan") return out(admin.setPlan(g.value, id, str(b.plan) as Plan, reason));
       if (verb === "suspend") return out(admin.setSuspended(g.value, id, b.suspended !== false, reason));
+      if (verb === "revoke-all") return out(admin.revokeAll(g.value, id, reason));
+      if (verb === "reset-usage") return out(admin.resetUsage(g.value, id, reason));
+      if (verb === "limit") return out(admin.setDailyLimit(g.value, id, Number(b.minutes), reason));
       return out(admin.addNotice(g.value, id, str(b.message)));
+    }
+    if (route === "/ops/health") {
+      const g = await gate("manage_settings", "health", reason);
+      if (!g.ok) return out(g);
+      admin.ops.dismissAlert();
+      admin.wrote(g.value, "dismiss_alert", "health", reason);
+      return json({ ok: true, ...admin.ops.health() });
     }
     if (route === "/ops/keys") {
       const g = await gate("manage_keys", "keys", reason);
       if (!g.ok) return out(g);
-      if (str(b.op) === "retire") return admin.ops.retireKey(str(b.id)) ? json({ ok: true, keys: admin.ops.listKeys() }) : error(404, "not_found", "Key not found.");
+      if (str(b.op) === "retire" || str(b.op) === "primary" || str(b.op) === "disable" || str(b.op) === "enable") {
+        const row = admin.ops.setKeyMode(str(b.id), str(b.op) === "retire" ? "retired" : str(b.op) === "disable" ? "backup" : str(b.op) === "enable" ? "active" : "primary");
+        if (!row) return error(404, "not_found", "Key not found.");
+        admin.wrote(g.value, "key_" + str(b.op), `key:${str(b.id)}`, reason, row.fingerprint);
+        return json({ ok: true, key: row, keys: admin.ops.listKeys() });
+      }
       if (str(b.op) === "rotate") {
         const row = await admin.ops.rotateKey(str(b.id), str(b.secret));
         return row ? json({ ok: true, key: row }) : error(400, "invalid_body", "That key was not updated.");
@@ -216,7 +232,9 @@ window.addEventListener("load", function () {
     if (route === "/ops/limits") {
       const g = await gate("manage_limits", "limits", reason);
       if (!g.ok) return out(g);
-      return json({ ok: true, ...admin.ops.setLimits(Number(b.freeMinutesPerDay), Number(b.softWarnRatio)) });
+      const limits = admin.ops.setLimits(Number(b.freeMinutesPerDay), Number(b.softWarnRatio));
+      admin.wrote(g.value, "set_limits", "limits", reason, String(limits.freeMinutesPerDay));
+      return json({ ok: true, ...limits });
     }
     if (route === "/ops/releases") {
       const g = await gate("manage_releases", "releases", reason);
@@ -225,6 +243,7 @@ window.addEventListener("load", function () {
       if (channel === "website" || channel === "updater" || channel === "store") admin.ops.setChannel(channel, str(b.version));
       if (b.pinned && typeof b.pinned === "object") admin.ops.setPinnedLatest(b.pinned as Record<string, unknown>, b.paused !== false);
       else if (b.paused === false) admin.ops.setPinnedLatest(admin.ops.state.settings.pinnedLatest, false);
+      admin.wrote(g.value, b.paused === false ? "resume_updates" : "pin_release", "releases", reason, str(b.version) || str(b.channel));
       return json({ ok: true, channels: admin.ops.state.settings.channels, paused: admin.ops.state.settings.paused });
     }
     {
@@ -232,7 +251,7 @@ window.addEventListener("load", function () {
       if (dev) {
         const g = await gate("revoke", `install:${dev[1]}`, reason);
         if (!g.ok) return out(g);
-        return admin.blockInstall(dev[1], b.blocked !== false) ? json({ ok: true }) : error(404, "not_found", "Device not found.");
+        return admin.blockInstall(g.value, dev[1], b.blocked !== false, reason) ? json({ ok: true }) : error(404, "not_found", "Device not found.");
       }
     }
     {
@@ -240,14 +259,23 @@ window.addEventListener("load", function () {
       if (fix) {
         const g = await gate("manage_feedback", `error:${fix[1]}`, reason);
         if (!g.ok) return out(g);
-        const row = admin.ops.markFixed(fix[1], str(b.version));
+        const row = str(b.op) === "delete" ? (admin.ops.deleteError(fix[1]) ? { id: fix[1] } : null)
+          : str(b.op) === "note" ? admin.ops.noteError(fix[1], { assignee: str(b.assignee), note: str(b.note) })
+          : admin.ops.markFixed(fix[1], str(b.version));
+        if (row) admin.wrote(g.value, "error_" + (str(b.op) || "fixed"), `error:${fix[1]}`, reason);
         return row ? json({ ok: true, report: row }) : error(404, "not_found", "Report not found.");
       }
     }
     if (route === "/ops/feedback") {
       const g = await gate("manage_feedback", "feedback", reason);
       if (!g.ok) return out(g);
+      if (str(b.id)) {
+        const row = str(b.op) === "delete" ? (admin.ops.deleteFeedback(str(b.id)) ? { id: str(b.id) } : null) : admin.ops.updateFeedback(str(b.id), { resolved: b.resolved === true ? true : b.resolved === false ? false : undefined, assignee: str(b.assignee), note: str(b.note) });
+        if (row) admin.wrote(g.value, "feedback_" + (str(b.op) || "update"), `feedback:${str(b.id)}`, reason);
+        return row ? json({ ok: true, item: row }) : error(404, "not_found", "Feedback not found.");
+      }
       const row = admin.ops.addFeedback({ source: str(b.source) === "website" ? "website" : "app", issueType: str(b.issueType), text: str(b.text) });
+      if (row) admin.wrote(g.value, "feedback_add", `feedback:${row.id}`, reason);
       return row ? json({ ok: true, item: row }) : error(400, "invalid_body", "That note could not be saved.");
     }
     if (route === "/ops/settings") {
@@ -256,11 +284,13 @@ window.addEventListener("load", function () {
       if (!g.ok) return out(g);
       const st = admin.ops.state.settings;
       if (typeof b.retentionDays === "number" && b.retentionDays >= 1) st.retentionDays = Math.min(400, b.retentionDays);
+      if (typeof b.announcement === "string") st.announcement = b.announcement.slice(0, 280);
       if (typeof b.privacyPolicyVersion === "string") st.privacyPolicyVersion = b.privacyPolicyVersion.slice(0, 40);
       if (typeof b.requireEmail2fa === "boolean") st.requireEmail2fa = b.requireEmail2fa;
       if (Array.isArray(b.ipAllowlist)) st.ipAllowlist = b.ipAllowlist.map((x) => String(x).trim()).filter(Boolean).slice(0, 50);
       if (str(b.op) === "revoke-session") return admin.revokeSession(str(b.id)) ? json({ ok: true, sessions: admin.listSessions() }) : error(404, "not_found", "Session not found.");
-      return json({ ok: true, retentionDays: st.retentionDays, privacyPolicyVersion: st.privacyPolicyVersion, requireEmail2fa: st.requireEmail2fa, ipAllowlist: st.ipAllowlist });
+      admin.wrote(g.value, "settings", "office", reason);
+      return json({ ok: true, retentionDays: st.retentionDays, privacyPolicyVersion: st.privacyPolicyVersion, requireEmail2fa: st.requireEmail2fa, ipAllowlist: st.ipAllowlist, announcement: st.announcement });
     }
     {
       const userOp = /^\/ops\/users\/([\w-]+)\/(export|delete)$/.exec(route);

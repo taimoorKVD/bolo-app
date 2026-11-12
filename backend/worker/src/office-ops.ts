@@ -48,6 +48,8 @@ export interface ErrorReport {
   line: string;
   deviceId: string;
   fixedIn?: string;
+  assignee?: string;
+  note?: string;
 }
 
 export interface FeedbackItem {
@@ -57,6 +59,9 @@ export interface FeedbackItem {
   issueType: string;
   text: string;
   deviceId?: string;
+  resolved?: boolean;
+  assignee?: string;
+  note?: string;
 }
 
 export interface OfficeSettings {
@@ -68,6 +73,7 @@ export interface OfficeSettings {
   pinnedLatest: Record<string, unknown> | null;
   paused: boolean;
   channels: { website: string; updater: string; store: string };
+  announcement: string;
 }
 
 export interface OfficeState {
@@ -100,6 +106,7 @@ export function emptyOfficeState(): OfficeState {
       pinnedLatest: null,
       paused: false,
       channels: { website: "", updater: "", store: "" },
+      announcement: "",
     },
     alertedAt: 0,
   };
@@ -136,6 +143,7 @@ export class OfficeOps {
     this.state.errors ||= [];
     this.state.feedback ||= [];
     this.state.limits ||= { freeMinutesPerDay: 20, softWarnRatio: 0.8 };
+    this.state.settings.announcement ??= "";
     this.purge();
   }
 
@@ -198,7 +206,7 @@ export class OfficeOps {
       failureRate: online ? Math.round(rate * 1000) / 1000 : null,
       p50: percentile(lat, 50),
       p95: percentile(lat, 95),
-      alert: online >= 10 && rate >= 0.5,
+      alert: online >= 10 && rate >= 0.5 && this.now() >= this.state.alertedAt,
     };
   }
 
@@ -250,11 +258,21 @@ export class OfficeOps {
   listKeys() { return this.state.keys.filter((k) => k.status !== "retired").map((k) => this.publicKey(k)); }
 
   retireKey(id: string) {
+    return Boolean(this.setKeyMode(id, "retired"));
+  }
+
+  /** primary makes this key the live one and demotes other live keys in the pool. */
+  setKeyMode(id: string, mode: "active" | "backup" | "retired" | "primary") {
     const k = this.state.keys.find((x) => x.id === id);
-    if (!k) return false;
-    k.status = "retired";
-    k.secret = "";
-    return true;
+    if (!k) return null;
+    if (mode === "retired") { k.status = "retired"; k.secret = ""; return this.publicKey(k); }
+    if (mode === "primary") {
+      for (const o of this.state.keys) if (o.poolId === k.poolId && o.id !== k.id && o.status === "active") o.status = "backup";
+      k.status = "active";
+      return this.publicKey(k);
+    }
+    k.status = mode;
+    return this.publicKey(k);
   }
 
   async rotateKey(id: string, secret: string) {
@@ -341,9 +359,23 @@ export class OfficeOps {
 
   markFixed(id: string, version: string) {
     const row = this.state.errors.find((e) => e.id === id);
-    if (!row || !version.trim()) return null;
-    row.fixedIn = version.slice(0, 32);
+    if (!row) return null;
+    row.fixedIn = version.trim() ? version.slice(0, 32) : undefined;
     return row;
+  }
+
+  noteError(id: string, patch: { assignee?: string; note?: string }) {
+    const row = this.state.errors.find((e) => e.id === id);
+    if (!row) return null;
+    if (patch.assignee != null) row.assignee = patch.assignee.slice(0, 80);
+    if (patch.note != null) row.note = patch.note.slice(0, 280);
+    return row;
+  }
+
+  deleteError(id: string) {
+    const n = this.state.errors.length;
+    this.state.errors = this.state.errors.filter((e) => e.id !== id);
+    return this.state.errors.length < n;
   }
 
   addFeedback(input: { source: "app" | "website"; issueType: string; text: string; deviceId?: string }) {
@@ -360,6 +392,23 @@ export class OfficeOps {
     this.state.feedback.push(row);
     return row;
   }
+
+  updateFeedback(id: string, patch: { resolved?: boolean; assignee?: string; note?: string }) {
+    const row = this.state.feedback.find((f) => f.id === id);
+    if (!row) return null;
+    if (typeof patch.resolved === "boolean") row.resolved = patch.resolved;
+    if (patch.assignee != null) row.assignee = patch.assignee.slice(0, 80);
+    if (patch.note != null) row.note = patch.note.slice(0, 280);
+    return row;
+  }
+
+  deleteFeedback(id: string) {
+    const n = this.state.feedback.length;
+    this.state.feedback = this.state.feedback.filter((f) => f.id !== id);
+    return this.state.feedback.length < n;
+  }
+
+  dismissAlert() { this.state.alertedAt = this.now() + 60 * 60 * 1000; }
 
   forgetDevice(installId: string) {
     this.state.devices = this.state.devices.filter((d) => d.installId !== installId);

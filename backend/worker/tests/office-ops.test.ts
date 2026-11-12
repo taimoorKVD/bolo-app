@@ -141,4 +141,22 @@ describe("office module routes", () => {
     expect(ok.status).toBe(200);
     expect(s.admin.ops.state.settings.requireEmail2fa).toBe(true);
   });
+
+  it("owner can reset usage, mark a key primary, and resolve feedback", async () => {
+    const s = await ownerApp();
+    const backend = (s.admin as unknown as { backend: MockBackend }).backend;
+    backend.profiles.set("u1", { userId: "u1", email: "a@kingdomvision.com", plan: "free", status: "active", fairUseDailyMinutes: 20, fairUseMonthlyMinutes: 300, createdAt: new Date().toISOString() });
+    backend.events.push({ userId: "u1", installId: "i1", provider: "groq", kind: "transcribe", audioMinutes: 2, statusClass: "ok", createdAt: Date.now() });
+    expect((await call(s.handle, "/admin/api/users/u1/reset-usage", s.viewer, { reason: "viewer try" })).status).toBe(403);
+    expect((await call(s.handle, "/admin/api/users/u1/reset-usage", s.owner, { reason: "clear minutes" })).status).toBe(200);
+    expect(backend.events).toHaveLength(0);
+    const added = await call(s.handle, "/admin/api/ops/keys", s.owner, { poolId: "pool_b", secret: "gsk_primary_secret_value", reason: "add pool key" });
+    const id = ((await added.json()) as { key: { id: string } }).key.id;
+    expect((await call(s.handle, "/admin/api/ops/keys", s.owner, { op: "primary", id, reason: "make primary" })).status).toBe(200);
+    expect((await call(s.handle, "/admin/api/ops/keys", s.viewer, { op: "retire", id, reason: "viewer try" })).status).toBe(403);
+    const fb = s.admin.ops.addFeedback({ source: "app", issueType: "bug", text: "The shortcut missed a word." });
+    expect((await call(s.handle, "/admin/api/ops/feedback", s.owner, { id: fb!.id, resolved: true, reason: "fixed in office" })).status).toBe(200);
+    expect(s.admin.ops.state.feedback.find((f) => f.id === fb!.id)?.resolved).toBe(true);
+    expect(s.admin.auditLog().some((e) => e.action === "reset_usage")).toBe(true);
+  });
 });

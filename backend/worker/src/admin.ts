@@ -883,6 +883,10 @@ export class AdminService {
   // ---- mutating actions (caller must pass an authorized session) ----
   private install(id: string) { return this.backend.installs.get(id); }
 
+  wrote(s: AdminSession, action: string, target: string, reason: string, detail?: string) {
+    this.record({ adminEmail: s.email, role: s.role, action, target, reason, result: "ok", detail });
+  }
+
   revoke(s: AdminSession, installId: string, reason: string): AdminResult<{ installId: string; status: string }> {
     const i = this.install(installId);
     if (!i) return fail(404, "install_missing", "That device was not found.");
@@ -925,6 +929,34 @@ export class AdminService {
     const from = p.plan; p.plan = plan;
     this.record({ adminEmail: s.email, role: s.role, action: "set_plan", target: `user:${userId}`, reason, result: "ok", detail: `${from} -> ${plan}` });
     return { ok: true, value: { userId, plan } };
+  }
+
+  revokeAll(s: AdminSession, userId: string, reason: string): AdminResult<{ userId: string; devices: number }> {
+    const p = this.backend.profiles.get(userId);
+    if (!p) return fail(404, "user_missing", "User not found.");
+    const ids = [...this.backend.installs.values()].filter((i) => i.userId === userId).map((i) => i.id);
+    for (const id of ids) this.revoke(s, id, reason);
+    this.wrote(s, "revoke_all", `user:${userId}`, reason, String(ids.length));
+    return { ok: true, value: { userId, devices: ids.length } };
+  }
+
+  resetUsage(s: AdminSession, userId: string, reason: string): AdminResult<{ userId: string; removed: number }> {
+    const p = this.backend.profiles.get(userId);
+    if (!p) return fail(404, "user_missing", "User not found.");
+    const before = this.backend.events.length;
+    this.backend.events = this.backend.events.filter((e) => e.userId !== userId);
+    const removed = before - this.backend.events.length;
+    this.wrote(s, "reset_usage", `user:${userId}`, reason, String(removed));
+    return { ok: true, value: { userId, removed } };
+  }
+
+  setDailyLimit(s: AdminSession, userId: string, minutes: number, reason: string): AdminResult<{ userId: string; dailyMinutes: number }> {
+    const p = this.backend.profiles.get(userId);
+    if (!p) return fail(404, "user_missing", "User not found.");
+    if (!(minutes > 0) || minutes > 10000) return fail(400, "limit_invalid", "Enter a daily minute limit.");
+    p.fairUseDailyMinutes = minutes;
+    this.wrote(s, "set_limit", `user:${userId}`, reason, String(minutes));
+    return { ok: true, value: { userId, dailyMinutes: minutes } };
   }
 
   setSuspended(s: AdminSession, userId: string, suspended: boolean, reason: string): AdminResult<{ userId: string; status: string }> {
@@ -1161,12 +1193,13 @@ export class AdminService {
     return { devices, byVersion };
   }
 
-  blockInstall(installId: string, blocked: boolean): boolean {
+  blockInstall(s: AdminSession, installId: string, blocked: boolean, reason: string): boolean {
     const inst = this.backend.installs.get(installId);
     if (!inst) return false;
     this.ops.setDevice(installId, { blocked });
     if (blocked) inst.status = "revoked";
     else if (inst.status === "revoked") inst.status = "active";
+    this.wrote(s, blocked ? "block_device" : "unblock_device", `install:${installId}`, reason);
     return true;
   }
 

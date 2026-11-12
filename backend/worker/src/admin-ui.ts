@@ -312,46 +312,142 @@ async function ensureRecent(){
 }
 function confirmAction(title,text,extra,run){$("#dtitle").textContent=title;$("#dtext").textContent=text;$("#dextra").replaceChildren(extra||"");$("#dreason").value="";const d=$("#dlg");d.showModal();d.onclose=async()=>{if(d.returnValue!=="ok")return;if(!(await ensureRecent()))return;try{await run($("#dreason").value);toast("Done. Recorded in the audit log.");show(location.hash.slice(1))}catch(e){toast(e.message)}}}
 function empty(text){return h("p",{class:"empty"},text)}
+function stop(fn){return (e)=>{e.stopPropagation();fn()}}
+function go(title,text,path,body){return stop(()=>confirmAction(title,text,null,(r)=>api(path,{method:"POST",body:JSON.stringify(Object.assign({reason:r},body||{}))})))}
+function btn(label,cls,fn){return h("button",{type:"button",class:"btn "+(cls||"ghost"),style:"width:auto",on:{click:fn}},label)}
+function save(path,body,done){return stop(async()=>{try{await api(path,{method:"POST",body:JSON.stringify(Object.assign({reason:"updated in Office"},body))});toast("Saved");if(done)done();else show(location.hash.slice(1)||"dash")}catch(e){toast(e.message)}})}
 async function health(){
   const d=await api("/ops/health");
   const bits=[h("h2",{style:"margin-top:0"},"Speech health")];
-  if(d.alert)bits.push(h("div",{class:"card"},"Online speech failures are high."));
+  if(d.announcement)bits.push(h("div",{class:"card"},d.announcement));
+  if(d.alert)bits.push(h("div",{class:"card row",style:"justify-content:space-between"},h("div",{},"Online speech failures are high."),btn("Dismiss for an hour","ghost",go("Dismiss alert","Hide this banner for one hour.","/ops/health",{}))));
   if(!d.samples)bits.push(empty("No speech samples in the last hour."));
   else bits.push(h("div",{class:"grid"},stat("Samples",d.samples),stat("Online failures",d.onlineFail+" / "+d.online),stat("p50",d.p50==null?"—":d.p50+" ms"),stat("p95",d.p95==null?"—":d.p95+" ms")));
   $("#app").replaceChildren(...bits);
 }
 async function devices(){
   const d=await api("/ops/devices");
-  const rows=(d.devices||[]).map(x=>h("tr",{},h("td",{},x.id),h("td",{},x.version||"—"),h("td",{},x.lastSeenAt?new Date(x.lastSeenAt).toLocaleString():"—"),h("td",{},x.engine||"—"),h("td",{},x.blocked?"blocked":x.status)));
-  $("#app").replaceChildren(h("h2",{style:"margin-top:0"},"Devices"),h("div",{class:"card"},rows.length?h("table",{},h("tr",{},h("th",{},"Install"),h("th",{},"Version"),h("th",{},"Last seen"),h("th",{},"Engine"),h("th",{},"State")),...rows):empty("No devices yet.")));
+  const q=h("input",{placeholder:"Filter by install or version","aria-label":"Filter devices",style:"max-width:340px"});
+  const box=h("div",{class:"card"});
+  const drawer=h("div",{class:"card",hidden:true});
+  function draw(list){
+    const rows=list.map(x=>h("tr",{class:"click",on:{click:()=>{drawer.hidden=false;drawer.replaceChildren(h("b",{},x.id),h("p",{class:"mute"},(x.version||"No version")+" · "+(x.engine||"engine unknown")+" · "+(x.lastSeenAt||"never seen")))}}},
+      h("td",{},x.id),h("td",{},x.version||"—"),h("td",{},x.lastSeenAt?new Date(x.lastSeenAt).toLocaleString():"—"),h("td",{},x.engine||"—"),h("td",{},x.blocked?"blocked":x.status),
+      h("td",{},h("div",{class:"row"},
+        btn(x.blocked?"Unblock":"Block",x.blocked?"ghost":"bad",go(x.blocked?"Unblock device":"Block device","This device's managed access changes now.","/ops/devices/"+x.id+"/block",{blocked:!x.blocked})),
+        btn("Sign out","bad",go("Sign out device","Its access tokens stop now.","/installs/"+x.id+"/revoke",{})),
+        btn("Renew key","ghost",go("Renew access key","The old key stops and the device reconnects.","/installs/"+x.id+"/reissue",{}))
+      ))
+    ));
+    box.replaceChildren(rows.length?h("table",{},h("tr",{},h("th",{},"Install"),h("th",{},"Version"),h("th",{},"Last seen"),h("th",{},"Engine"),h("th",{},"State"),h("th",{},"Actions")),...rows):empty("No devices match."));
+  }
+  q.oninput=()=>{const n=q.value.toLowerCase();draw((d.devices||[]).filter(x=>(x.id+" "+(x.version||"")).toLowerCase().includes(n)))};
+  draw(d.devices||[]);
+  $("#app").replaceChildren(h("h2",{style:"margin-top:0"},"Devices"),q,box,drawer);
 }
 async function limits(){
   const d=await api("/ops/limits");
-  $("#app").replaceChildren(h("h2",{style:"margin-top:0"},"Usage limits"),h("div",{class:"card"},h("p",{},"Free minutes per day: "+d.freeMinutesPerDay),h("p",{},"Soft warning at "+Math.round(d.softWarnRatio*100)+"% of that cap.")));
+  const daily=h("input",{id:"limd",type:"number",value:String(d.freeMinutesPerDay)});
+  const warn=h("input",{id:"limw",type:"number",value:String(d.softWarnRatio),step:"0.05"});
+  $("#app").replaceChildren(h("h2",{style:"margin-top:0"},"Usage limits"),h("div",{class:"card"},
+    h("label",{class:"k",for:"limd"},"Free minutes per day"),daily,
+    h("label",{class:"k",for:"limw"},"Soft warning ratio (0 to 1)"),warn,
+    btn("Save limits","",(e)=>{e.stopPropagation();api("/ops/limits",{method:"POST",body:JSON.stringify({freeMinutesPerDay:Number(daily.value),softWarnRatio:Number(warn.value),reason:"updated in Office"})}).then(()=>{toast("Saved");limits()}).catch(er=>toast(er.message))})
+  ));
 }
 async function releases(){
-  const d=await api("/ops/releases");
-  const c=d.channels||{};
-  $("#app").replaceChildren(h("h2",{style:"margin-top:0"},"Releases"),h("div",{class:"card"},h("p",{},"Website: "+(c.website||"Not set")),h("p",{},"Updater: "+(c.updater||"Not set")),h("p",{},"Store: "+(c.store||"Not set")),h("p",{},d.paused?"Updater file is pinned.":"Updater file is the website copy.")));
+  const d=await api("/ops/releases"); const c=d.channels||{};
+  const web=h("input",{id:"rw",value:c.website||"",placeholder:"Website version"});
+  const up=h("input",{id:"ru",value:c.updater||"",placeholder:"Updater version"});
+  const store=h("input",{id:"rs",value:c.store||"",placeholder:"Store version"});
+  const pin=h("input",{id:"rp",value:c.updater||"",placeholder:"Version to pin"});
+  function post(body){return (e)=>{e.stopPropagation();api("/ops/releases",{method:"POST",body:JSON.stringify(Object.assign({reason:"updated in Office"},body))}).then(()=>{toast("Saved");releases()}).catch(er=>toast(er.message))}}
+  $("#app").replaceChildren(h("h2",{style:"margin-top:0"},"Releases"),h("div",{class:"card"},
+    h("p",{},d.paused?"Updates are paused on the pinned file.":"Updates follow the website file."),
+    h("label",{class:"k"},"Website"),web,h("label",{class:"k"},"Updater"),up,h("label",{class:"k"},"Store"),store,
+    h("div",{class:"row",style:"margin-top:12px"},btn("Save versions","",(e)=>{e.stopPropagation();Promise.all([["website",web.value],["updater",up.value],["store",store.value]].map(([channel,version])=>api("/ops/releases",{method:"POST",body:JSON.stringify({channel,version,reason:"updated in Office"})}))).then(()=>{toast("Saved");releases()}).catch(er=>toast(er.message))})),
+    h("label",{class:"k"},"Pin or roll back to"),pin,
+    h("div",{class:"row"},btn(d.paused?"Resume updates":"Pause updates",d.paused?"":"bad",post(d.paused?{paused:false}:{paused:true,pinned:{version:pin.value||up.value}})),btn("Roll back","ghost",post({paused:true,pinned:{version:pin.value}})))
+  ));
 }
 async function keys(){
   const d=await api("/ops/keys");
-  const rows=(d.keys||[]).map(k=>h("tr",{},h("td",{},k.poolId),h("td",{},h("code",{},k.fingerprint)),h("td",{},k.status),h("td",{},k.dailyMinuteCap?k.minutesToday+" / "+k.dailyMinuteCap:"no cap")));
-  $("#app").replaceChildren(h("h2",{style:"margin-top:0"},"Provider keys"),h("div",{class:"card"},rows.length?h("table",{},h("tr",{},h("th",{},"Pool"),h("th",{},"Fingerprint"),h("th",{},"State"),h("th",{},"Today")),...rows):empty("No keys yet.")));
+  const pool=h("input",{id:"kpool",placeholder:"Pool id"});
+  const secret=h("input",{id:"ksec",type:"password",placeholder:"Key value, shown once as a fingerprint",autocomplete:"off"});
+  const cap=h("input",{id:"kcap",type:"number",placeholder:"Daily minute cap",value:"0"});
+  const rows=(d.keys||[]).map(k=>h("tr",{},
+    h("td",{},k.poolId),h("td",{},h("code",{},k.fingerprint)),h("td",{},k.status),h("td",{},k.dailyMinuteCap?k.minutesToday+" / "+k.dailyMinuteCap:"no cap"),
+    h("td",{},h("div",{class:"row"},
+      btn("Primary","ghost",go("Make primary","Other live keys in this pool become backups.","/ops/keys",{op:"primary",id:k.id})),
+      btn(k.status==="backup"?"Enable":"Disable","ghost",go(k.status==="backup"?"Enable key":"Disable key","Disabled keys stay stored but are not used.","/ops/keys",{op:k.status==="backup"?"enable":"disable",id:k.id})),
+      btn("Rotate","ghost",stop(async()=>{const next=await askSecret("Rotate key","Paste the new key. It will not be shown again.","password");if(!next)return;confirmAction("Rotate key","The previous secret is replaced.",null,(r)=>api("/ops/keys",{method:"POST",body:JSON.stringify({op:"rotate",id:k.id,secret:next,reason:r})}))})),
+      btn("Revoke","bad",go("Revoke key","This key is retired and the secret is dropped.","/ops/keys",{op:"retire",id:k.id}))
+    ))
+  ));
+  $("#app").replaceChildren(h("h2",{style:"margin-top:0"},"Provider keys"),
+    h("div",{class:"card"},h("div",{class:"grid"},h("div",{},h("label",{class:"k"},"Pool"),pool),h("div",{},h("label",{class:"k"},"Key"),secret),h("div",{},h("label",{class:"k"},"Daily cap"),cap)),btn("Add key","",(e)=>{e.stopPropagation();api("/ops/keys",{method:"POST",body:JSON.stringify({poolId:pool.value,secret:secret.value,dailyMinuteCap:Number(cap.value)||0,reason:"add pool key"})}).then(()=>{toast("Key added");secret.value="";keys()}).catch(er=>toast(er.message))})),
+    h("div",{class:"card"},rows.length?h("table",{},h("tr",{},h("th",{},"Pool"),h("th",{},"Fingerprint"),h("th",{},"State"),h("th",{},"Today"),h("th",{},"Actions")),...rows):empty("No keys yet."))
+  );
 }
 async function errors(){
   const d=await api("/ops/errors");
-  const rows=(d.reports||[]).map(r=>h("tr",{},h("td",{},r.kind),h("td",{},r.version||"—"),h("td",{},r.line),h("td",{},r.fixedIn||"—")));
-  $("#app").replaceChildren(h("h2",{style:"margin-top:0"},"Error reports"),h("div",{class:"card"},rows.length?h("table",{},h("tr",{},h("th",{},"Kind"),h("th",{},"Version"),h("th",{},"Line"),h("th",{},"Fixed in")),...rows):empty("No reports yet.")));
+  const q=h("input",{placeholder:"Filter reports","aria-label":"Filter reports",style:"max-width:340px"});
+  const box=h("div",{class:"card"});
+  function draw(list){
+    const rows=list.map(r=>h("tr",{},h("td",{},r.kind),h("td",{},r.version||"—"),h("td",{},r.line),h("td",{},r.fixedIn||(r.note||"—")),
+      h("td",{},h("div",{class:"row"},
+        btn(r.fixedIn?"Reopen":"Resolved","ghost",go(r.fixedIn?"Reopen report":"Mark resolved","Set the release this was fixed in, or clear it.", "/ops/errors/"+r.id+"/fixed", r.fixedIn?{version:""}:{version:r.version||"next"})),
+        btn("Note","ghost",stop(async()=>{const note=await askSecret("Note","Assignee or note for this report.","text");if(!note)return;await api("/ops/errors/"+r.id+"/fixed",{method:"POST",body:JSON.stringify({op:"note",note,reason:"updated in Office"})});toast("Saved");errors()})),
+        btn("Delete","bad",go("Delete report","Remove this report from Office.","/ops/errors/"+r.id+"/fixed",{op:"delete"}))
+      ))));
+    box.replaceChildren(rows.length?h("table",{},h("tr",{},h("th",{},"Kind"),h("th",{},"Version"),h("th",{},"Line"),h("th",{},"Status"),h("th",{},"Actions")),...rows):empty("No reports match."));
+  }
+  q.oninput=()=>{const n=q.value.toLowerCase();draw((d.reports||[]).filter(r=>(r.kind+" "+r.line).toLowerCase().includes(n)))};
+  draw(d.reports||[]);
+  $("#app").replaceChildren(h("h2",{style:"margin-top:0"},"Error reports"),q,box);
 }
 async function feedback(){
   const d=await api("/ops/feedback");
-  const rows=(d.items||[]).map(r=>h("tr",{},h("td",{},r.source),h("td",{},r.issueType),h("td",{},r.text)));
-  $("#app").replaceChildren(h("h2",{style:"margin-top:0"},"Feedback"),h("div",{class:"card"},rows.length?h("table",{},h("tr",{},h("th",{},"From"),h("th",{},"Type"),h("th",{},"Note")),...rows):empty("No feedback yet.")));
+  const q=h("input",{placeholder:"Filter feedback","aria-label":"Filter feedback",style:"max-width:340px"});
+  const box=h("div",{class:"card"});
+  const text=h("input",{id:"fbt",placeholder:"Note from the contact form or the app"});
+  const kind=h("select",{id:"fbk"},...["contact","accuracy","bug","billing","other"].map(v=>h("option",{value:v},v)));
+  function draw(list){
+    const rows=list.map(r=>h("tr",{},h("td",{},r.source),h("td",{},r.issueType),h("td",{},r.text),h("td",{},r.resolved?"resolved":"open"),
+      h("td",{},h("div",{class:"row"},
+        btn(r.resolved?"Reopen":"Resolve","ghost",save("/ops/feedback",{id:r.id,resolved:!r.resolved})),
+        btn("Assign","ghost",stop(async()=>{const assignee=await askSecret("Assign","Who should handle this?","text");if(!assignee)return;await api("/ops/feedback",{method:"POST",body:JSON.stringify({id:r.id,assignee,reason:"updated in Office"})});toast("Saved");feedback()})),
+        btn("Reply","ghost",stop(async()=>{const note=await askSecret("Reply note","Saved on the item. It is not emailed.","text");if(!note)return;await api("/ops/feedback",{method:"POST",body:JSON.stringify({id:r.id,note,reason:"updated in Office"})});toast("Saved");feedback()})),
+        btn("Delete","bad",go("Delete feedback","Remove this item.","/ops/feedback",{id:r.id,op:"delete"}))
+      ))));
+    box.replaceChildren(rows.length?h("table",{},h("tr",{},h("th",{},"From"),h("th",{},"Type"),h("th",{},"Note"),h("th",{},"State"),h("th",{},"Actions")),...rows):empty("No feedback matches."));
+  }
+  q.oninput=()=>{const n=q.value.toLowerCase();draw((d.items||[]).filter(r=>(r.text+" "+r.issueType).toLowerCase().includes(n)))};
+  draw(d.items||[]);
+  $("#app").replaceChildren(h("h2",{style:"margin-top:0"},"Feedback"),h("div",{class:"card row"},kind,text,btn("Add","",(e)=>{e.stopPropagation();api("/ops/feedback",{method:"POST",body:JSON.stringify({source:"website",issueType:kind.value,text:text.value,reason:"added in Office"})}).then(()=>{toast("Saved");feedback()}).catch(er=>toast(er.message))})),q,box);
 }
 async function settings(){
   const d=await api("/ops/settings");
-  $("#app").replaceChildren(h("h2",{style:"margin-top:0"},"Settings and privacy"),h("div",{class:"card"},h("p",{},"Retention: "+d.retentionDays+" days"),h("p",{},"Privacy policy version: "+(d.privacyPolicyVersion||"Not set")),h("p",{},"Email codes required: "+(d.requireEmail2fa?"yes":"no")),h("p",{},"IP allowlist: "+((d.ipAllowlist&&d.ipAllowlist.length)?d.ipAllowlist.join(", "):"Not set")),h("p",{},"Active sessions: "+((d.sessions&&d.sessions.length)||0))));
+  const days=h("input",{id:"setd",type:"number",value:String(d.retentionDays)});
+  const pol=h("input",{id:"setp",value:d.privacyPolicyVersion||"",placeholder:"Privacy policy version"});
+  const ann=h("input",{id:"seta",value:d.announcement||"",placeholder:"Announcement shown in Office"});
+  const bits=[h("h2",{style:"margin-top:0"},"Settings and privacy"),h("div",{class:"card"},
+    h("label",{class:"k",for:"setd"},"Keep Office records (days)"),days,
+    h("label",{class:"k",for:"setp"},"Privacy policy version"),pol,
+    h("label",{class:"k",for:"seta"},"Announcement"),ann,
+    btn("Save","",(e)=>{e.stopPropagation();api("/ops/settings",{method:"POST",body:JSON.stringify({retentionDays:Number(days.value),privacyPolicyVersion:pol.value,announcement:ann.value,reason:"updated in Office"})}).then(()=>{toast("Saved");settings()}).catch(er=>toast(er.message))})
+  )];
+  if(allowed("owner_settings")){
+    const ips=h("input",{id:"setip",value:(d.ipAllowlist||[]).join(", "),placeholder:"Blank allows every IP"});
+    const sessions=h("div",{class:"card"},h("h3",{style:"margin-top:0"},"Office sessions"),(d.sessions||[]).length?(d.sessions||[]).map(s=>h("div",{class:"row",style:"justify-content:space-between"},h("span",{},s.email+" · "+s.role),btn("Revoke","bad",go("Revoke session","That browser must sign in again.","/ops/settings",{op:"revoke-session",id:s.id})))):empty("No active sessions."));
+    bits.push(h("div",{class:"card"},
+      h("h3",{style:"margin-top:0"},"Office security"),
+      btn(d.requireEmail2fa?"Email codes required":"Email codes optional","ghost",(e)=>{e.stopPropagation();api("/ops/settings",{method:"POST",body:JSON.stringify({requireEmail2fa:!d.requireEmail2fa,reason:"updated in Office"})}).then(()=>{toast("Saved");settings()}).catch(er=>toast(er.message))}),
+      h("label",{class:"k",for:"setip"},"IP allowlist"),ips,
+      btn("Save allowlist","",(e)=>{e.stopPropagation();api("/ops/settings",{method:"POST",body:JSON.stringify({ipAllowlist:ips.value.split(",").map(s=>s.trim()).filter(Boolean),reason:"updated in Office"})}).then(()=>{toast("Saved");settings()}).catch(er=>toast(er.message))})
+    ),sessions);
+  }
+  $("#app").replaceChildren(...bits);
 }
 async function dash(){
   const d=await api("/dashboard"); $("#ex").hidden=!d.exampleData; const app=$("#app");
@@ -368,7 +464,15 @@ async function dash(){
 async function users(){
   const app=$("#app"); const q=h("input",{placeholder:"Search by email",style:"max-width:340px","aria-label":"Search users"}); const box=h("div",{class:"card"});
   async function load(){const j=await api("/users?q="+encodeURIComponent(q.value));
-    box.replaceChildren(j.users&&j.users.length?h("table",{},h("tr",{},h("th",{},"Email"),h("th",{},"Plan"),h("th",{},"Status"),h("th",{},"Devices"),h("th",{},"Today"),h("th",{},"Month")),j.users.map(u=>h("tr",{class:"click",on:{click:()=>show("user/"+u.userId)}},h("td",{},u.email),h("td",{},h("span",{class:"tag "+u.plan},u.plan)),h("td",{},h("span",{class:"tag "+u.status},u.status)),h("td",{},u.activeInstalls+"/"+u.installs),h("td",{},u.dailyMinutes+" min"),h("td",{},u.monthlyMinutes+" min")))):h("p",{class:"empty"},q.value?"No users match that search.":"No users yet."));
+    box.replaceChildren(j.users&&j.users.length?h("table",{},h("tr",{},h("th",{},"Email"),h("th",{},"Plan"),h("th",{},"Status"),h("th",{},"Devices"),h("th",{},"Today"),h("th",{},"Actions")),j.users.map(u=>h("tr",{},
+      h("td",{},h("button",{type:"button",class:"btn ghost",style:"width:auto",on:{click:()=>show("user/"+u.userId)}},u.email)),
+      h("td",{},h("span",{class:"tag "+u.plan},u.plan)),h("td",{},h("span",{class:"tag "+u.status},u.status)),h("td",{},u.activeInstalls+"/"+u.installs),h("td",{},u.dailyMinutes+" min"),
+      h("td",{},h("div",{class:"row"},
+        btn(u.status==="suspended"?"Reactivate":"Suspend","ghost",go(u.status==="suspended"?"Reactivate user":"Suspend user","Managed dictation stops while they are suspended.","/users/"+u.userId+"/suspend",{suspended:u.status!=="suspended"})),
+        btn("Revoke tokens","bad",go("Revoke tokens","Every device for this user must sign in again.","/users/"+u.userId+"/revoke-all",{})),
+        btn("Reset usage","ghost",go("Reset usage","Clears this user's recorded minutes.","/users/"+u.userId+"/reset-usage",{})),
+        btn("Delete","bad",go("Delete user","Their profile is marked deleted and their devices are revoked.","/ops/users/"+u.userId+"/delete",{}))
+      ))))):h("p",{class:"empty"},q.value?"No users match that search.":"No users yet."));
   }
   q.oninput=load; app.replaceChildren(h("h2",{style:"margin-top:0"},"Users"),h("div",{class:"row",style:"margin-bottom:12px"},q),box); load();
 }
@@ -386,7 +490,10 @@ async function userView(id){
   app.replaceChildren(h("button",{class:"btn ghost",on:{click:()=>show("users")}},"All users"),h("h2",{},u.email),
     h("div",{class:"row"},h("span",{class:"tag "+u.plan},u.plan),h("span",{class:"tag "+u.status},u.status),
       act(u.plan==="paid"?"Set to free":"Set to paid","set_plan","ghost",()=>confirmAction("Change plan","Switch this user.",null,(r)=>api("/users/"+id+"/plan",{method:"POST",body:JSON.stringify({plan:u.plan==="paid"?"free":"paid",reason:r})}))),
-      act(u.status==="suspended"?"Unsuspend":"Suspend","suspend","ghost",()=>confirmAction("Change suspension","Managed dictation stops on their devices while suspended.",null,(r)=>api("/users/"+id+"/suspend",{method:"POST",body:JSON.stringify({suspended:u.status!=="suspended",reason:r})})))
+      act(u.status==="suspended"?"Unsuspend":"Suspend","suspend","ghost",()=>confirmAction("Change suspension","Managed dictation stops on their devices while suspended.",null,(r)=>api("/users/"+id+"/suspend",{method:"POST",body:JSON.stringify({suspended:u.status!=="suspended",reason:r})}))),
+      act("Revoke all tokens","revoke","bad",()=>confirmAction("Revoke all tokens","Every device for this user must sign in again.",null,(r)=>api("/users/"+id+"/revoke-all",{method:"POST",body:JSON.stringify({reason:r})}))),
+      act("Reset usage","set_plan","ghost",()=>confirmAction("Reset usage","Clears this user's recorded minutes.",null,(r)=>api("/users/"+id+"/reset-usage",{method:"POST",body:JSON.stringify({reason:r})}))),
+      act("Delete user","suspend","bad",()=>confirmAction("Delete user","Their profile is marked deleted and their devices are revoked.",null,(r)=>api("/ops/users/"+id+"/delete",{method:"POST",body:JSON.stringify({reason:r})})))
     ),
     h("div",{class:"grid",style:"margin-top:14px"},stat("Today",u.usage.dailyMinutes+" min"),stat("This month",u.usage.monthlyMinutes+" min"),stat("Lifetime",u.usage.lifetimeMinutes+" min")),
     h("h2",{},"Devices"),h("div",{class:"card"},devs)
@@ -410,8 +517,11 @@ async function team(){
         h("td",{},h("span",{class:"tag "+(st.enabled?"active":"disabled")},st.enabled?"enabled":"disabled")),
         h("td",{},st.email2fa?"on":"off"),
         h("td",{},h("div",{class:"row"},
-          h("button",{class:"btn ghost",on:{click:()=>confirmAction(st.email2fa?"Turn email codes off":"Turn email codes on",(st.email2fa?"Stop":"Start")+" emailing sign-in codes to "+st.email+".",null,(r)=>api("/team/"+encodeURIComponent(st.email)+"/email-2fa",{method:"POST",body:JSON.stringify({enabled:!st.email2fa,reason:r})}))}},st.email2fa?"Turn off":"Turn on"),
-          h("button",{class:"btn "+(st.enabled?"bad":"ghost"),on:{click:()=>confirmAction(st.enabled?"Disable account":"Enable account",(st.enabled?"Disable":"Enable")+" Office access for "+st.email+".",null,(r)=>api("/team/"+encodeURIComponent(st.email)+"/enabled",{method:"POST",body:JSON.stringify({enabled:!st.enabled,reason:r})}))}},st.enabled?"Disable":"Enable")
+          h("select",{id:"role-"+st.email,style:"width:auto"},...["owner","admin","support","viewer"].map(r=>h("option",{value:r,selected:r===st.role},r))),
+          h("button",{class:"btn ghost",style:"width:auto",on:{click:()=>{const sel=document.getElementById("role-"+st.email);confirmAction("Change role","Set "+st.email+" to "+sel.value+".",null,(r)=>api("/team/"+encodeURIComponent(st.email)+"/role",{method:"POST",body:JSON.stringify({role:sel.value,reason:r})}))}}},"Save role"),
+          h("button",{class:"btn ghost",style:"width:auto",on:{click:()=>confirmAction("Resend invite","Records the invite. Office does not email their password.",null,(r)=>api("/team/"+encodeURIComponent(st.email)+"/invite",{method:"POST",body:JSON.stringify({reason:r})}))}},"Resend invite"),
+          h("button",{class:"btn ghost",style:"width:auto",on:{click:()=>confirmAction(st.email2fa?"Turn email codes off":"Turn email codes on",(st.email2fa?"Stop":"Start")+" emailing sign-in codes to "+st.email+".",null,(r)=>api("/team/"+encodeURIComponent(st.email)+"/email-2fa",{method:"POST",body:JSON.stringify({enabled:!st.email2fa,reason:r})}))}},st.email2fa?"Codes off":"Codes on"),
+          h("button",{class:"btn "+(st.enabled?"bad":"ghost"),style:"width:auto",on:{click:()=>confirmAction(st.enabled?"Remove account":"Enable account",(st.enabled?"Disable":"Enable")+" Office access for "+st.email+".",null,(r)=>api("/team/"+encodeURIComponent(st.email)+"/enabled",{method:"POST",body:JSON.stringify({enabled:!st.enabled,reason:r})}))}},st.enabled?"Remove":"Enable")
         ))
       ))):h("p",{class:"empty"},"No staff accounts yet."));
   }
