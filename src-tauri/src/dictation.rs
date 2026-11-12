@@ -1465,7 +1465,12 @@ async fn deliver(app: &AppHandle, mut outcome: Outcome, generation: u64) {
     // "Typed" as both the phase and the message is the "Typed — Typed" row.
     let message = outcome.note.clone().filter(|note| !(phase == "typed" && note.trim() == "Typed"));
     let message = if message.is_none() && phase != "typed" {
-        Some(fallback.into())
+        // "Inserted into Notepad", as in the v4 overlay. Plain "Inserted" when
+        // the target app has no readable name.
+        Some(match crate::context::app_label(insert::current_target()) {
+            Some(name) => format!("{fallback} into {name}"),
+            None => fallback.into(),
+        })
     } else {
         message
     };
@@ -1478,7 +1483,9 @@ async fn deliver(app: &AppHandle, mut outcome: Outcome, generation: u64) {
             level: 0.0,
             engine: outcome.engine.clone(),
             bands: [0.0; 4],
-            partial: None,
+            // The overlay counts these words for "Inserted into Notepad · 12 words".
+            // The text is already in the target app; the overlay is local.
+            partial: Some(outcome.text.clone()),
         },
     );
     if let Some(why) = outcome.unsure {
