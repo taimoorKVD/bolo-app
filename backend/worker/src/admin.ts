@@ -740,6 +740,15 @@ export class AdminService {
     return { ok: true, value: s };
   }
 
+  /** Resolve a bearer token. A missing or expired session is not an error. */
+  async peek(token: string | null | undefined): Promise<AdminSession | null> {
+    const s = await this.session(token);
+    if (!s) return null;
+    const acct = this.admins.get(s.email.toLowerCase());
+    if (!acct || !acct.enabled) return null;
+    return s;
+  }
+
   me(s: AdminSession) {
     const acct = this.admins.get(s.email.toLowerCase());
     const needsEnrollment = Boolean(s.needsEnrollment);

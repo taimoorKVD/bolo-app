@@ -112,13 +112,18 @@ window.addEventListener("load", function () {
     return out(await admin.enrollmentFor(token));
   }
 
+  if (req.method === "GET" && route === "/me") {
+    const s = await admin.peek(token);
+    if (!s) return json({ ok: false });
+    return json({ ok: true, ...admin.me(s) });
+  }
+
   const gate = async (action: AdminAction, target = "", reason = "") => admin.authorize(token, action, target, reason);
 
   if (req.method === "GET") {
     const g = await gate("view");
     if (!g.ok) return out(g);
     const s = g.value;
-    if (route === "/me") return json({ ok: true, ...admin.me(s) });
     // Enrollment-gated sessions may only hit /me and /enroll.
     if (admin.me(s).needsEnrollment) return error(403, "enrollment_required", "Finish authenticator setup before using Office.");
     if (route === "/dashboard") return json({ ok: true, ...admin.dashboard() });

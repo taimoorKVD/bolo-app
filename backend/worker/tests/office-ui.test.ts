@@ -14,6 +14,11 @@ describe("office shell", () => {
     expect(ADMIN_HTML).toContain("/ops/settings");
     expect(ADMIN_HTML).not.toContain("googletagmanager");
     expect(ADMIN_HTML).not.toContain("fonts.googleapis");
+    expect(ADMIN_HTML).not.toContain("cdn.tailwindcss.com");
+    expect(ADMIN_HTML).toContain('rel="icon" href="/favicon.ico"');
+    expect(ADMIN_HTML).toContain("position:fixed");
+    expect(ADMIN_HTML).toContain("sessionCheck");
+    expect(ADMIN_HTML).toContain('id="navbtn"');
     new Function(ADMIN_HTML.split("<script>").pop()!.split("</script>")[0]);
   });
 });

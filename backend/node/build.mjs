@@ -1,5 +1,20 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import * as esbuild from "esbuild";
+
+// Compile Office CSS with the Tailwind CLI (no CDN script) and inline it.
+const tw = spawnSync(
+  process.execPath,
+  ["node_modules/@tailwindcss/cli/dist/index.mjs", "-i", "office/input.css", "-o", "office/.generated.css", "--minify"],
+  { stdio: "inherit" },
+);
+if (tw.status !== 0) process.exit(tw.status ?? 1);
+const officeCss = readFileSync("office/.generated.css", "utf8");
+if (officeCss.includes("cdn.tailwindcss.com")) {
+  console.error("Office CSS must not load the Tailwind CDN");
+  process.exit(1);
+}
+writeFileSync("office/office-css.ts", `export const OFFICE_CSS = ${JSON.stringify(officeCss)};\n`);
 
 // Passenger starts `node dist/server.mjs`. Keep node_modules external so the
 // server install (nodemailer and the rest) stays the one next to the bundle.

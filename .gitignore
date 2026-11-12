@@ -43,6 +43,7 @@ backend/.wrangler/
 backend/.dev.vars
 backend/coverage/
 backend/dist/
+backend/office/.generated.css
 
 
 # Live backend env (example stays tracked)
