@@ -32,6 +32,10 @@ enum Cmd {
         id: u64,
         reply: Sender<Result<FinishedAudio, String>>,
     },
+    /// Copy the in-progress take without ending it, for a live caption.
+    Snapshot {
+        reply: Sender<Option<FinishedAudio>>,
+    },
 }
 
 struct Armed {
@@ -81,6 +85,14 @@ impl LiveTake {
         (Arc::clone(&self.level), Arc::clone(&self.bands), Arc::clone(&self.stop))
     }
 
+    /// A handle the caption thread can use without owning the take.
+    pub fn preview_handle(&self) -> PreviewMic {
+        PreviewMic {
+            cmd: self.cmd.clone(),
+            stop: Arc::clone(&self.stop),
+        }
+    }
+
     /// Milliseconds from `keydown` to audio that covers that instant.
     ///
     /// Pre-roll already holds samples from before the key, so the wait is 0.
@@ -107,6 +119,29 @@ impl LiveTake {
             Ok(result) => result,
             Err(_) => Err("Stopping the microphone timed out.".into()),
         }
+    }
+}
+
+/// Asks the warm thread for a copy of the samples captured so far.
+pub struct PreviewMic {
+    cmd: Sender<Cmd>,
+    stop: Arc<AtomicBool>,
+}
+
+impl PreviewMic {
+    pub fn stopped(&self) -> bool {
+        self.stop.load(Ordering::Relaxed)
+    }
+
+    pub fn snapshot(&self) -> Option<FinishedAudio> {
+        if self.stopped() {
+            return None;
+        }
+        let (tx, rx) = mpsc::channel();
+        if self.cmd.send(Cmd::Snapshot { reply: tx }).is_err() {
+            return None;
+        }
+        rx.recv_timeout(Duration::from_millis(400)).ok().flatten()
     }
 }
 
@@ -541,7 +576,28 @@ fn handle_cmd(cmd: Cmd, state: &Arc<Mutex<Capture>>, watch: &Watch, next_id: &mu
             }
             let _ = reply.send(result);
         }
+        Cmd::Snapshot { reply } => {
+            let audio = state.lock().ok().and_then(|guard| snapshot_capture(&guard));
+            let _ = reply.send(audio);
+        }
     }
+}
+
+fn snapshot_capture(guard: &Capture) -> Option<FinishedAudio> {
+    let samples = guard.take.as_ref()?;
+    if samples.is_empty() {
+        return None;
+    }
+    Some(FinishedAudio {
+        interleaved: samples.clone(),
+        channels: guard.channels,
+        sample_rate: guard.sample_rate,
+        elapsed_ms: guard
+            .take_started
+            .map(|at| at.elapsed().as_millis() as u64)
+            .unwrap_or(0),
+        noise_rms: guard.noise_rms,
+    })
 }
 
 fn io_loop(state: Arc<Mutex<Capture>>, live: Arc<AtomicBool>, watch: Arc<Watch>) {

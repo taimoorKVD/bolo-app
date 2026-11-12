@@ -96,13 +96,27 @@ export function shapeVoice(level: number, bands?: number[] | null): Voice {
   };
 }
 
-export function pillModel(phase: DictationPhase | string, message: string | null | undefined): PillModel {
+/** Keep the newest words when a caption is longer than the pill. */
+export function tailWords(text: string, max = 42): string {
+  const trimmed = text.replace(/\s+/g, " ").trim();
+  const chars = Array.from(trimmed);
+  if (chars.length <= max) return trimmed;
+  return `…${chars.slice(chars.length - max).join("").trimStart()}`;
+}
+
+export function pillModel(
+  phase: DictationPhase | string,
+  message: string | null | undefined,
+  partial?: string | null,
+): PillModel {
   const state = characterState(phase);
   const text = publicProblem(message);
+  const heard = tailWords(partial ?? "");
   if (state === "listening") {
-    return { line: text || "Listening", status: "", detail: "", showLine: true, showStatus: false };
+    return { line: heard || text || "Listening", status: "", detail: "", showLine: true, showStatus: false };
   }
   if (state === "thinking") {
+    if (heard) return { line: heard, status: "", detail: "", showLine: true, showStatus: false };
     if (text) return { line: text, status: "", detail: "", showLine: true, showStatus: false };
     const status = phase === "inserting" ? "Inserting…" : "Writing…";
     return { line: "", status, detail: "", showLine: false, showStatus: true };
@@ -113,6 +127,17 @@ export function pillModel(phase: DictationPhase | string, message: string | null
   }
   if (state === "error") return errorPill(text);
   return { line: "", status: "", detail: "", showLine: false, showStatus: false };
+}
+
+/** Words for the classic overlay. Empty until a live preview arrives. */
+export function liveCaption(
+  phase: DictationPhase | string,
+  message: string | null | undefined,
+  partial?: string | null,
+): string {
+  const model = pillModel(phase, message, partial);
+  if (!model.showLine || !model.line || model.line === "Listening") return "";
+  return model.line;
 }
 
 function errorPill(text: string): PillModel {

@@ -113,6 +113,9 @@ pub fn overlay_logical_size(listener: &str, phase: &str) -> (f64, f64) {
         (560.0, 220.0)
     } else if phase == "error" {
         (280.0, 200.0)
+    } else if matches!(phase, "arming" | "recording" | "transcribing" | "inserting") {
+        // Room under the clip for the live words.
+        (300.0, 214.0)
     } else {
         (268.0, 150.0)
     }
@@ -852,7 +855,8 @@ mod carryover {
         assert_eq!(normalize_listener("SPIRIT"), "spirit");
         assert_eq!(normalize_listener("pebble"), "pebble");
         assert!(listener_is_animated("buddy") && listener_is_animated("spirit") && listener_is_animated("pebble"));
-        assert_eq!(overlay_logical_size("classic", "recording"), (268.0, 150.0));
+        assert_eq!(overlay_logical_size("classic", "recording"), (300.0, 214.0));
+        assert_eq!(overlay_logical_size("classic", "done"), (268.0, 150.0));
         assert_eq!(overlay_logical_size("classic", "error"), (280.0, 200.0));
         assert_eq!(overlay_logical_size("blob", "recording"), (560.0, 220.0));
         assert_eq!(overlay_logical_size("blob", "error"), (560.0, 220.0));

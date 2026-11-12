@@ -7,6 +7,7 @@ import {
 } from "./characters";
 import { CuePlayer } from "./cues";
 import { buildFixCard, resetFixCard } from "./fix-card";
+import { liveCaption } from "./blob-state";
 import { normalizeListener, type ListenerId } from "./listener-style";
 import type { DictationEvent, DictationPhase, Settings } from "./types";
 
@@ -70,8 +71,10 @@ function mountClassicOverlay(root: HTMLElement): () => void {
   stage.classList.toggle("alpha", initial.alpha);
   const note = el("p", "listener-note");
   note.hidden = true;
+  const live = el("p", "listener-live");
+  live.hidden = true;
   const fixCard = buildFixCard();
-  stage.append(listen, write, hide, note, fixCard);
+  stage.append(listen, write, hide, live, note, fixCard);
   root.append(stage);
 
   const cues = new CuePlayer();
@@ -130,7 +133,8 @@ function mountClassicOverlay(root: HTMLElement): () => void {
     stage.style.setProperty("--gain", gain.toFixed(3));
     // Keep listen playback steady; gain-tied rate changes made the loop look jerky.
     if (!listen.paused && listen.playbackRate !== 1) listen.playbackRate = 1;
-    stage.setAttribute("aria-label", announce(event.phase, event.message));
+    const words = liveCaption(event.phase, event.message, event.partial);
+    stage.setAttribute("aria-label", words || announce(event.phase, event.message));
 
     if (next !== pose) {
       if (next === "leave") {
@@ -181,6 +185,8 @@ function mountClassicOverlay(root: HTMLElement): () => void {
     if (next === "fix") resetFixCard(fixCard);
     note.textContent = problem;
     note.hidden = problem.length === 0;
+    live.textContent = words;
+    live.hidden = words.length === 0 || next === "error" || next === "fix";
     root.hidden = next === "hidden";
     if (next === "hidden" && pendingRefresh) {
       pendingRefresh = false;
@@ -312,7 +318,7 @@ function overlayProblem(message: string | null): string {
 
 function demoEvent(demo: string | null): DictationEvent {
   if (demo === "transcribing" || demo === "inserting") {
-    return { phase: "transcribing", message: null, elapsedMs: 2400, level: 0 };
+    return { phase: "transcribing", message: null, elapsedMs: 2400, level: 0, partial: "ship the notes to Sam by Friday" };
   }
   if (demo === "error") {
     return {
@@ -326,7 +332,7 @@ function demoEvent(demo: string | null): DictationEvent {
     return { phase: "done", message: "Inserted", elapsedMs: 1800, level: 0, engine: "Groq" };
   }
   if (demo === "arming") {
-    return { phase: "recording", message: null, elapsedMs: 0, level: 0.4 };
+    return { phase: "recording", message: null, elapsedMs: 0, level: 0.4, partial: "ship the notes to Sam by Friday" };
   }
   if (demo === "fix") {
     return { phase: "fix", message: null, elapsedMs: 0, level: 0 };
@@ -340,6 +346,7 @@ function demoEvent(demo: string | null): DictationEvent {
     elapsedMs: 4200,
     level: 0.62,
     engine: "Groq",
+    partial: "ship the notes to Sam by Friday",
   };
 }
 
