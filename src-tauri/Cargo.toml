@@ -1,6 +1,6 @@
 [package]
 name = "bolo"
-version = "0.1.17"
+version = "0.1.18"
 description = "Bolo push-to-talk voice dictation for Windows"
 authors = ["Bolo"]
 edition = "2021"
