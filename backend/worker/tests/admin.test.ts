@@ -30,6 +30,9 @@ describe("admin role permissions", () => {
   it("rejects unauthenticated and wrong-code sign-in", async () => {
     const s = await stack();
     expect((await s.call("/admin/api/users")).status).toBe(401);
+    const me = await s.call("/admin/api/me");
+    expect(me.status).toBe(200);
+    expect(me.json.ok).toBe(false);
     expect((await s.call("/admin/api/login", { method: "POST", body: { email: "owner@example.com", code: "000000" } })).status).toBe(401);
     expect((await s.call("/admin/api/login", { method: "POST", body: { email: "stranger@example.com", code: MOCK_TOTP_CODE } })).status).toBe(401);
   });

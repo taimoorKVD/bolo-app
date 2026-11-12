@@ -1,36 +1,13 @@
+import { OFFICE_CSS } from "../../office/office-css";
+
 /** One-time owner password bootstrap. Split layout, no nav, no external assets. */
 export const SETUP_HTML = String.raw`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
 <title>Bolo Office Setup</title>
-<style>
-:root{--bg:#0c0b09;--line:#3a3224;--gold:#e0b85a;--gold2:#f3d48a;--text:#f6f1e6;--mute:#cbbfa8;--bad:#ffb4a8}
-*{box-sizing:border-box}html,body{margin:0;min-height:100%}
-body{background:#0e0d0b;color:var(--text);font:16px/1.5 "Segoe UI",system-ui,sans-serif}
-[hidden]{display:none !important}
-#gate{min-height:100vh;display:flex}
-.brand{flex:1.05;display:flex;flex-direction:column;justify-content:center;padding:64px 56px;position:relative;overflow:hidden;background:
-radial-gradient(900px 420px at 15% 0%,rgba(224,184,90,.2),transparent 60%),linear-gradient(165deg,#1c160e,#0c0b09 58%)}
-.mark{font-weight:800;font-size:28px;letter-spacing:.2px;color:var(--gold)}.mark span{color:var(--text);font-weight:560;margin-left:8px;font-size:18px}
-.brand h2{font-size:34px;line-height:1.15;margin:18px 0 10px;font-weight:650;max-width:16ch}
-.lede{color:var(--mute);max-width:38ch;margin:0}
-.wave{position:absolute;left:0;right:0;bottom:0;color:rgba(224,184,90,.45);width:100%}
-.panel{flex:.95;display:flex;align-items:center;justify-content:center;padding:40px 28px}
-.card{width:100%;max-width:420px}
-h1{font-size:26px;margin:0 0 8px;font-weight:650}
-.mute{color:var(--mute)}
-label{display:block;color:var(--mute);font-size:12px;font-weight:650;letter-spacing:.06em;text-transform:uppercase;margin:16px 0 6px}
-input{width:100%;height:48px;background:#0c0b09;border:1px solid var(--line);color:var(--text);border-radius:12px;padding:0 14px;font:inherit}
-input:focus{outline:none;border-color:var(--gold);box-shadow:0 0 0 3px rgba(224,184,90,.28)}
-.btn{margin-top:18px;width:100%;height:48px;background:linear-gradient(180deg,#f0d48a,#d4af37);color:#1a1408;border:0;border-radius:12px;font:inherit;font-weight:750;cursor:pointer}
-.btn[disabled]{opacity:.55;cursor:not-allowed}
-.err{color:var(--bad);margin:12px 0 0;min-height:0}
-.ok{color:var(--gold2);margin:12px 0 0}
-@media (max-width:860px){
-#gate{flex-direction:column}.panel{order:1;padding:28px 18px 8px}.brand{order:2;padding:12px 22px 28px}
-.brand h2,.wave{display:none}.mark{font-size:22px}
-}
-</style></head><body>
+<link rel="icon" href="/favicon.ico" type="image/x-icon">
+<style>/*OFFICE_CSS*/</style>
+</head><body>
 <div id="gate">
 <section class="brand">
   <div class="mark">Bolo <span>Office</span></div>
@@ -71,4 +48,5 @@ document.getElementById("f").addEventListener("submit", async (e)=>{
   }catch(_){ err.textContent="Setup failed."; err.hidden=false; go.disabled=false; go.textContent="Set owner password"; }
 });
 </script>
-</body></html>`;
+</body></html>`.replace("/*OFFICE_CSS*/", () => OFFICE_CSS);
+

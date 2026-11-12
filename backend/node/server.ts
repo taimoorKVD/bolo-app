@@ -13,6 +13,7 @@ import { FileStateStore, SupabaseStateStore, autosave, restore, snapshot } from 
 import { loadDotEnv } from "./load-env";
 import { boloProxyContactPhp as proxyContactPhp, tryStatic } from "./static";
 import { ROBOTS_TXT, normalizeHost, officeHostFromEnv, originAllowed, routeRequest } from "./office-host";
+import { writeFavicon } from "./favicon";
 
 // Named exactly as the website deploy's route patch searches, so a later
 // site publish leaves this file alone instead of inserting a second proxy.
@@ -169,6 +170,7 @@ async function main() {
         officeApiBase = decision.apiBase;
       }
       const rawPath = (req.url || "/").split("?")[0];
+      if (writeFavicon(methodEarly, rawPath, res)) return;
       const isApi = rawPath === "/v1" || rawPath.startsWith("/v1/") || rawPath === "/health" || rawPath === "/admin" || rawPath.startsWith("/admin/");
       if (!onOffice && rawPath === "/updates/latest.json" && (methodEarly === "GET" || methodEarly === "HEAD")) {
         const pinned = admin.ops.pinnedLatest();
