@@ -66,6 +66,9 @@ jobs:
         env:
           BOLO_BUILTIN_GROQ_KEY: ${{ secrets.GROQ_API_KEY }}
         run: |
+          $key = if ($env:BOLO_BUILTIN_GROQ_KEY) { $env:BOLO_BUILTIN_GROQ_KEY.Trim() } else { "" }
+          Write-Host "builtin-key-bytes=$($key.Length)"
+          if ($key.Length -eq 0) { throw "GROQ_API_KEY secret is missing or empty. The built-in key was not embedded, so this build will not be published." }
           # Updater artifacts are signed in the next step, so the build never prompts for a password.
           '{"bundle":{"createUpdaterArtifacts":false}}' | Set-Content updater-off.conf.json -Encoding utf8NoBOM
           npx tauri build --bundles nsis --config updater-off.conf.json
