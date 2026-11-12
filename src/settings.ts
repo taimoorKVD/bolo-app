@@ -13,6 +13,7 @@ import {
   soundUrl,
   type CharacterGroup,
 } from "./characters";
+import { normalizeListener } from "./listener-style";
 import lockupUrl from "./brand-lockup.svg";
 import { formatDuration, formatHotkey, formatWhen, modelLabel } from "./format";
 import { listenerNotice, statusBanner, visibleMessage } from "./notices";
@@ -115,6 +116,7 @@ function normalizeSettings(settings: Settings): Settings {
     verbatim: settings.verbatim === true,
     cleanupModel: settings.cleanupModel?.trim() || "openai/gpt-oss-20b",
     character: findCharacter(settings.character).id,
+    listener: normalizeListener(settings.listener),
     soundPack: SOUND_PACKS.some(([id]) => id === settings.soundPack) ? settings.soundPack : "match",
     soundVolume:
       typeof settings.soundVolume === "number" && Number.isFinite(settings.soundVolume)
@@ -1163,7 +1165,7 @@ function characterPanel(draft: Draft): HTMLElement {
   const panel = panelEl(
     "character",
     "Character & sounds",
-    "Pick who listens while you talk.",
+    "Bolo Blob is the listener. Classic keeps the characters below.",
   );
   panel.classList.add("character-panel");
   const s = draft.settings;
@@ -1438,11 +1440,47 @@ function characterPanel(draft: Draft): HTMLElement {
 
   smart.classList.add("card", "rows");
   all.append(tabs, grid);
-  panel.append(preview, featured, seeAll, all, sounds, smart);
+  const listenerPick = el("div", "listener-pick");
+  const listenerNote = el("p", "field-note");
+  for (const [id, label] of [
+    ["blob", "Bolo Blob"],
+    ["classic", "Classic"],
+  ] as const) {
+    const choice = document.createElement("button");
+    choice.type = "button";
+    choice.className = "ghost";
+    choice.dataset.listener = id;
+    choice.textContent = label;
+    choice.addEventListener("click", () => {
+      s.listener = id;
+      markDirty(draft);
+      paintListener();
+    });
+    listenerPick.append(choice);
+  }
+  const classicUi = el("div", "classic-listener");
+  classicUi.append(preview, featured, seeAll, all, smart);
+  const paintListener = () => {
+    const id = normalizeListener(s.listener);
+    for (const choice of listenerPick.querySelectorAll<HTMLButtonElement>("button")) {
+      const on = choice.dataset.listener === id;
+      choice.classList.toggle("is-on", on);
+      choice.setAttribute("aria-pressed", String(on));
+    }
+    listenerNote.textContent =
+      id === "classic"
+        ? "The classic overlay plays the character clips below."
+        : "Bolo Blob pops in while you hold the hotkey, follows your voice, then tucks away.";
+    classicUi.hidden = id !== "classic";
+    if (id === "classic") void video.play().catch(() => {});
+    else video.pause();
+  };
+  panel.append(listenerPick, listenerNote, classicUi, sounds);
   paintFeatured();
   paintGrid();
   paintPreview();
   paintPackHint();
+  paintListener();
   return panel;
 }
 

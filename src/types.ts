@@ -25,8 +25,10 @@ export type Settings = {
   verbatim: boolean;
   /** Groq chat model for cleanup and mixed-language translation. */
   cleanupModel: string;
-  /** Overlay character id. `classic` is the plush listener. */
+  /** Overlay character id. `classic` is the plush listener. Used by the classic overlay. */
   character: string;
+  /** `blob` is the animated Bolo Blob. `classic` keeps the clip overlay. */
+  listener: string;
   /** Sound pack id, `match` (follow the character) or `off`. */
   soundPack: string;
   /** 0..1 */
@@ -170,6 +172,8 @@ export type DictationEvent = {
   elapsedMs: number;
   level: number;
   engine?: string | null;
+  /** 80–300, 300–1100, 1100–3200, 3200–8000 Hz, each 0..1. Present while recording. */
+  bands?: number[];
 };
 
 export interface AudioHealth {

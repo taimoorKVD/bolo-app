@@ -1,6 +1,7 @@
 mod accuracy;
 pub mod measure;
 mod audio;
+mod bands;
 mod builtin;
 mod chunk;
 mod cleanup;

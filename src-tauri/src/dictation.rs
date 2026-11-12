@@ -41,6 +41,9 @@ pub struct DictationEvent {
     /// "Groq", "On this PC", or "Groq + on this PC" once a take has a transcript.
     #[serde(default)]
     pub engine: Option<String>,
+    /// 80–300, 300–1100, 1100–3200, 3200–8000 Hz, each 0..1.
+    #[serde(default)]
+    pub bands: [f32; 4],
 }
 
 enum Phase {
@@ -277,13 +280,14 @@ fn recording_caption(hands_free: bool, _note: &Option<String>) -> Option<String>
     }
 }
 
-fn instant_listen_event(level: f32) -> DictationEvent {
+fn instant_listen_event(level: f32, bands: [f32; 4]) -> DictationEvent {
     DictationEvent {
         phase: "recording".into(),
         message: None,
         elapsed_ms: 0,
         level,
         engine: None,
+        bands,
     }
 }
 
@@ -339,6 +343,7 @@ fn on_press(app: &AppHandle) {
                     elapsed_ms: started,
                     level: 0.0,
                     engine: None,
+                    bands: [0.0; 4],
                 },
             );
         }
@@ -460,7 +465,7 @@ pub fn begin(app: &AppHandle) {
     }
     // Listening is on screen before the warm thread is asked to do anything.
     // That thread only copies the pre-roll; it does not open the microphone.
-    publish(app, &instant_listen_event(state.warm.level()));
+    publish(app, &instant_listen_event(state.warm.level(), state.warm.bands()));
     let overlay_ms = keydown.elapsed().as_millis() as u64;
     {
         let mut engine = lock(&state.engine);
@@ -502,7 +507,7 @@ pub fn begin(app: &AppHandle) {
 
 fn on_armed(app: &AppHandle, take: LiveTake, generation: u64) {
     let state = app.state::<AppState>();
-    let (level, stop_flag) = take.meter();
+    let (level, bands, stop_flag) = take.meter();
     let started = take.started;
     let note = take.device_note.clone();
     let device_name = take.active_name.clone();
@@ -532,10 +537,10 @@ fn on_armed(app: &AppHandle, take: LiveTake, generation: u64) {
     }
     match action {
         AfterArm::Listen => {
-            spawn_meter(app.clone(), level, stop_flag, started, None, generation);
+            spawn_meter(app.clone(), level, bands.clone(), stop_flag, started, None, generation);
         }
         AfterArm::WaitSecondTap => {
-            spawn_meter(app.clone(), level, stop_flag, started, None, generation);
+            spawn_meter(app.clone(), level, bands.clone(), stop_flag, started, None, generation);
             {
                 let mut engine = lock(&state.engine);
                 engine.awaiting_second = true;
@@ -677,6 +682,7 @@ pub fn end(app: &AppHandle) {
             elapsed_ms: held_ms,
             level: 0.0,
             engine: None,
+            bands: [0.0; 4],
         },
     );
     let app = app.clone();
@@ -811,10 +817,11 @@ pub fn paste_last(app: &AppHandle) {
                         elapsed_ms: 0,
                         level: 0.0,
                         engine: None,
+                        bands: [0.0; 4],
                     },
                 );
                 let generation = lock(&app.state::<AppState>().engine).generation;
-                schedule_hide(app, generation, DISMISS_MS);
+                schedule_hide(app.clone(), generation, hide_delay(&app));
             }
             Ok(_) => {
                 publish(
@@ -825,9 +832,10 @@ pub fn paste_last(app: &AppHandle) {
                         elapsed_ms: 0,
                         level: 0.0,
                         engine: None,
+                        bands: [0.0; 4],
                     },
                 );
-                schedule_hide(app.clone(), lock(&app.state::<AppState>().engine).generation, DISMISS_MS);
+                schedule_hide(app.clone(), lock(&app.state::<AppState>().engine).generation, hide_delay(&app));
             }
             Err(err) => fail(&app, &format!("Couldn't paste the last take ({err}).")),
         }
@@ -933,8 +941,13 @@ fn schedule_online_retry(app: AppHandle) {
                             elapsed_ms: 0,
                             level: 0.0,
                             engine: None,
+                            bands: [0.0; 4],
                         },
                     );
+                    if store::listener_is_animated(&lock(&app.state::<AppState>().settings).listener) {
+                        let generation = lock(&app.state::<AppState>().engine).generation;
+                        schedule_hide(app.clone(), generation, store::dismiss_ms("blob"));
+                    }
                 }
                 _ => {
                     log_line(&config_dir, "info", "retried take is saved for paste-again");
@@ -949,6 +962,7 @@ fn schedule_online_retry(app: AppHandle) {
 fn spawn_meter(
     app: AppHandle,
     level: Arc<AtomicU32>,
+    bands: Arc<[AtomicU32; 4]>,
     stop: Arc<AtomicBool>,
     started: Instant,
     note: Option<String>,
@@ -973,6 +987,7 @@ fn spawn_meter(
                     elapsed_ms: elapsed.as_millis() as u64,
                     level: (rms * 4.5).clamp(0.0, 1.0),
                     engine: None,
+                    bands: crate::bands::read_bands(&bands),
                 },
             );
             std::thread::sleep(Duration::from_millis(80));
@@ -1312,11 +1327,15 @@ async fn deliver(app: &AppHandle, mut outcome: Outcome, generation: u64) {
             elapsed_ms: outcome.duration_ms,
             level: 0.0,
             engine: outcome.engine.clone(),
+            bands: [0.0; 4],
         },
     );
     if let Some(why) = outcome.unsure {
         crate::logbuf::log_line(&state.config_dir, "info", &format!("unsure take ({why}); offering Fix last"));
         schedule_fix_offer(app.clone(), generation);
+    } else if store::listener_is_animated(&lock(&state.settings).listener) {
+        // The blob celebrates, then tucks away. The classic clip fades in place.
+        schedule_hide(app.clone(), generation, store::dismiss_ms("blob"));
     }
 }
 
@@ -1342,6 +1361,7 @@ fn schedule_fix_offer(app: AppHandle, generation: u64) {
                 elapsed_ms: 0,
                 level: 0.0,
                 engine: None,
+                bands: [0.0; 4],
             },
         );
         schedule_hide(app, generation, FIX_OFFER_MS);
@@ -1376,6 +1396,7 @@ pub(crate) fn show_phase(app: &AppHandle, phase: &str, message: Option<String>) 
             elapsed_ms: 0,
             level: 0.0,
             engine: None,
+            bands: [0.0; 4],
         },
     );
 }
@@ -1593,7 +1614,13 @@ fn fail(app: &AppHandle, message: &str) {
 fn hint(app: &AppHandle, message: &str) {
     let state = app.state::<AppState>();
     log_line(&state.config_dir, "info", &format!("hint {message}"));
-    // Silence and a short tap are normal. Hide the pill instead of flashing an error.
+    let animated = store::listener_is_animated(&lock(&state.settings).listener);
+    if animated {
+        // No speech is an error pose on the character, then the window hides.
+        show_problem(app, message, 2_600);
+        return;
+    }
+    // The classic overlay treats silence and a short tap as normal and hides.
     publish(
         app,
         &DictationEvent {
@@ -1602,6 +1629,7 @@ fn hint(app: &AppHandle, message: &str) {
             elapsed_ms: 0,
             level: 0.0,
             engine: None,
+            bands: [0.0; 4],
         },
     );
 }
@@ -1617,13 +1645,20 @@ fn show_problem(app: &AppHandle, message: &str, hide_ms: u64) {
             elapsed_ms: 0,
             level: 0.0,
             engine: None,
+            bands: [0.0; 4],
         },
     );
     schedule_hide(app.clone(), generation, hide_ms);
 }
 
-/// Long enough for the overlay's dismiss motion and sound, then the window hides.
+/// Long enough for the classic overlay's dismiss motion and sound, then the window hides.
 const DISMISS_MS: u64 = 700;
+
+fn hide_delay(app: &AppHandle) -> u64 {
+    let state = app.state::<AppState>();
+    let listener = lock(&state.settings).listener.clone();
+    store::dismiss_ms(&listener)
+}
 /// How long the overlay offers "Fix last" after a paste.
 const FIX_OFFER_MS: u64 = 6_000;
 
@@ -1644,6 +1679,7 @@ fn schedule_hide(app: AppHandle, generation: u64, delay_ms: u64) {
                     elapsed_ms: 0,
                     level: 0.0,
                     engine: None,
+                    bands: [0.0; 4],
                 },
             );
         }
@@ -1674,11 +1710,12 @@ fn publish(app: &AppHandle, event: &DictationEvent) {
         let _ = overlay.hide();
         return;
     }
-    let (width, height) = if event.phase == "error" {
-        (280.0, 200.0)
-    } else {
-        (268.0, 150.0)
+    let listener = {
+        let state = app.state::<AppState>();
+        let listener = lock(&state.settings).listener.clone();
+        listener
     };
+    let (width, height) = store::overlay_logical_size(&listener, &event.phase);
     let _ = overlay.set_size(LogicalSize::new(width, height));
     // A transparent window otherwise clears to black for a frame when it is shown.
     let _ = overlay.set_background_color(Some(tauri::window::Color(0, 0, 0, 0)));
@@ -1799,12 +1836,12 @@ mod tests {
 
     #[test]
     fn keydown_shows_listening_immediately() {
-        let event = instant_listen_event(0.4);
+        let event = instant_listen_event(0.4, [0.0; 4]);
         assert_eq!(event.phase, "recording");
         assert!(event.message.is_none());
         assert_ne!(event.phase, "arming");
         let started = Instant::now();
-        let _ = instant_listen_event(0.0);
+        let _ = instant_listen_event(0.0, [0.0; 4]);
         let overlay_ms = started.elapsed().as_millis() as u64;
         assert!(overlay_ms < 50, "building the Listening event took {overlay_ms} ms");
     }
