@@ -1417,7 +1417,7 @@ async fn deliver(app: &AppHandle, mut outcome: Outcome, generation: u64) {
         &state.config_dir,
         "info",
         &format!(
-            "inserted chars={} cleaned={} via={} verified={} engine={}",
+            "inserted chars={} cleaned={} via={} verified={} engine={}{}",
             outcome.text.chars().count(),
             outcome.cleaned,
             match inserted.method {
@@ -1428,10 +1428,16 @@ async fn deliver(app: &AppHandle, mut outcome: Outcome, generation: u64) {
                 (_, true) => "true",
                 // Typing into an app that can't be read back (browsers, Electron)
                 // is not a failure; it just can't be confirmed.
-                (InsertMethod::Typed, false) => "unconfirmed",
+                // Not a failure: the app's text can't be read back, so the
+                // typed words can't be checked. Logged as such, with the
+                // reason the clipboard paste was skipped.
+                (InsertMethod::Typed, false) => "unreadable",
                 (InsertMethod::Clipboard, false) => "changed",
             },
-            outcome.engine.as_deref().unwrap_or("none")
+            outcome.engine.as_deref().unwrap_or("none"),
+            insert::take_last_fallback()
+                .map(|why| format!(" fallback=\"{}\"", why.replace('"', "'")))
+                .unwrap_or_default()
         ),
     );
     let history_id = remember(app, &outcome);

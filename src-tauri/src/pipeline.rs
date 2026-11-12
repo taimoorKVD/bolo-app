@@ -638,9 +638,16 @@ async fn speech_raw(
             prompt.map(str::to_string)
         };
         crate::diag::note(format!("repin lang={pin} prompt={:?}", pin_prompt));
+        let mut locked = false;
         if let Ok(pinned) = via.transcribe(audio.clone(), model, pin, pin_prompt.clone()).await {
             crate::diag::note(format!("repin text={}", pinned.text));
-            if keep_repass(&spoken, &pinned) {
+            // Language lock: Auto means English + Urdu. A first pass in any
+            // other language is not the user's words, so a non-empty pinned
+            // pass always wins, even when Whisper marked it doubtful. Keeping
+            // the doubtful-check here sent a French mis-detection to audio
+            // translation, which pasted "Bye." (0.1.19 diag.log).
+            if !pinned.text.trim().is_empty() {
+                locked = true;
                 let tries = spoken.tries.saturating_add(pinned.tries);
                 spoken = pinned;
                 spoken.tries = tries;
@@ -648,6 +655,13 @@ async fn speech_raw(
                 flags.repass = true;
                 crate::measure::note_call("redecode", model, pin, pin_prompt.as_deref(), &spoken.language, &spoken.text);
             }
+        }
+        if !locked {
+            // The pinned pass failed or was empty. Still never route an
+            // off-list language to translation: keep the words and tag them
+            // with the pinned language so they are transcribed as-is.
+            crate::diag::note(format!("language lock: pinned pass empty; retag {} as {pin}", spoken.language));
+            spoken.language = pin.into();
         }
     }
     if urdu_needs_clean_pass(language, &spoken.language, &spoken.text) && !flags.repass {
@@ -1096,6 +1110,8 @@ pub(crate) mod fake {
         translation: Option<String>,
         pub fail_translate: bool,
         pub doubt: bool,
+        /// Calls at or after this index come back doubtful.
+        pub doubt_from: Option<usize>,
     }
 
     impl FakeVia {
@@ -1106,6 +1122,7 @@ pub(crate) mod fake {
                 translation: translation.map(str::to_string),
                 fail_translate: false,
                 doubt: false,
+                doubt_from: None,
             }
         }
         fn push(&self, kind: String, language: &str, prompt: Option<String>) {
@@ -1113,8 +1130,10 @@ pub(crate) mod fake {
         }
         pub fn transcribe(&self, model: &str, language: &str, prompt: Option<String>) -> anyhow::Result<Transcript> {
             self.push(format!("transcribe:{model}"), language, prompt);
+            let index = self.calls.lock().unwrap().len() - 1;
+            let doubtful = self.doubt || self.doubt_from.is_some_and(|from| index >= from);
             let (text, language) = self.replies.lock().unwrap().pop_front().ok_or_else(|| anyhow::anyhow!("no reply"))?;
-            Ok(Transcript { text, tries: 1, language, doubtful: self.doubt })
+            Ok(Transcript { text, tries: 1, language, doubtful })
         }
         pub fn translate(&self, prompt: Option<&str>) -> anyhow::Result<Transcript> {
             self.push("translate".into(), "", prompt.map(str::to_string));
@@ -1219,6 +1238,32 @@ mod via_tests {
         assert_eq!(calls[1].1, "en");
         assert_ne!(calls[1].2.as_deref(), Some(transcribe::URDU_PROMPT));
         assert_eq!(got.text, "please send the invoice by Friday");
+    }
+
+    #[test]
+    fn french_misdetection_keeps_the_doubtful_english_pass_and_never_translates() {
+        // 0.1.19 diag.log take 1a1d0c49c69-d: detected=fr, repin text was
+        // doubtful and dropped, then audio translation pasted "Bye.".
+        let mut fake = FakeVia::new(
+            &[("Enfin, voilà, on se rendra compte.", "fr"), ("I'm not a scientist.", "en")],
+            None,
+        );
+        fake.doubt_from = Some(1);
+        let got = run(&fake, "auto", "english", Some("Bolo"));
+        let calls = fake.calls.lock().unwrap();
+        assert!(calls.iter().all(|c| c.0 != "translate"), "no audio translation: {calls:?}");
+        assert_eq!(got.text, "I'm not a scientist.");
+        assert_eq!(got.language, "en");
+        assert!(got.path.starts_with("transcribe"), "{}", got.path);
+    }
+
+    #[test]
+    fn french_misdetection_with_an_empty_pinned_pass_is_not_translated() {
+        let fake = FakeVia::new(&[("Enfin, voilà.", "fr"), ("", "en")], None);
+        let got = run(&fake, "auto", "english", None);
+        let calls = fake.calls.lock().unwrap();
+        assert!(calls.iter().all(|c| c.0 != "translate"), "no audio translation: {calls:?}");
+        assert_eq!(got.text, "Enfin, voilà.");
     }
 
     #[test]

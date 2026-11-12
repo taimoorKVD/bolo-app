@@ -1276,6 +1276,7 @@ pub fn learn_terms_with(
     blocked: &[String],
 ) -> Vec<String> {
     let mut added = Vec::new();
+    let mut seen_this_take: Vec<String> = Vec::new();
     let mut after_stop = true;
     for word in text.split_whitespace() {
         let sentence_start = after_stop;
@@ -1299,16 +1300,25 @@ pub fn learn_terms_with(
         if dictionary.iter().any(|term| term.eq_ignore_ascii_case(bare)) {
             continue;
         }
-        if !tech_shaped(bare) {
-            if let Some(pos) = pending.iter().position(|w| w.eq_ignore_ascii_case(bare)) {
-                pending.remove(pos);
-            } else {
-                pending.push(bare.to_string());
-                if pending.len() > 200 {
-                    pending.remove(0);
-                }
-                continue;
+        if near_miss_of_known(bare, dictionary) {
+            // "BoloM" next to "Bolo", "KBHRMS" next to "KVHRMS": a
+            // mishearing of a word Bolo already knows, not a new word.
+            continue;
+        }
+        // Every term, tech-shaped or not, needs a second take before it is
+        // learned. 0.1.19 learned "BoloM" and "DDeveloper" from one take.
+        if seen_this_take.iter().any(|w| w.eq_ignore_ascii_case(bare)) {
+            continue;
+        }
+        if let Some(pos) = pending.iter().position(|w| w.eq_ignore_ascii_case(bare)) {
+            pending.remove(pos);
+        } else {
+            seen_this_take.push(bare.to_string());
+            pending.push(bare.to_string());
+            if pending.len() > 200 {
+                pending.remove(0);
             }
+            continue;
         }
         dictionary.push(bare.to_string());
         added.push(bare.to_string());
@@ -1333,6 +1343,54 @@ fn style_samples_line() -> String {
         "\nFor reference only, this speaker usually writes like: {}. Match their spelling of names and their punctuation habits. Never copy words from these examples.",
         joined.join(" ")
     )
+}
+
+/// A tech-shaped or all-caps word one edit away from a known term
+/// (KBHRMS vs KVHRMS, BoloM vs Bolo), or with a doubled leading capital
+/// (DDeveloper). Plain names (Taha, Talha) are left alone, and a plural
+/// "s" (API -> APIs) is not a near miss.
+pub(crate) fn near_miss_of_known(word: &str, dictionary: &[String]) -> bool {
+    let chars: Vec<char> = word.chars().collect();
+    if chars.len() >= 3
+        && chars[0].is_ascii_uppercase()
+        && chars[0] == chars[1]
+        && chars[2].is_ascii_lowercase()
+    {
+        return true;
+    }
+    let caps = chars.len() >= 2 && chars.iter().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit());
+    if !(tech_shaped(word) || caps) {
+        return false;
+    }
+    let lower = word.to_ascii_lowercase();
+    dictionary.iter().any(|term| {
+        let term_lower = term.to_ascii_lowercase();
+        if term_lower.chars().count() < 4 || term_lower == lower {
+            return false;
+        }
+        if word.ends_with('s') && word[..word.len() - 1].eq_ignore_ascii_case(term) {
+            return false;
+        }
+        edit_distance_at_most_one(&lower, &term_lower)
+    })
+}
+
+fn edit_distance_at_most_one(a: &str, b: &str) -> bool {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let (short, long) = if a.len() <= b.len() { (&a, &b) } else { (&b, &a) };
+    if long.len() - short.len() > 1 {
+        return false;
+    }
+    let mut i = 0;
+    while i < short.len() && short[i] == long[i] {
+        i += 1;
+    }
+    if short.len() == long.len() {
+        i >= short.len() || short[i + 1..] == long[i + 1..]
+    } else {
+        short[i..] == long[i + 1..]
+    }
 }
 
 /// Internal capitals (GitHub), digits (Win11), or an acronym (AWS).
@@ -1454,13 +1512,37 @@ mod tests {
     }
 
     #[test]
+    fn mishearings_of_known_terms_are_never_learned() {
+        let mut dictionary = vec!["Bolo".to_string(), "KVHRMS".to_string(), "API".to_string(), "Taha".to_string()];
+        for _ in 0..3 {
+            learn_terms("so the BoloM app and KBHRMS and DDeveloper work", &mut dictionary);
+        }
+        assert_eq!(dictionary.len(), 4, "{dictionary:?}");
+        assert!(near_miss_of_known("BoloM", &dictionary));
+        assert!(near_miss_of_known("KBHRMS", &dictionary));
+        assert!(near_miss_of_known("DDeveloper", &dictionary));
+        assert!(!near_miss_of_known("APIs", &dictionary));
+        assert!(!near_miss_of_known("Talha", &dictionary));
+        assert!(!near_miss_of_known("GitHub", &dictionary));
+    }
+
+    #[test]
+    fn a_word_repeated_inside_one_take_is_not_learned() {
+        let mut dictionary = Vec::new();
+        assert!(learn_terms("ask Zorbex then Zorbex then Zorbex", &mut dictionary).is_empty());
+        assert_eq!(learn_terms("call Zorbex now", &mut dictionary), vec!["Zorbex".to_string()]);
+    }
+
+    #[test]
     fn never_learns_common_words_and_learns_tech_terms_at_once() {
         let mut dictionary = Vec::new();
         for _ in 0..3 {
             learn_terms("Ok so Then we go. Currently it is Easy, Whatever, Override it Like that in Urdu and English", &mut dictionary);
         }
         assert!(dictionary.is_empty(), "{dictionary:?}");
-        let added = learn_terms("we deploy on GitHub with AWS and Win11", &mut dictionary);
+        // Tech terms need a second take too (0.1.19 learned "BoloM" at once).
+        assert!(learn_terms("we deploy on GitHub with AWS and Win11", &mut dictionary).is_empty());
+        let added = learn_terms("we deploy on GitHub with Win11 again", &mut dictionary);
         assert_eq!(added, vec!["GitHub".to_string(), "Win11".to_string()]);
         let added = learn_terms("use AWS again tomorrow", &mut dictionary);
         assert_eq!(added, vec!["AWS".to_string()]);

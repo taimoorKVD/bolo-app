@@ -331,9 +331,24 @@ fn type_text(text: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Why the last insert fell back from a clipboard paste to typing, so the
+/// log says why a take was typed instead of reporting a bare "unconfirmed".
+static LAST_FALLBACK: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+#[cfg_attr(not(windows), allow(dead_code))]
+fn set_last_fallback(reason: Option<String>) {
+    *LAST_FALLBACK.lock().unwrap_or_else(|e| e.into_inner()) = reason;
+}
+
+/// The reason recorded by the last insert, if it fell back to typing.
+pub fn take_last_fallback() -> Option<String> {
+    LAST_FALLBACK.lock().unwrap_or_else(|e| e.into_inner()).take()
+}
+
 #[cfg(windows)]
 fn insert_text_windows(text: &str) -> anyhow::Result<Insertion> {
     release_stuck_modifiers();
+    set_last_fallback(None);
     let target = foreground_target();
     if let Some(hwnd) = target {
         if let Some(edit) = edit_target(hwnd) {
@@ -344,6 +359,7 @@ fn insert_text_windows(text: &str) -> anyhow::Result<Insertion> {
         Ok(()) => Ok(non_edit_insertion(true)),
         Err(err) => {
             eprintln!("clipboard paste was not confirmed ({err}); typing the transcript");
+            set_last_fallback(Some(err.to_string()));
             type_text(text).context("couldn't type the transcript either")?;
             if let Some(edit) = target.and_then(edit_target) {
                 if window_text(edit).contains(text) {
