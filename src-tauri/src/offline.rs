@@ -293,13 +293,17 @@ fn binary_path(dir: &Path) -> Option<PathBuf> {
     find_binary(dir)
 }
 
+fn binary_rank(name: &str) -> Option<u8> {
+    match name.to_ascii_lowercase().as_str() {
+        "whisper-cli.exe" | "whisper-cli" => Some(0),
+        "main.exe" | "main" => Some(1),
+        _ => None,
+    }
+}
+
 fn find_binary(dir: &Path) -> Option<PathBuf> {
-    let names = if cfg!(windows) {
-        ["whisper-cli.exe", "main.exe"]
-    } else {
-        ["whisper-cli", "main"]
-    };
     let mut stack = vec![dir.to_path_buf()];
+    let mut best: Option<(u8, PathBuf)> = None;
     while let Some(current) = stack.pop() {
         let Ok(entries) = fs::read_dir(&current) else {
             continue;
@@ -311,13 +315,30 @@ fn find_binary(dir: &Path) -> Option<PathBuf> {
                 continue;
             }
             let file_name = entry.file_name();
-            let file_name = file_name.to_string_lossy();
-            if names.iter().any(|name| file_name.eq_ignore_ascii_case(name)) {
-                return Some(path);
+            let Some(rank) = binary_rank(&file_name.to_string_lossy()) else {
+                continue;
+            };
+            if best.as_ref().is_none_or(|(prev, _)| rank < *prev) {
+                best = Some((rank, path));
             }
         }
     }
-    None
+    best.map(|(_, path)| path)
+}
+
+/// True when whisper.cpp printed a transcript. The `main.exe` stub prints a
+/// deprecation warning and nothing else; that must not be inserted.
+pub fn is_usable_transcript(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    if lower.contains("deprecated")
+        || lower.contains("deprecation-warning")
+        || lower.contains("please use 'whisper-cli")
+        || lower.contains("please use \"whisper-cli")
+        || lower.starts_with("warning:")
+    {
+        return false;
+    }
+    text.chars().any(|c| c.is_alphabetic())
 }
 
 /// Windows `CREATE_NO_WINDOW`. Without it, whisper-cli opens a black console on every take.
@@ -348,12 +369,15 @@ fn run_cli(binary: &Path, model: &Path, audio: &Path, language_args: &[&str]) ->
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     let text = parse_whisper_output(&stdout);
-    if !text.is_empty() {
+    if is_usable_transcript(&text) {
         return Ok(text);
     }
     let fallback = parse_whisper_output(&stderr);
-    if !fallback.is_empty() {
+    if is_usable_transcript(&fallback) {
         return Ok(fallback);
+    }
+    if !text.is_empty() || !fallback.is_empty() {
+        return Err("whisper.cpp printed a warning instead of a transcript.".into());
     }
     if output.status.success() {
         return Err("whisper.cpp returned no words.".into());
@@ -501,6 +525,19 @@ whisper_init_from_file_with_params_no_state: loading model\n\
 [00:00:00.000 --> 00:00:01.200]   ship the notes\n\
 whisper_print_timings: load time = 10 ms\n";
         assert_eq!(parse_whisper_output(raw), "ship the notes");
+        let warning = "WARNING: The binary 'main.exe' is deprecated. Please use 'whisper-cli.exe' instead. See https://github.com/ggerganov/whisper.cpp/tree/master/examples/deprecation-warning/README.md";
+        assert!(!is_usable_transcript(warning));
+        assert!(is_usable_transcript("ship the notes"));
+        let dir = std::env::temp_dir().join(format!("bolo-whisper-bin-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let release = dir.join("Release");
+        fs::create_dir_all(&release).unwrap();
+        fs::write(release.join("main.exe"), b"stub").unwrap();
+        fs::write(release.join("whisper-cli.exe"), b"cli").unwrap();
+        assert!(find_binary(&dir).unwrap().ends_with("whisper-cli.exe"));
+        fs::remove_file(release.join("whisper-cli.exe")).unwrap();
+        assert!(find_binary(&dir).unwrap().ends_with("main.exe"));
+        let _ = fs::remove_dir_all(&dir);
         assert_eq!(normalize_model("small"), "small.en");
         assert_eq!(normalize_model("base"), "base.en");
         assert_eq!(normalize_model("off"), "off");

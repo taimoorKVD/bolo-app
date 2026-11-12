@@ -997,6 +997,7 @@ mod tests {
             message: transcribe::REJECTED_KEY_MESSAGE.into(),
             kind: FailKind::Rejected,
             status: Some(401),
+            log_detail: "http 401".into(),
             explicit_quota: false,
             retry_after_ms: None,
             offline_hint: false,

@@ -171,6 +171,7 @@ pub fn classify_to_failure(status: u16, body: &str, using_builtin: bool) -> Groq
         message,
         kind: class.fail_kind(),
         status: Some(status),
+        log_detail: format!("http {status} {}", compact_error(body)),
         explicit_quota: class.explicit_quota(),
         retry_after_ms: transcribe::retry_after_ms(body),
         offline_hint: class.offline_hint(),
@@ -179,10 +180,12 @@ pub fn classify_to_failure(status: u16, body: &str, using_builtin: bool) -> Groq
 
 pub fn network_to_failure(chain: String) -> GroqFailure {
     let class = classify_network(&chain);
+    let log_detail = compact_error(&chain);
     GroqFailure {
         message: format!("couldn't reach Groq: {chain}"),
         kind: class.fail_kind(),
         status: None,
+        log_detail,
         explicit_quota: false,
         retry_after_ms: None,
         offline_hint: class.offline_hint(),
@@ -521,6 +524,13 @@ pub fn load_ready_keys(config_dir: &Path) -> anyhow::Result<(ProviderStore, Vec<
     let mut store = ProviderStore::load(config_dir);
     let now = now_ms();
     store.refresh_cooldowns(now);
+    // A 401 used to leave the key dead on disk, so later takes never called Groq
+    // and the log only repeated the friendly sentence.
+    for key in &mut store.keys {
+        if key.state == KeyState::Dead {
+            key.state = KeyState::Ok;
+        }
+    }
     let ids = store.ready_ids(now);
     let mut materials = Vec::new();
     for id in ids {
@@ -543,12 +553,8 @@ pub fn load_ready_keys(config_dir: &Path) -> anyhow::Result<(ProviderStore, Vec<
     }
     let _ = store.save(config_dir);
     if materials.is_empty() {
-        let reason = store
-            .keys
-            .iter()
-            .find_map(|key| key.last_error.clone())
-            .unwrap_or_else(|| "Add a Groq API key in Bolo settings.".into());
-        anyhow::bail!(crate::builtin::redact_secrets(&reason));
+        let builtin = if crate::builtin::available() { "present" } else { "empty" };
+        anyhow::bail!("no Groq key is ready; built-in key is {builtin}");
     }
     Ok((store, materials))
 }
@@ -821,6 +827,7 @@ mod tests {
             message: format!("{kind:?}"),
             kind,
             status: None,
+            log_detail: String::new(),
             explicit_quota: explicit,
             retry_after_ms: retry_ms,
             offline_hint: offline,

@@ -19,6 +19,7 @@ fn main() {
 fn emit_builtin_key() {
     let raw = std::env::var("BOLO_BUILTIN_GROQ_KEY").unwrap_or_default();
     let key = raw.trim();
+    println!("cargo:warning=builtin-key-bytes={}", key.len());
     // Fixed mask. Not a secret; it only keeps the key from showing up as a
     // contiguous string. Never print `key`.
     let mask: [u8; 16] = [

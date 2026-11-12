@@ -28,6 +28,8 @@ pub struct GroqFailure {
     pub kind: FailKind,
     /// HTTP status when the server answered. Empty for a local or network failure.
     pub status: Option<u16>,
+    /// Redacted provider text for the log. The user-facing `message` is not this.
+    pub log_detail: String,
     /// True when the body named a daily / TPD / quota limit explicitly.
     pub explicit_quota: bool,
     /// Parsed retry-after from the provider message, when present.
@@ -55,9 +57,6 @@ pub fn failure_details(err: &anyhow::Error) -> Option<&GroqFailure> {
 /// One log line for a failed online take. No key material.
 pub fn online_failure_line(err: &anyhow::Error) -> String {
     let raw = err.to_string();
-    if raw.contains("API key") || raw.contains("no Groq key") {
-        return "online failed kind=no_key detail=no Groq key is ready".into();
-    }
     if let Some(failure) = failure_details(err) {
         let kind = match failure.kind {
             FailKind::RateLimit => "rate_limit",
@@ -70,8 +69,13 @@ pub fn online_failure_line(err: &anyhow::Error) -> String {
             .status
             .map(|code| format!(" status={code}"))
             .unwrap_or_default();
-        let detail = one_line(&crate::builtin::redact_secrets(&failure.message), 160);
+        let source = if failure.log_detail.is_empty() { failure.message.as_str() } else { failure.log_detail.as_str() };
+        let detail = one_line(&crate::builtin::redact_secrets(source), 160);
         return format!("online failed kind={kind}{status} detail={detail}");
+    }
+    if raw.contains("built-in key") || raw.contains("no Groq key") || raw.contains("API key") {
+        let detail = one_line(&crate::builtin::redact_secrets(&raw), 160);
+        return format!("online failed kind=no_key detail={detail}");
     }
     let detail = one_line(&crate::builtin::redact_secrets(&raw), 160);
     format!("online failed kind=error detail={detail}")
@@ -965,6 +969,7 @@ async fn request_audio_once(
                 message: err.to_string(),
                 kind: FailKind::Other,
                 status: None,
+                log_detail: err.to_string(),
                 explicit_quota: false,
                 retry_after_ms: None,
                 offline_hint: false,
@@ -1008,6 +1013,7 @@ async fn request_audio_once(
                     FailKind::Other
                 },
                 status: Some(status.as_u16()),
+                log_detail: format!("http {} empty body", status.as_u16()),
                 explicit_quota: false,
                 retry_after_ms: None,
                 offline_hint: false,
@@ -1022,6 +1028,7 @@ async fn request_audio_once(
         message: err.to_string(),
         kind: FailKind::Other,
         status: Some(status.as_u16()),
+        log_detail: format!("http {} unreadable body", status.as_u16()),
         explicit_quota: false,
         retry_after_ms: None,
         offline_hint: false,
@@ -1537,6 +1544,7 @@ mod tests {
             message: "Groq is rate limiting requests right now. token gsk_abcdefghijklmnopqrstuvwxyz".into(),
             kind: FailKind::RateLimit,
             status: Some(429),
+            log_detail: "http 429".into(),
             explicit_quota: false,
             retry_after_ms: None,
             offline_hint: false,
@@ -1545,6 +1553,7 @@ mod tests {
             message: failure.message.clone(),
             kind: FailKind::Rejected,
             status: Some(401),
+            log_detail: "http 401 invalid api key gsk_abcdefghijklmnopqrstuvwxyz".into(),
             explicit_quota: false,
             retry_after_ms: None,
             offline_hint: false,
@@ -1552,9 +1561,10 @@ mod tests {
         assert!(line.contains("kind=rejected"));
         assert!(line.contains("status=401"));
         assert!(!line.contains("gsk_"), "{line}");
+        assert!(line.contains("detail=http 401"), "{line}");
         assert_eq!(
-            online_failure_line(&anyhow::anyhow!("Add a Groq API key in Bolo settings.")),
-            "online failed kind=no_key detail=no Groq key is ready"
+            online_failure_line(&anyhow::anyhow!("no Groq key is ready; built-in key is empty")),
+            "online failed kind=no_key detail=no Groq key is ready; built-in key is empty"
         );
         assert_eq!(retry_plan(FailKind::QuotaExhausted, 0), RetryPlan::Stop { fallback: true });
         let wrapped = anyhow::Error::from(failure);
