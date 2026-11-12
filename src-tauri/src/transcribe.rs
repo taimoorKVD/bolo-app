@@ -182,29 +182,57 @@ impl Drop for PreviewKey {
 
 /// One short Whisper pass over audio captured so far. The final paste still
 /// uses the normal pipeline. Failures return a redacted provider note.
-pub fn preview_transcript(bytes: Vec<u8>, language: &str) -> Result<String, String> {
-    let key = crate::credentials::SecretKey::load().map_err(|err| crate::builtin::redact_secrets(&err.to_string()))?;
-    let using_builtin = key.is_builtin();
-    let api_key = PreviewKey(key.expose().to_string());
-    drop(key);
+///
+/// Uses the same ready keys, in the same order, as the final take. The old
+/// path read only the single legacy credential, which on some installs is a
+/// stale key: every live caption got 401 while the final take (which walks
+/// the provider store) worked, so the overlay never showed words while
+/// speaking. A 401/403 moves on to the next ready key. The router state on
+/// disk is left alone; only the final take records successes and failures.
+pub fn preview_transcript(config_dir: &std::path::Path, bytes: Vec<u8>, language: &str) -> Result<String, String> {
+    let keys: Vec<(PreviewKey, bool)> = match crate::provider::load_ready_keys(config_dir) {
+        Ok((_store, keys)) if !keys.is_empty() => keys
+            .iter()
+            .map(|key| (PreviewKey(key.expose().to_string()), key.builtin))
+            .collect(),
+        _ => {
+            let key = crate::credentials::SecretKey::load()
+                .map_err(|err| crate::builtin::redact_secrets(&err.to_string()))?;
+            let builtin = key.is_builtin();
+            let one = PreviewKey(key.expose().to_string());
+            drop(key);
+            vec![(one, builtin)]
+        }
+    };
     let language = language.to_string();
     tauri::async_runtime::block_on(async move {
-        let result = request_audio_once(
-            preview_client(),
-            &api_key.0,
-            bytes,
-            TRANSCRIPTIONS,
-            WHISPER_TURBO,
-            &language,
-            None,
-            0.0,
-            using_builtin,
-        )
-        .await
-        .map(|attempt| attempt.text.trim().to_string())
-        .map_err(|failure| crate::builtin::redact_secrets(&failure.log_detail));
-        drop(api_key);
-        result
+        let mut last = String::from("no key");
+        for (api_key, using_builtin) in keys.iter().take(3) {
+            let result = request_audio_once(
+                preview_client(),
+                &api_key.0,
+                bytes.clone(),
+                TRANSCRIPTIONS,
+                WHISPER_TURBO,
+                &language,
+                None,
+                0.0,
+                *using_builtin,
+            )
+            .await;
+            match result {
+                Ok(attempt) => return Ok(attempt.text.trim().to_string()),
+                Err(failure) => {
+                    last = crate::builtin::redact_secrets(&failure.log_detail);
+                    let auth = matches!(failure.status, Some(401) | Some(403));
+                    if !auth {
+                        break;
+                    }
+                }
+            }
+        }
+        drop(keys);
+        Err(last)
     })
 }
 

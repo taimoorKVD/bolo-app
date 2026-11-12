@@ -1086,7 +1086,7 @@ fn spawn_live_words(app: AppHandle, preview: warm::PreviewMic) {
                 .lock()
                 .map(|settings| settings.language.clone())
                 .unwrap_or_else(|_| "auto".into());
-            match transcribe::preview_transcript(encoded.bytes, &language) {
+            match transcribe::preview_transcript(&dir, encoded.bytes, &language) {
                 Ok(text) if !text.is_empty() => {
                     set_live(&text);
                     last_frames = frames;
