@@ -36,7 +36,7 @@ import type {
 } from "./types";
 
 const LANGUAGES: Array<[string, string]> = [
-  ["auto", "Auto-detect"],
+  ["auto", "Auto (English + Urdu)"],
   ["en", "English"],
   ["es", "Spanish"],
   ["fr", "French"],

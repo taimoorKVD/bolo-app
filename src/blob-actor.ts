@@ -19,10 +19,11 @@ export type Rig = {
 };
 
 export const RIGS: Record<CharacterKey, Rig> = {
-  blob: { key: "blob", unit: 50, hover: 0, ms: 1, blush: 0.36 },
-  buddy: { key: "buddy", unit: 46, hover: 0.36, ms: 1, blush: 0 },
-  spirit: { key: "spirit", unit: 48, hover: 0.4, ms: 0.95, blush: 0.4 },
-  pebble: { key: "pebble", unit: 52, hover: 0, ms: 0.72, blush: 0.45 },
+  // Units match the v4 mockup's VAR table exactly (CSS px per character unit).
+  blob: { key: "blob", unit: 42, hover: 0, ms: 1, blush: 0.36 },
+  buddy: { key: "buddy", unit: 39, hover: 0.36, ms: 1, blush: 0 },
+  spirit: { key: "spirit", unit: 40, hover: 0.4, ms: 0.95, blush: 0.4 },
+  pebble: { key: "pebble", unit: 44, hover: 0, ms: 0.72, blush: 0.45 },
 };
 
 const BOUNCE: Record<CharacterKey, number> = { blob: 0.55, pebble: 0.4, buddy: 0.15, spirit: 0.25 };
@@ -118,9 +119,12 @@ function sm(x: number): number {
   return c * c * (3 - 2 * c);
 }
 
-/** Up and slightly left: the user's text sits above the overlay. */
+/** Up and to the left, toward the text, as the mockup's caretGaze(): caret (330,222), character (462, 742-1.1U). */
 function caretGaze(): [number, number] {
-  return [-0.42, 0.7];
+  const dx = 330 - 462;
+  const dy = 742 - 1.1 * 42 - 222;
+  const l = Math.hypot(dx, dy);
+  return [(dx / l) * 0.75, (dy / l) * 0.85];
 }
 
 /**
@@ -204,6 +208,10 @@ export class BlobActor {
   readonly pop = new Spring(0, 210, 0.5);
   readonly pill = new Spring(0, 170, 0.82);
   readonly qm = new Spring(0, 180, 0.5);
+  /** Pill width in CSS px. Stepped by the overlay, as the mockup's A.pillW. */
+  readonly pillW = new Spring(60, 240, 0.86);
+  /** Last hover offset (character units), for the "?" placement. */
+  lastHover = 0;
   private random = rng(11);
   private springs: Spring[];
   rig: Rig = RIGS.blob;
@@ -587,6 +595,7 @@ export class BlobActor {
       ];
     }
     const hover = this.rig.hover ? this.hover.x + 0.05 * wave(1.7) : 0;
+    this.lastHover = hover;
     const lid: [number, number] = [
       Math.max(0, this.lidL.x * (1 - this.blink)),
       Math.max(0, this.lidR.x * (1 - this.blink)),

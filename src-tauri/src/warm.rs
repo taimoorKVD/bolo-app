@@ -19,8 +19,10 @@ use std::time::{Duration, Instant};
 
 const PRE_ROLL_MS: u32 = 1000;
 const LOOP_SLICE: Duration = Duration::from_millis(30);
-/// Extra capture after key-up so a quiet ending still in the callback is kept.
-pub const RELEASE_TAIL_MS: u64 = 160;
+/// Extra capture after key-up so the last word is kept. 160 ms cut endings
+/// off (0.1.19 diag.log: "...Why? Because that..."); people often release
+/// the key on the final syllable, so keep ~450 ms of tail audio.
+pub const RELEASE_TAIL_MS: u64 = 450;
 
 enum Cmd {
     Retarget(Option<String>),
@@ -115,7 +117,7 @@ impl LiveTake {
                 reply: reply_tx,
             })
             .map_err(|_| "Microphone watcher stopped.".to_string())?;
-        match reply_rx.recv_timeout(Duration::from_millis(500)) {
+        match reply_rx.recv_timeout(Duration::from_millis(RELEASE_TAIL_MS + 1000)) {
             Ok(result) => result,
             Err(_) => Err("Stopping the microphone timed out.".into()),
         }

@@ -1,7 +1,7 @@
 import { drawBlob, createBlobGl, releaseBlobGl } from "./blob-gl";
 import { BlobActor } from "./blob-actor";
 import type { CharacterKey } from "./blob-shaders";
-import { dprFor, nextQuality, prefersReducedMotion, shapeVoice, type Quality } from "./blob-state";
+import { dprFor, nextQuality, prefersReducedMotion, shapeVoice, type CharacterState, type Quality } from "./blob-state";
 
 /**
  * A small looping preview of one listening character.
@@ -14,6 +14,16 @@ export function mountLivePreview(canvas: HTMLCanvasElement, key: CharacterKey): 
   const reduced = prefersReducedMotion();
   const actor = new BlobActor(reduced, key);
   actor.setState("listening");
+  // Loop the four v4 states so the picker shows every expression:
+  // listening (mouthing a voice), writing, inserted, didn't catch.
+  const LOOP: Array<[CharacterState, number]> = [
+    ["listening", 3.2],
+    ["thinking", 1.5],
+    ["done", 1.9],
+    ["error", 1.7],
+  ];
+  let loopAt = 0;
+  let loopIndex = 0;
   let quality: Quality = "full";
   let slow = 0;
   let fast = 0;
@@ -57,10 +67,20 @@ export function mountLivePreview(canvas: HTMLCanvasElement, key: CharacterKey): 
       canvas.width = width;
       canvas.height = height;
     }
+    if (!reduced && actor.t - loopAt > (LOOP[loopIndex]?.[1] ?? 2)) {
+      loopIndex = (loopIndex + 1) % LOOP.length;
+      loopAt = actor.t;
+      actor.setState(LOOP[loopIndex]?.[0] ?? "listening");
+    }
     const level = 0.28 + 0.42 * (0.5 + 0.5 * Math.sin(actor.t * 6.2));
-    const voice = shapeVoice(level, [level * 0.4, level * 0.9, level * 0.35, level * 0.1]);
+    const voice = actor.state === "listening" ? shapeVoice(level, [level * 0.4, level * 0.9, level * 0.35, level * 0.1]) : null;
     const uniforms = actor.step(dt, voice, quality === "low");
-    drawBlob(bundle.gl, bundle.program, canvas, uniforms, actor.rig.unit, key === "spirit" && !reduced);
+    // Same placement rule as the overlay (centre + ground line), scaled to the card.
+    const unit = Math.min(actor.rig.unit, (canvas.clientHeight - 18) / 2.75);
+    drawBlob(bundle.gl, bundle.program, canvas, uniforms, unit, key === "spirit" && !reduced, {
+      x: canvas.clientWidth / 2,
+      y: canvas.clientHeight - unit * 0.42,
+    });
     const budget = nextQuality(quality, performance.now() - t0, slow, fast);
     quality = budget.quality;
     slow = budget.slow;

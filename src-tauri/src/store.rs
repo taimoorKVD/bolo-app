@@ -110,7 +110,8 @@ pub fn listener_is_animated(id: &str) -> bool {
 /// the character and the pill; the classic clips keep their old box.
 pub fn overlay_logical_size(listener: &str, phase: &str) -> (f64, f64) {
     if listener_is_animated(listener) {
-        (560.0, 220.0)
+        // v4 layout: the character at x=96, its pill growing right to 470 px of words.
+        (700.0, 230.0)
     } else if phase == "error" {
         (280.0, 200.0)
     } else if matches!(phase, "arming" | "recording" | "transcribing" | "inserting") {
@@ -858,8 +859,8 @@ mod carryover {
         assert_eq!(overlay_logical_size("classic", "recording"), (300.0, 214.0));
         assert_eq!(overlay_logical_size("classic", "done"), (268.0, 150.0));
         assert_eq!(overlay_logical_size("classic", "error"), (280.0, 200.0));
-        assert_eq!(overlay_logical_size("blob", "recording"), (560.0, 220.0));
-        assert_eq!(overlay_logical_size("blob", "error"), (560.0, 220.0));
+        assert_eq!(overlay_logical_size("blob", "recording"), (700.0, 230.0));
+        assert_eq!(overlay_logical_size("blob", "error"), (700.0, 230.0));
         assert_eq!(dismiss_ms("classic"), 700);
         assert_eq!(dismiss_ms("blob"), 1_700);
         let mut saved = Settings::default();

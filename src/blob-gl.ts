@@ -80,6 +80,7 @@ export function drawBlob(
   uniforms: BlobUniforms,
   unit = BLOB_UNIT,
   drift = false,
+  at?: { x: number; y: number },
 ): void {
   const w = canvas.width;
   const h = canvas.height;
@@ -93,6 +94,26 @@ export function drawBlob(
   const dpr = w / cssW;
   const show = Math.max(0.001, uniforms.shw);
   const unitPx = unit * dpr * show;
+  if (at) {
+    // Same placement and scissor as the v4 mockup's render():
+    // `at.x` is the character's centre and `at.y` its ground line, in CSS px from the top-left.
+    const cxm = at.x * dpr + (drift ? Math.sin(uniforms.uT * 0.7) * 0.18 * unitPx : 0);
+    const cym = h - at.y * dpr;
+    const bu = unit * dpr * Math.max(1, show);
+    gl.enable(gl.SCISSOR_TEST);
+    gl.scissor(Math.max(0, (at.x * dpr - 3.3 * bu) | 0), Math.max(0, (cym - 0.8 * bu) | 0), Math.ceil(6.6 * bu), Math.ceil(5 * bu));
+    gl.useProgram(program.program);
+    setUniform(gl, program, "uRes", [w, h]);
+    setUniform(gl, program, "uC", [cxm, cym]);
+    setUniform(gl, program, "uU", unitPx);
+    for (const key of Object.keys(uniforms) as Array<keyof BlobUniforms>) {
+      if (key === "shw") continue;
+      setUniform(gl, program, key, uniforms[key]);
+    }
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    gl.disable(gl.SCISSOR_TEST);
+    return;
+  }
   const cx = w * 0.48 + (drift ? Math.sin(uniforms.uT * 0.7) * 0.18 * unitPx : 0);
   const cy = h * 0.2;
   const bound = unit * dpr * Math.max(1, show);
