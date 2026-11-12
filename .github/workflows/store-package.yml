@@ -1,0 +1,68 @@
+name: Store package
+
+# Rebuild only the Microsoft Store .msixupload and replace that asset on an
+# existing release. Does not build NSIS, latest.json, or the website.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to update"
+        type: string
+        default: v0.1.17
+
+permissions:
+  contents: write
+
+jobs:
+  store:
+    name: Rebuild the Store package
+    runs-on: windows-latest
+    env:
+      STORE_IDENTITY_NAME: TaimoorHussain.Bolo.com
+      STORE_PUBLISHER: CN=3E755E45-53C2-4826-A318-2D528490BD69
+      STORE_PUBLISHER_DISPLAY_NAME: Taimoor Hussain
+      BOLO_BUILTIN_GROQ_KEY: ${{ secrets.GROQ_API_KEY }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          package-manager-cache: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target-store
+      - run: npm ci
+      - name: Build the .msixupload
+        shell: pwsh
+        run: |
+          $key = if ($env:BOLO_BUILTIN_GROQ_KEY) { $env:BOLO_BUILTIN_GROQ_KEY.Trim() } else { "" }
+          Write-Host "builtin-key-bytes=$($key.Length)"
+          if ($key.Length -eq 0) { throw "GROQ_API_KEY secret is missing or empty." }
+          $v = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version + ".0"
+          ./scripts/build-msix.ps1 -IdentityName $env:STORE_IDENTITY_NAME -Publisher $env:STORE_PUBLISHER `
+            -PublisherDisplayName $env:STORE_PUBLISHER_DISPLAY_NAME -Version $v
+          $upload = "target-msix/Bolo_${v}_x64.msixupload"
+          if (-not (Test-Path $upload)) { throw "Missing $upload" }
+          $tmp = Join-Path $env:RUNNER_TEMP "msix-check"
+          $inner = Join-Path $env:RUNNER_TEMP "msix-inner"
+          Remove-Item $tmp, $inner -Recurse -Force -ErrorAction SilentlyContinue
+          Copy-Item $upload "$tmp.zip"
+          Expand-Archive "$tmp.zip" $tmp
+          $msix = Get-ChildItem $tmp -Filter *.msix | Select-Object -First 1
+          Copy-Item $msix.FullName "$inner.zip"
+          Expand-Archive "$inner.zip" $inner
+          $manifest = Get-Content (Join-Path $inner "AppxManifest.xml") -Raw
+          if ($manifest -notmatch '<DisplayName>Bolo\.com</DisplayName>') { throw "Properties DisplayName is not Bolo.com" }
+          if ($manifest -notmatch 'VisualElements DisplayName="Bolo\.com"') { throw "VisualElements DisplayName is not Bolo.com" }
+          if ($manifest -notmatch 'Version="0\.1\.17\.0"') { throw "Version is not 0.1.17.0" }
+          if ($manifest -notmatch 'Name="TaimoorHussain\.Bolo\.com"') { throw "Identity Name changed" }
+          "Store manifest DisplayName=Bolo.com Version=0.1.17.0"
+          "UPLOAD=$upload" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Replace the release asset
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload ${{ inputs.tag }} $env:UPLOAD --clobber --repo ${{ github.repository }}

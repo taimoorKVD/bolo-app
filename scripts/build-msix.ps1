@@ -55,7 +55,7 @@ foreach ($f in "StoreLogo.png","Square150x150Logo.png","Square44x44Logo.png","Sq
   IgnorableNamespaces="uap desktop rescap">
   <Identity Name="$IdentityName" Publisher="$Publisher" Version="$Version" ProcessorArchitecture="x64" />
   <Properties>
-    <DisplayName>Bolo</DisplayName>
+    <DisplayName>Bolo.com</DisplayName>
     <PublisherDisplayName>$PublisherDisplayName</PublisherDisplayName>
     <Logo>Assets\StoreLogo.png</Logo>
   </Properties>
@@ -65,13 +65,13 @@ foreach ($f in "StoreLogo.png","Square150x150Logo.png","Square44x44Logo.png","Sq
   <Resources><Resource Language="en-us" /></Resources>
   <Applications>
     <Application Id="Bolo" Executable="Bolo.exe" EntryPoint="Windows.FullTrustApplication">
-      <uap:VisualElements DisplayName="Bolo" Description="Push-to-talk voice dictation"
+      <uap:VisualElements DisplayName="Bolo.com" Description="Push-to-talk voice dictation"
         BackgroundColor="transparent" Square150x150Logo="Assets\Square150x150Logo.png" Square44x44Logo="Assets\Square44x44Logo.png">
         <uap:DefaultTile Wide310x150Logo="Assets\Wide310x150Logo.png" Square310x310Logo="Assets\Square310x310Logo.png" Square71x71Logo="Assets\Square71x71Logo.png" />
       </uap:VisualElements>
       <Extensions>
         <desktop:Extension Category="windows.startupTask" Executable="Bolo.exe" EntryPoint="Windows.FullTrustApplication">
-          <desktop:StartupTask TaskId="BoloStartup" Enabled="true" DisplayName="Bolo" />
+          <desktop:StartupTask TaskId="BoloStartup" Enabled="true" DisplayName="Bolo.com" />
         </desktop:Extension>
       </Extensions>
     </Application>

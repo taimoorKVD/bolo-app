@@ -169,7 +169,10 @@ fn store_manifest_keeps_the_package_identity() {
     let script = include_str!("../../scripts/build-msix.ps1");
     assert!(script.contains("Identity Name=\"$IdentityName\""));
     assert!(script.contains("Publisher=\"$Publisher\""));
-    assert!(script.contains("<DisplayName>Bolo</DisplayName>"));
+    assert!(script.contains("<DisplayName>Bolo.com</DisplayName>"));
+    assert!(script.contains("VisualElements DisplayName=\"Bolo.com\""));
+    assert!(!script.contains("<DisplayName>Bolo</DisplayName>"));
+    assert!(!script.contains("DisplayName=\"Bolo\""));
     assert!(script.contains("Executable=\"Bolo.exe\""));
     assert!(script.contains("bolo.exe"));
     assert!(!script.contains("cadence.exe"));
