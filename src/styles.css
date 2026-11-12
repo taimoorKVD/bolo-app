@@ -381,11 +381,43 @@ body.view-overlay.browser-preview .demo-row button {
   .blob-pspin { transform: none !important; }
 }
 
-.listener-pick { display: flex; gap: 8px; margin: 2px 0 8px; flex-wrap: wrap; }
-.listener-pick button.is-on {
-  border-color: var(--accent);
-  color: var(--ink);
-  background: var(--accent-soft);
+.listener-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 12px;
+  margin: 4px 0 14px;
+}
+.listener-card {
+  display: grid;
+  gap: 8px;
+  justify-items: center;
+  margin: 0;
+  padding: 10px 8px 12px;
+  border-radius: 16px;
+  border: 1px solid var(--line);
+  background: #16130f;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.listener-card.is-on {
+  border-color: var(--gold);
+  box-shadow: inset 0 0 0 1px var(--gold);
+}
+.listener-preview {
+  width: 100%;
+  height: 112px;
+  display: block;
+  background: radial-gradient(circle at 50% 62%, rgba(217, 180, 74, 0.16), transparent 72%);
+  object-fit: contain;
+  pointer-events: none;
+}
+.listener-name { font-size: 13px; text-align: center; }
+@media (max-width: 980px) {
+  .listener-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+@media (max-width: 640px) {
+  .listener-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 .blob-stage {

@@ -13,7 +13,9 @@ import {
   soundUrl,
   type CharacterGroup,
 } from "./characters";
-import { normalizeListener } from "./listener-style";
+import { LISTENER_CHOICES, normalizeListener } from "./listener-style";
+import { mountLivePreview } from "./character-preview";
+import type { CharacterKey } from "./blob-shaders";
 import lockupUrl from "./brand-lockup.svg";
 import { formatDuration, formatHotkey, formatWhen, modelLabel } from "./format";
 import { listenerNotice, statusBanner, visibleMessage } from "./notices";
@@ -1165,7 +1167,7 @@ function characterPanel(draft: Draft): HTMLElement {
   const panel = panelEl(
     "character",
     "Character & sounds",
-    "Bolo Blob is the listener. Classic keeps the characters below.",
+    "Bolo Blob is the default. Classic keeps the characters below.",
   );
   panel.classList.add("character-panel");
   const s = draft.settings;
@@ -1440,23 +1442,36 @@ function characterPanel(draft: Draft): HTMLElement {
 
   smart.classList.add("card", "rows");
   all.append(tabs, grid);
-  const listenerPick = el("div", "listener-pick");
+  const listenerPick = el("div", "listener-grid");
   const listenerNote = el("p", "field-note");
-  for (const [id, label] of [
-    ["blob", "Bolo Blob"],
-    ["classic", "Classic"],
-  ] as const) {
-    const choice = document.createElement("button");
-    choice.type = "button";
-    choice.className = "ghost";
-    choice.dataset.listener = id;
-    choice.textContent = label;
-    choice.addEventListener("click", () => {
-      s.listener = id;
+  const classicPreview = document.createElement("video");
+  classicPreview.className = "listener-preview";
+  classicPreview.muted = true;
+  classicPreview.loop = true;
+  classicPreview.playsInline = true;
+  classicPreview.src = clipUrls("classic").listen;
+  classicPreview.setAttribute("aria-hidden", "true");
+  for (const choice of LISTENER_CHOICES) {
+    const card = document.createElement("button");
+    card.type = "button";
+    card.className = "listener-card";
+    card.dataset.listener = choice.id;
+    card.addEventListener("click", () => {
+      s.listener = choice.id;
       markDirty(draft);
       paintListener();
     });
-    listenerPick.append(choice);
+    if (choice.animated) {
+      const canvas = document.createElement("canvas");
+      canvas.className = "listener-preview";
+      canvas.setAttribute("aria-hidden", "true");
+      mountLivePreview(canvas, choice.id as CharacterKey);
+      card.append(canvas);
+    } else {
+      card.append(classicPreview);
+    }
+    card.append(el("span", "listener-name", choice.name));
+    listenerPick.append(card);
   }
   const classicUi = el("div", "classic-listener");
   classicUi.append(preview, featured, seeAll, all, smart);
@@ -1467,13 +1482,19 @@ function characterPanel(draft: Draft): HTMLElement {
       choice.classList.toggle("is-on", on);
       choice.setAttribute("aria-pressed", String(on));
     }
+    const name = LISTENER_CHOICES.find((choice) => choice.id === id)?.name ?? "Bolo Blob";
     listenerNote.textContent =
       id === "classic"
         ? "The classic overlay plays the character clips below."
-        : "Bolo Blob pops in while you hold the hotkey, follows your voice, then tucks away.";
+        : `${name} pops in while you hold the hotkey, follows your voice, then tucks away.`;
     classicUi.hidden = id !== "classic";
-    if (id === "classic") void video.play().catch(() => {});
-    else video.pause();
+    if (id === "classic") {
+      void video.play().catch(() => {});
+      void classicPreview.play().catch(() => {});
+    } else {
+      video.pause();
+      void classicPreview.play().catch(() => {});
+    }
   };
   panel.append(listenerPick, listenerNote, classicUi, sounds);
   paintFeatured();
