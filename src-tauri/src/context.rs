@@ -33,6 +33,64 @@ pub fn foreground_tone() -> Tone {
     }
 }
 
+/// Short name of the app a take went into, for the overlay's
+/// "Inserted into Notepad". None when the window has no usable name.
+pub fn app_label(target: Option<isize>) -> Option<String> {
+    #[cfg(windows)]
+    {
+        use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
+        let hwnd = windows::Win32::Foundation::HWND(target? as *mut core::ffi::c_void);
+        let title = unsafe { window_title(hwnd) };
+        let mut pid = 0u32;
+        unsafe {
+            GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        }
+        let exe = if pid == 0 { String::new() } else { process_image(pid) };
+        return label_from(&exe, &title);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = target;
+        None
+    }
+}
+
+/// Known apps by exe; otherwise the title's last " - " part ("notes.txt - Notepad").
+pub fn label_from(exe: &str, title: &str) -> Option<String> {
+    let stem = exe_stem(exe);
+    let known = match stem.as_str() {
+        "notepad" => Some("Notepad"),
+        "winword" => Some("Word"),
+        "excel" => Some("Excel"),
+        "outlook" | "olk" => Some("Outlook"),
+        "powerpnt" => Some("PowerPoint"),
+        "onenote" => Some("OneNote"),
+        "chrome" => Some("Chrome"),
+        "msedge" => Some("Edge"),
+        "firefox" => Some("Firefox"),
+        "brave" => Some("Brave"),
+        "whatsapp" | "whatsapp.root" => Some("WhatsApp"),
+        "slack" => Some("Slack"),
+        "discord" => Some("Discord"),
+        "ms-teams" | "teams" => Some("Teams"),
+        "telegram" => Some("Telegram"),
+        "code" | "code-insiders" => Some("VS Code"),
+        "cursor" => Some("Cursor"),
+        "windowsterminal" | "wt" => Some("Terminal"),
+        "notepad++" => Some("Notepad++"),
+        _ => None,
+    };
+    if let Some(name) = known {
+        return Some(name.to_string());
+    }
+    let tail = title.rsplit(" - ").next().unwrap_or("").trim();
+    let count = tail.chars().count();
+    if title.contains(" - ") && (1..=24).contains(&count) {
+        return Some(tail.to_string());
+    }
+    None
+}
+
 fn exe_stem(exe: &str) -> String {
     let file = exe.rsplit(['\\', '/']).next().unwrap_or(exe);
     let lower = file.to_ascii_lowercase();
@@ -133,6 +191,15 @@ fn process_image(pid: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn overlay_names_the_target_app() {
+        assert_eq!(label_from(r"C:\Windows\notepad.exe", "Meeting notes.txt - Notepad").as_deref(), Some("Notepad"));
+        assert_eq!(label_from(r"C:\x\WINWORD.EXE", "Doc1 - Word").as_deref(), Some("Word"));
+        assert_eq!(label_from(r"C:\x\foo.exe", "Report - Foo Editor").as_deref(), Some("Foo Editor"));
+        assert_eq!(label_from(r"C:\x\foo.exe", "Untitled"), None);
+        assert_eq!(label_from("", ""), None);
+    }
 
     #[test]
     fn tone_follows_the_foreground_app() {
