@@ -3,8 +3,10 @@ export const ADMIN_HTML = String.raw`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
 <title>Bolo Office</title>
+<script>try{document.documentElement.dataset.theme=localStorage.getItem("bolo_office_theme")||"dark"}catch(e){}</script>
 <style>
-:root{--bg:#0c0b09;--panel:#17150f;--line:#3a3224;--gold:#e0b85a;--gold2:#f3d48a;--text:#f6f1e6;--mute:#cbbfa8;--bad:#ffb4a8;--ok:#9dceb0}
+:root,[data-theme="dark"]{--bg:#090807;--panel:#12110e;--elev:#1a1814;--line:#2c281f;--gold:#e4c27a;--gold2:#f3d48a;--text:#f6f1e6;--mute:#b7ab96;--bad:#f0a394;--ok:#8fceab;--ink:#1a1408;--shadow:0 16px 40px rgba(0,0,0,.35)}
+[data-theme="light"]{--bg:#f4f0e8;--panel:#fffcf7;--elev:#fff;--line:#e3d9c6;--gold:#8a6414;--gold2:#6e5010;--text:#1c1812;--mute:#5c5346;--bad:#9d2c22;--ok:#1d6b3a;--ink:#1a1408;--shadow:0 16px 40px rgba(40,30,10,.12)}
 *{box-sizing:border-box}html,body{margin:0;min-height:100%;background:var(--bg);color:var(--text);font:16px/1.5 "Segoe UI",system-ui,sans-serif}
 [hidden]{display:none !important}
 button,input,select{font:inherit;color:inherit}
@@ -37,24 +39,55 @@ input:focus,select:focus{outline:none;border-color:var(--gold);box-shadow:0 0 0 
 .codes{display:grid;grid-template-columns:repeat(6,1fr);gap:8px}
 .codes input{text-align:center;font-size:22px;font-weight:700;padding:0}
 .links{display:flex;justify-content:space-between;gap:12px;margin-top:8px}
-header{display:flex;align-items:center;gap:16px;padding:14px 22px;border-bottom:1px solid var(--line);background:#100e0b;position:sticky;top:0;z-index:3}
-.logo{font-weight:800;color:var(--gold);font-size:20px}.logo span{color:var(--text);font-weight:500;margin-left:6px;font-size:14px}
-nav{display:flex;gap:4px;flex-wrap:wrap}
-nav button{background:transparent;border:1px solid transparent;color:var(--mute);border-radius:999px;padding:6px 12px;cursor:pointer}
-nav button.on{color:var(--text);background:#241c10;border-color:var(--line)}
+#shell{display:grid;grid-template-columns:232px 1fr;min-height:100vh}
+#shell.collapsed{grid-template-columns:72px 1fr}
+.side{background:var(--panel);border-right:1px solid var(--line);padding:14px 10px;display:flex;flex-direction:column;gap:8px;position:sticky;top:0;height:100vh}
+.side .logo{padding:6px 8px 12px}
+#nav{display:flex;flex-direction:column;gap:2px;overflow:auto}
+#nav button{display:flex;align-items:center;gap:10px;width:100%;text-align:left;background:transparent;border:0;color:var(--mute);border-radius:10px;padding:8px 10px;cursor:pointer;transition:background .18s ease,color .18s ease}
+#nav button .i{width:16px;height:16px;flex:none}
+#nav button.on{color:var(--text);background:var(--elev);box-shadow:inset 2px 0 0 var(--gold)}
+#nav button:hover{color:var(--text);background:var(--elev)}
+#shell.collapsed #nav button span,#shell.collapsed .logo span{display:none}
+.workspace{min-width:0;display:flex;flex-direction:column}
+header{display:flex;align-items:center;gap:10px;padding:12px 18px;border-bottom:1px solid var(--line);background:color-mix(in srgb,var(--bg) 86%,transparent);position:sticky;top:0;z-index:5;backdrop-filter:blur(10px)}
+#find{flex:1;max-width:520px;height:38px;border-radius:10px;border:1px solid var(--line);background:var(--panel);color:var(--mute);text-align:left;padding:0 12px;cursor:pointer}
+#find kbd{float:right;border:1px solid var(--line);border-radius:6px;padding:1px 6px;font-size:11px}
+.logo{font-weight:750;color:var(--gold);font-size:18px}.logo span{color:var(--text);font-weight:500;margin-left:6px;font-size:13px}
 .acct{margin-left:auto;position:relative}
-#who{background:#17150f;border:1px solid var(--line);color:var(--text);border-radius:999px;padding:6px 12px;cursor:pointer;max-width:280px}
-.menu{position:absolute;right:0;top:calc(100% + 8px);background:#1c1812;border:1px solid var(--line);border-radius:12px;min-width:240px;padding:6px;box-shadow:0 16px 40px rgba(0,0,0,.35)}
+#who{display:flex;align-items:center;gap:8px;background:var(--panel);border:1px solid var(--line);color:var(--text);border-radius:999px;padding:4px 10px 4px 4px;cursor:pointer;max-width:280px}
+.ava{width:26px;height:26px;border-radius:99px;display:grid;place-items:center;background:var(--gold);color:var(--ink);font-size:12px;font-weight:750}
+.badge{font-size:11px;border:1px solid var(--line);border-radius:99px;padding:1px 6px;color:var(--gold2)}
+.menu{position:absolute;right:0;top:calc(100% + 8px);background:var(--elev);border:1px solid var(--line);border-radius:12px;min-width:220px;padding:6px;box-shadow:var(--shadow)}
 .menu button{display:block;width:100%;text-align:left;background:transparent;border:0;color:var(--text);padding:10px 12px;border-radius:8px;cursor:pointer}
-.menu button:hover{background:#2a2418}
-main{max-width:1100px;margin:0 auto;padding:28px 22px 64px}
+.menu button:hover{background:var(--panel)}
+main{max-width:1120px;margin:0 auto;padding:22px 22px 72px;width:100%}
+#palette{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:40;display:grid;align-items:start;justify-content:center;padding-top:12vh}
+#palette .box{width:min(560px,92vw);background:var(--elev);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow);overflow:hidden}
+#palette input{border:0;border-bottom:1px solid var(--line);border-radius:0;height:52px;background:transparent}
+#hits{max-height:320px;overflow:auto;padding:6px}
+#hits button{display:block;width:100%;text-align:left;background:transparent;border:0;color:var(--text);padding:10px 12px;border-radius:8px;cursor:pointer}
+#hits button:hover,#hits button.on{background:var(--panel)}
+#drawer{position:fixed;top:0;right:0;height:100%;width:min(460px,100%);background:var(--panel);border-left:1px solid var(--line);z-index:25;transform:translateX(104%);transition:transform .2s ease;overflow:auto;padding:18px 18px 40px;box-shadow:var(--shadow)}
+#drawer.open{transform:none}
+.tabs{display:flex;gap:4px;margin:12px 0}
+.tabs button{background:transparent;border:1px solid transparent;color:var(--mute);border-radius:8px;padding:6px 10px;cursor:pointer}
+.tabs button.on{color:var(--text);border-color:var(--line);background:var(--elev)}
+.kebabwrap{position:relative}
+.kebab{width:32px;height:32px;border-radius:8px;border:1px solid var(--line);background:transparent;color:var(--text);cursor:pointer}
+.pop{position:absolute;right:0;top:36px;z-index:6;background:var(--elev);border:1px solid var(--line);border-radius:12px;padding:6px;min-width:180px;box-shadow:var(--shadow)}
+.pop .btn{display:block;width:100%;text-align:left;margin:2px 0}
+.skel{height:14px;border-radius:8px;background:linear-gradient(90deg,var(--line),var(--elev),var(--line));background-size:200% 100%;animation:bolo-spin 1.2s linear infinite}
+.spark{width:100%;height:36px;color:var(--gold);margin-top:8px}
+@media (prefers-reduced-motion:reduce){*{animation:none !important;transition:none !important}}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px}
 .card{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:16px 18px}
 .stat .k{margin:0}.stat .v{font-size:28px;font-weight:700;margin-top:4px}
 h2{font-size:20px;margin:28px 0 12px;font-weight:650}
 table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:10px 8px;border-bottom:1px solid var(--line);vertical-align:top}
 th{color:var(--mute);font-size:12px;letter-spacing:.05em;text-transform:uppercase}
-tr.click{cursor:pointer}tr.click:hover{background:#221c12}
+tr.click{cursor:pointer}tr:hover td{background:color-mix(in srgb,var(--gold) 8%,transparent)}
+th{position:sticky;top:0;background:var(--panel);z-index:1}
 .tag{display:inline-block;padding:1px 8px;border-radius:99px;font-size:12px;border:1px solid var(--line)}
 .tag.paid,.tag.active{color:var(--gold2);border-color:#5c4c22}.tag.revoked,.tag.suspended,.tag.disabled{color:var(--bad)}
 .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
@@ -73,8 +106,10 @@ code{font-family:Consolas,ui-monospace,monospace;color:var(--gold2);font-size:13
 @media(max-width:860px){
 #gate{flex-direction:column}.panel{order:1;padding:28px 18px 8px}.brand{order:2;padding:8px 22px 28px}
 .brand h2,.facts,.wave{display:none}.mark{font-size:22px}
-header{flex-wrap:wrap}nav{order:3;width:100%}
-th:nth-child(n+5),td:nth-child(n+5){display:none}
+#shell{grid-template-columns:1fr}
+.side{position:fixed;z-index:20;transform:translateX(-105%);transition:transform .2s ease;width:240px}
+#shell.navopen .side{transform:none}
+#who .who-name{display:none}
 }
 </style></head><body>
 <div id="gate">
@@ -94,23 +129,29 @@ th:nth-child(n+5),td:nth-child(n+5){display:none}
   <section class="panel"><div id="panel"></div></section>
 </div>
 <div id="shell" hidden>
-<header>
+<aside class="side">
   <div class="logo">Bolo<span>Office</span></div>
-  <span class="pill example" id="ex" hidden>Example data</span>
   <nav id="nav" aria-label="Office">
-    <button type="button" data-v="dash" class="on">Dashboard</button>
-    <button type="button" data-v="users">Users</button>
-    <button type="button" data-v="team" id="navTeam" hidden>Team</button>
-    <button type="button" data-v="audit">Audit log</button>
-    <button type="button" data-v="health">Health</button>
-    <button type="button" data-v="devices">Devices</button>
-    <button type="button" data-v="limits">Limits</button>
-    <button type="button" data-v="releases">Releases</button>
-    <button type="button" data-v="keys" data-perm="view_keys" hidden>Keys</button>
-    <button type="button" data-v="errors" data-perm="manage_feedback" hidden>Errors</button>
-    <button type="button" data-v="feedback" data-perm="manage_feedback" hidden>Feedback</button>
-    <button type="button" data-v="settings" data-perm="manage_settings" hidden>Settings</button>
+    <button type="button" data-v="dash" class="on"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10.5 12 4l8 6.5V20h-6v-5H10v5H4z" fill="none" stroke="currentColor" stroke-width="1.6"/></svg><span>Dashboard</span></button>
+    <button type="button" data-v="users"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 11a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm8 1a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5ZM3 19c.4-2.4 2.4-4 5-4s4.6 1.6 5 4m1-4c2.2 0 4 1.3 4.5 3.5" fill="none" stroke="currentColor" stroke-width="1.6"/></svg><span>Users</span></button>
+    <button type="button" data-v="team" id="navTeam" hidden><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 12a3 3 0 1 0 0-6 3 3 0 0 0 0 6ZM5 19c.5-3 3-5 7-5s6.5 2 7 5" fill="none" stroke="currentColor" stroke-width="1.6"/></svg><span>Team</span></button>
+    <button type="button" data-v="devices"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="3" width="16" height="18" rx="2" fill="none" stroke="currentColor" stroke-width="1.6"/></svg><span>Devices</span></button>
+    <button type="button" data-v="keys" data-perm="view_keys" hidden><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 7a4 4 0 1 0-3.5 6.6L14 17h2v2h2v-2l1-1-4.4-4.4A4 4 0 0 0 14 7Z" fill="none" stroke="currentColor" stroke-width="1.6"/></svg><span>Keys</span></button>
+    <button type="button" data-v="health"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l2-5 4 10 2-5h6" fill="none" stroke="currentColor" stroke-width="1.6"/></svg><span>Health</span></button>
+    <button type="button" data-v="limits"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19V5M4 19h16M8 15v-4m4 4V8m4 7v-2" fill="none" stroke="currentColor" stroke-width="1.6"/></svg><span>Limits</span></button>
+    <button type="button" data-v="releases"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 4 7v10l8 4 8-4V7l-8-4Zm0 8 8-4M12 11v10M12 11 4 7" fill="none" stroke="currentColor" stroke-width="1.6"/></svg><span>Releases</span></button>
+    <button type="button" data-v="feedback" data-perm="manage_feedback" hidden><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 6h14v9H8l-3 3V6Z" fill="none" stroke="currentColor" stroke-width="1.6"/></svg><span>Feedback</span></button>
+    <button type="button" data-v="errors" data-perm="manage_feedback" hidden><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8v5m0 3h.01M12 3 2 20h20L12 3Z" fill="none" stroke="currentColor" stroke-width="1.6"/></svg><span>Errors</span></button>
+    <button type="button" data-v="audit"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 6h11M8 12h11M8 18h11M5 6h.01M5 12h.01M5 18h.01" fill="none" stroke="currentColor" stroke-width="1.6"/></svg><span>Audit log</span></button>
+    <button type="button" data-v="settings" data-perm="manage_settings" hidden><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M12 3v2m0 14v2M3 12h2m14 0h2" fill="none" stroke="currentColor" stroke-width="1.6"/></svg><span>Settings</span></button>
   </nav>
+  <button type="button" id="collapse" class="btn ghost" style="margin-top:auto">Collapse</button>
+</aside>
+<div class="workspace">
+<header>
+  <button type="button" id="find" aria-haspopup="dialog">Search or jump to a page <kbd>Ctrl K</kbd></button>
+  <span class="pill example" id="ex" hidden>Example data</span>
+  <button type="button" id="theme" class="btn ghost" aria-label="Toggle color theme">Theme</button>
   <div class="acct">
     <button type="button" id="who" aria-haspopup="menu" aria-expanded="false" aria-controls="menu"></button>
     <div id="menu" class="menu" role="menu" hidden>
@@ -121,12 +162,17 @@ th:nth-child(n+5),td:nth-child(n+5){display:none}
   </div>
 </header>
 <main id="app"></main>
+</div>
+<div id="palette" hidden role="dialog" aria-label="Command palette"><div class="box"><input id="qpal" placeholder="Jump to a page or find a user" aria-label="Command palette"><div id="hits"></div></div></div>
+<aside id="drawer" hidden aria-label="User detail"><button type="button" id="drawerx" class="btn ghost">Close</button><div class="tabs" role="tablist"><button type="button" data-tab="ov" class="on">Overview</button><button type="button" data-tab="dev">Devices</button><button type="button" data-tab="use">Usage</button><button type="button" data-tab="act">Activity</button></div><div id="drawerbody"></div></aside>
 <dialog id="dlg"><form method="dialog" id="dform">
   <h3 id="dtitle" style="margin-top:0"></h3>
   <p id="dtext" class="mute"></p>
   <div id="dextra"></div>
   <label class="k" for="dreason">Reason (required, saved to the audit log)</label>
   <input id="dreason" minlength="5" required>
+  <label class="k" id="dconfirmwrap" for="dconfirm" hidden>Type DELETE to confirm</label>
+  <input id="dconfirm" hidden autocomplete="off">
   <div class="row" style="margin-top:14px;justify-content:flex-end">
     <button class="btn ghost" value="cancel" formnovalidate type="submit">Cancel</button>
     <button class="btn" id="dok" value="ok" type="submit" style="width:auto">Confirm</button>
@@ -262,7 +308,7 @@ async function boot(){
   showApp();
   try{ME=await api("/me")}catch(e){if(e.message!=="signed out"){T="";sessionStorage.removeItem("bolo_admin");login()}return}
   if(ME.needsEnrollment){try{const en=await api("/enroll");return enrollView(en)}catch(e){toast(e.message);return}}
-  $("#who").textContent=ME.email+" · "+ME.role;
+  $("#who").replaceChildren(h("span",{class:"ava","aria-hidden":"true"},(ME.email||"?").slice(0,1).toUpperCase()),h("span",{class:"who-name"},ME.email),h("span",{class:"badge"},ME.role));
   $("#navTeam").hidden=!allowed("manage_team");
   document.querySelectorAll("nav button[data-perm]").forEach(b=>{b.hidden=!(ME.permissions||[]).includes(b.dataset.perm)});
   $("#m2fa").textContent=ME.email2fa?"Email codes are on":"Turn on email codes";
@@ -286,7 +332,8 @@ $("#m2fa").onclick=async()=>{
     ME.email2fa=true; $("#m2fa").textContent="Email codes are on"; toast("Email codes are on");
   }catch(e){toast(e.message)}
 };
-function show(v){location.hash=v;document.querySelectorAll("nav button[data-v]").forEach(b=>b.classList.toggle("on",b.dataset.v===v.split("/")[0]));if(v.startsWith("user/"))return userView(v.slice(5));({dash,users,audit,team,health,devices,limits,releases,keys,errors,feedback,settings}[v]||dash)()}
+function closeDrawer(){const d=$("#drawer");if(!d)return;d.classList.remove("open");d.hidden=true}
+function show(v){location.hash=v;$("#app").replaceChildren(h("div",{class:"card"},h("div",{class:"skel"})));document.querySelectorAll("#nav button[data-v]").forEach(b=>b.classList.toggle("on",b.dataset.v===v.split("/")[0]));if(!String(v).startsWith("user/"))closeDrawer();if(String(v).startsWith("user/")){users();return userView(v.slice(5))}({dash,users,audit,team,health,devices,limits,releases,keys,errors,feedback,settings}[v]||dash)()}
 const stat=(k,v,extra)=>h("div",{class:"card stat"},h("div",{class:"k"},k),h("div",{class:"v"},v),extra||"");
 function askSecret(title,text,mode){
   return new Promise((resolve)=>{
@@ -310,7 +357,7 @@ async function ensureRecent(){
     ME.recentAuthUntil=j.recentAuthUntil; return true;
   }catch(e){toast(e.message);return false}
 }
-function confirmAction(title,text,extra,run){$("#dtitle").textContent=title;$("#dtext").textContent=text;$("#dextra").replaceChildren(extra||"");$("#dreason").value="";const d=$("#dlg");d.showModal();d.onclose=async()=>{if(d.returnValue!=="ok")return;if(!(await ensureRecent()))return;try{await run($("#dreason").value);toast("Done. Recorded in the audit log.");show(location.hash.slice(1))}catch(e){toast(e.message)}}}
+function confirmAction(title,text,extra,run){const del=/^Delete/.test(title);$("#dtitle").textContent=title;$("#dtext").textContent=text;$("#dextra").replaceChildren(extra||"");$("#dreason").value="";$("#dconfirm").value="";$("#dconfirmwrap").hidden=!del;$("#dconfirm").hidden=!del;const d=$("#dlg");d.showModal();d.onclose=async()=>{if(d.returnValue!=="ok")return;if(del&&$("#dconfirm").value!=="DELETE"){toast("Type DELETE to confirm.");return}if(!(await ensureRecent()))return;try{await run($("#dreason").value);toast("Done. Recorded in the audit log.");show(location.hash.slice(1)||"dash")}catch(e){toast(e.message)}}}
 function empty(text){return h("p",{class:"empty"},text)}
 function stop(fn){return (e)=>{e.stopPropagation();fn()}}
 function go(title,text,path,body){return stop(()=>confirmAction(title,text,null,(r)=>api(path,{method:"POST",body:JSON.stringify(Object.assign({reason:r},body||{}))})))}
@@ -449,12 +496,17 @@ async function settings(){
   }
   $("#app").replaceChildren(...bits);
 }
+function spark(){return h("svg",{class:"spark",viewBox:"0 0 120 36",role:"img","aria-label":"No trend is stored"},h("title",{},"No trend is stored"),h("path",{d:"M4 28 H116",fill:"none",stroke:"currentColor","stroke-dasharray":"4 5"}))}
 async function dash(){
   const d=await api("/dashboard"); $("#ex").hidden=!d.exampleData; const app=$("#app");
+  const health=await api("/ops/health").catch(()=>null);
+  const log=await api("/audit").catch(()=>({entries:[]}));
   const alert=d.healthAlert?h("div",{class:"card"},"Online speech failures are high. Open Health."):null;
   const pools=d.pools&&d.pools.length?h("table",{},h("tr",{},h("th",{},"Pool"),h("th",{},"Provider"),h("th",{},"Key fingerprint"),h("th",{},"Devices"),h("th",{},"State")),d.pools.map(p=>h("tr",{},h("td",{},p.label),h("td",{},p.provider),h("td",{},h("code",{},p.fingerprint)),h("td",{},p.installs),h("td",{},h("span",{class:"tag "+(p.full?"revoked":"active")},p.full?"full":p.status))))):h("p",{class:"empty"},"No provider pools yet.");
   app.replaceChildren(alert||"",
-    h("div",{class:"grid"},stat("Users",d.users,h("div",{class:"mute"},d.freeUsers+" free · "+d.paidUsers+" paid")),stat("Active devices",d.activeInstalls),stat("Minutes today",d.todayMinutes,h("div",{},h("div",{class:"bar"},h("i",{style:"width:"+d.budgetUsedPct+"%"})),h("div",{class:"mute"},d.budgetUsedPct+"% of "+d.dailyBudgetMinutes+" min"))),stat("This month",d.monthMinutes+" min"),stat("Errors today",d.errorsToday)),
+    h("div",{class:"row"},health&&health.alert?h("span",{class:"tag revoked"},"Speech failures high"):h("span",{class:"tag active"},health&&health.samples?"Speech steady":"No speech samples")),
+    h("div",{class:"grid"},stat("Users",d.users,h("div",{},h("div",{class:"mute"},d.freeUsers+" free · "+d.paidUsers+" paid"),spark())),stat("Active devices",d.activeInstalls,spark()),stat("Minutes today",d.todayMinutes,h("div",{},h("div",{class:"bar"},h("i",{style:"width:"+Math.max(0,Math.min(100,d.budgetUsedPct))+"%"})),h("div",{class:"mute"},d.budgetUsedPct+"% of "+d.dailyBudgetMinutes+" min"))),stat("This month",d.monthMinutes+" min",spark()),stat("Errors today",d.errorsToday,spark())),
+    h("h2",{},"Recent activity"),h("div",{class:"card"},(log.entries&&log.entries.length)?auditTable(log.entries.slice(0,8)):empty("No audit entries yet.")),
     h("h2",{},"Safety controls"),
     h("div",{class:"card row",style:"justify-content:space-between"},h("div",{},h("b",{},"Kill switch "),h("span",{class:"tag "+(d.killSwitch?"revoked":"active")},d.killSwitch?"On — managed dictation paused":"Off")),
       h("button",{class:"btn "+(d.killSwitch?"":"bad"),disabled:!allowed("kill_switch")||undefined,style:"width:auto",on:{click:()=>confirmAction(d.killSwitch?"Turn kill switch off":"Turn kill switch on","This affects every user immediately.",null,(r)=>api("/kill-switch",{method:"POST",body:JSON.stringify({on:!d.killSwitch,reason:r})}))}},d.killSwitch?"Resume managed dictation":"Pause managed dictation")),
@@ -477,7 +529,7 @@ async function users(){
   q.oninput=load; app.replaceChildren(h("h2",{style:"margin-top:0"},"Users"),h("div",{class:"row",style:"margin-bottom:12px"},q),box); load();
 }
 async function userView(id){
-  const {user:u}=await api("/users/"+id); const app=$("#app");
+  const {user:u}=await api("/users/"+id);
   const act=(label,perm,cls,fn)=>h("button",{class:"btn "+cls,disabled:!allowed(perm)||undefined,style:"width:auto",on:{click:fn}},label);
   const devs=u.devices&&u.devices.length?h("table",{},h("tr",{},h("th",{},"Device"),h("th",{},"Status"),h("th",{},"Access key"),h("th",{},"Pool"),h("th",{},"Actions")),
     u.devices.map(dv=>h("tr",{},h("td",{},dv.deviceName),h("td",{},h("span",{class:"tag "+dv.status},dv.status)),
@@ -487,17 +539,19 @@ async function userView(id){
         act("Reissue","reissue","ghost",()=>confirmAction("Reissue access key","The old key stops now. This device reconnects on its own.",null,(r)=>api("/installs/"+dv.installId+"/reissue",{method:"POST",body:JSON.stringify({reason:r})}))),
         act("Revoke","revoke","bad",()=>confirmAction("Revoke device","This device must sign in again.",null,(r)=>api("/installs/"+dv.installId+"/revoke",{method:"POST",body:JSON.stringify({reason:r})})))
       ))))):h("p",{class:"empty"},"No devices.");
-  app.replaceChildren(h("button",{class:"btn ghost",on:{click:()=>show("users")}},"All users"),h("h2",{},u.email),
-    h("div",{class:"row"},h("span",{class:"tag "+u.plan},u.plan),h("span",{class:"tag "+u.status},u.status),
+  const panes={ov:h("div",{}),dev:h("div",{hidden:true}),use:h("div",{hidden:true}),act:h("div",{hidden:true},(u.recentAudit&&u.recentAudit.length)?auditTable(u.recentAudit):empty("No activity for this user."))};
+  document.querySelectorAll("#drawer .tabs button").forEach(b=>b.onclick=()=>{document.querySelectorAll("#drawer .tabs button").forEach(x=>x.classList.toggle("on",x===b));Object.entries(panes).forEach(([k,el])=>{el.hidden=k!==b.dataset.tab})});
+  panes.ov.replaceChildren(h("div",{class:"row"},h("span",{class:"tag "+u.plan},u.plan),h("span",{class:"tag "+u.status},u.status),
       act(u.plan==="paid"?"Set to free":"Set to paid","set_plan","ghost",()=>confirmAction("Change plan","Switch this user.",null,(r)=>api("/users/"+id+"/plan",{method:"POST",body:JSON.stringify({plan:u.plan==="paid"?"free":"paid",reason:r})}))),
       act(u.status==="suspended"?"Unsuspend":"Suspend","suspend","ghost",()=>confirmAction("Change suspension","Managed dictation stops on their devices while suspended.",null,(r)=>api("/users/"+id+"/suspend",{method:"POST",body:JSON.stringify({suspended:u.status!=="suspended",reason:r})}))),
       act("Revoke all tokens","revoke","bad",()=>confirmAction("Revoke all tokens","Every device for this user must sign in again.",null,(r)=>api("/users/"+id+"/revoke-all",{method:"POST",body:JSON.stringify({reason:r})}))),
       act("Reset usage","set_plan","ghost",()=>confirmAction("Reset usage","Clears this user's recorded minutes.",null,(r)=>api("/users/"+id+"/reset-usage",{method:"POST",body:JSON.stringify({reason:r})}))),
       act("Delete user","suspend","bad",()=>confirmAction("Delete user","Their profile is marked deleted and their devices are revoked.",null,(r)=>api("/ops/users/"+id+"/delete",{method:"POST",body:JSON.stringify({reason:r})})))
-    ),
-    h("div",{class:"grid",style:"margin-top:14px"},stat("Today",u.usage.dailyMinutes+" min"),stat("This month",u.usage.monthlyMinutes+" min"),stat("Lifetime",u.usage.lifetimeMinutes+" min")),
-    h("h2",{},"Devices"),h("div",{class:"card"},devs)
-  );
+  ));
+  panes.dev.replaceChildren(h("div",{class:"card"},devs));
+  panes.use.replaceChildren(h("div",{class:"grid"},stat("Today",u.usage.dailyMinutes+" min"),stat("This month",u.usage.monthlyMinutes+" min"),stat("Lifetime",u.usage.lifetimeMinutes+" min")));
+  const drawer=$("#drawer"); drawer.hidden=false; requestAnimationFrame(()=>drawer.classList.add("open"));
+  $("#drawerbody").replaceChildren(h("h2",{},u.email),panes.ov,panes.dev,panes.use,panes.act);
 }
 function auditTable(rows){
   if(!rows||!rows.length)return h("p",{class:"empty"},"No audit entries yet.");
@@ -542,5 +596,19 @@ async function team(){
   app.replaceChildren(h("h2",{style:"margin-top:0"},"Team"),h("p",{class:"mute"},"Owners can create staff, change access, and turn email codes on or off. A person can also turn their own email codes on."),form,created,h("h2",{},"Staff"),box);
   load();
 }
+$("#theme").onclick=()=>{const next=document.documentElement.dataset.theme==="light"?"dark":"light";document.documentElement.dataset.theme=next;try{localStorage.setItem("bolo_office_theme",next)}catch(e){}};
+$("#collapse").onclick=()=>{$("#shell").classList.toggle(matchMedia("(max-width:860px)").matches?"navopen":"collapsed")};
+$("#drawerx").onclick=closeDrawer;
+function paintPalette(q){
+  const mods=[{v:"dash",t:"Dashboard"},{v:"users",t:"Users"},{v:"devices",t:"Devices"},{v:"health",t:"Health"},{v:"limits",t:"Limits"},{v:"releases",t:"Releases"},{v:"keys",t:"Keys"},{v:"feedback",t:"Feedback"},{v:"errors",t:"Errors"},{v:"audit",t:"Audit log"},{v:"settings",t:"Settings"},{v:"team",t:"Team"}].filter(m=>!q||m.t.toLowerCase().includes(q));
+  const box=$("#hits");
+  box.replaceChildren(...mods.map(m=>h("button",{type:"button",on:{click:()=>{$("#palette").hidden=true;show(m.v)}}},m.t)));
+  if(q&&q.length>1)api("/users?q="+encodeURIComponent(q)).then(j=>{(j.users||[]).slice(0,8).forEach(u=>box.append(h("button",{type:"button",on:{click:()=>{$("#palette").hidden=true;show("user/"+u.userId)}}},u.email)))}).catch(()=>{});
+}
+function openPalette(){$("#palette").hidden=false;$("#qpal").value="";paintPalette("");$("#qpal").focus()}
+$("#find").onclick=openPalette;
+$("#qpal").addEventListener("input",()=>paintPalette($("#qpal").value.trim().toLowerCase()));
+$("#palette").addEventListener("click",(e)=>{if(e.target.id==="palette")$("#palette").hidden=true});
+document.addEventListener("keydown",(e)=>{if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==="k"){e.preventDefault();openPalette()}if(e.key==="Escape"){$("#palette").hidden=true;closeDrawer()}});
 boot().catch(()=>{});
 </script></body></html>`;
