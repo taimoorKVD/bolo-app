@@ -8,7 +8,7 @@ void main(){ vec2 p=vec2((gl_VertexID<<1)&2, gl_VertexID&2); gl_Position=vec4(p*
  * Ported from the v4 listening-character mockup.
  * `uFast > 0.5` skips sparkle, rim sheen, and the extra body samples.
  */
-export const BLOB_FS = `#version 300 es
+export const SHARED_FS = `#version 300 es
 precision highp float;
 out vec4 o;
 uniform vec2 uRes,uC,uSq,uLook,uPup,uLid,uLow,uTip,uTip2,uArm,uMo2,uWob,uHand;
@@ -23,7 +23,10 @@ float smin(float a,float b,float k){float h=clamp(.5+.5*(b-a)/k,0.,1.);return mi
 float sdEl(vec2 p,vec2 r){ float k0=length(p/r); float k1=length(p/(r*r)); return k0*(k0-1.)/max(k1,1e-5); }
 float sdSeg(vec2 p,vec2 a,vec2 b,float ra,float rb){ vec2 pa=p-a,ba=b-a; float h=clamp(dot(pa,ba)/max(dot(ba,ba),1e-6),0.,1.); return length(pa-ba*h)-mix(ra,rb,h); }
 float ss(float a,float b,float x){ float t=clamp((x-a)/(b-a),0.,1.); return t*t*(3.-2.*t); }
+float vnoise(float x){float i=floor(x),f=fract(x);f=f*f*(3.-2.*f);return mix(hash(i),hash(i+1.),f);}
+float sdRB(vec2 p,vec2 b,float r){vec2 q=abs(p)-b+r;return length(max(q,0.))+min(max(q.x,q.y),0.)-r;}
 float cov(float d){ return clamp(.5-d/PX,0.,1.); }
+float covS(float d,float s){ return clamp(.5-d/max(PX,s),0.,1.); }
 void over(inout vec4 acc, vec3 c, float a){ acc=vec4(c*a,a)+acc*(1.-a); }
 void glowAdd(inout vec4 acc, vec3 c, float a){ acc.rgb+=c*a; acc.a=min(1.,acc.a+a*.55); }
 vec2 charP(vec2 p0){ vec2 p=p0; p.y-=uLift+uHover; p=rot(uTilt)*p; p/=uSq; return p; }
@@ -128,6 +131,9 @@ void finish(vec4 acc){
   }
   o=vec4(min(acc.rgb,vec3(acc.a)),acc.a);
 }
+`;
+
+const BLOB_BODY = `
 float body(vec2 p){
   vec2 q=p-vec2(0.,.95);
   float ang=atan(q.y,q.x);
@@ -182,3 +188,186 @@ void main(){
   finish(acc);
 }
 `;
+
+export const BLOB_FS = SHARED_FS + BLOB_BODY;
+
+export const BUDDY_FS = SHARED_FS + `
+/* ===== B · MIC BUDDY ===== */
+float head(vec2 p){ return sdRB(p-vec2(0.,1.05),vec2(1.,.84),.62); }
+float screenD(vec2 p){ return sdRB(p-vec2(0.,1.02),vec2(.75,.55),.42); }
+void main(){
+  PX=1./uU; vec2 p0=(gl_FragCoord.xy-uC)/uU; vec2 p=charP(p0);
+  vec4 acc=vec4(0.); shadow(acc,p0,.95);
+  glowAdd(acc,mix(GOLD,AMBER,.3),aura(p)*uGlow*.45);
+  float fr; vec2 sp=sparkPos(uT,fr);
+  if(fr<.5) sparkle(acc,p-sp,.15,uSpark);
+  vec3 led=mix(vec3(1.,.8,.38),RED*1.1,uErr*.85);
+  vec2 ab=vec2(0.,1.84), at=ab+uTip; vec2 am=mix(ab,at,.5)+vec2(-(at-ab).y,(at-ab).x)*.1;
+  float ds=min(sdSeg(p,ab,am,.036,.032),sdSeg(p,am,at,.032,.026));
+  over(acc,mix(vec3(.5,.37,.13),vec3(1.,.86,.52),ss(-.03,.03,p.x-am.x)),cov(ds));
+  float dball=length(p-at)-.1;
+  float bl=.35+uLv*1.1+uBeat*1.2;
+  glowAdd(acc,AMBER,max(exp(-max(dball,0.)*9.)-.01,0.)*bl*.7);
+  vec3 bc=mix(vec3(1.,.74,.32),vec3(1.,.97,.86),ss(.08,-.06,length(p-at-vec2(-.03,.035))));
+  over(acc,mix(bc,RED,uErr*.5)*(.9+bl*.3),cov(dball));
+  for(int i=0;i<2;i++){ float sx=i==0?-1.:1.; vec2 hc=vec2(sx*1.42*(1.-.62*uHand.x),.42+(i==0?uArm.x:uArm.y)*.55+uHand.y);
+    float dh=length(p-hc)-.15; if(dh<.03){ vec2 g=normalize(p-hc+1e-5); over(acc,shade(dh,g,p,.15,vec3(.95,.92,.86),vec3(1.,.78,.58),50.,.6,.06),cov(dh)); } }
+  for(int i=0;i<2;i++){ float sx=i==0?-1.:1.; vec2 c=vec2(sx*1.0,1.02); float dp=sdEl(p-c,vec2(.2,.3));
+    if(dp<.03){ vec2 g=normalize((p-c)/vec2(.2,.3)+1e-5); over(acc,shade(dp,g,p,.12,vec3(.95,.7,.28),vec3(1.,.45,.08),60.,.9,.1),cov(dp)); } }
+  float d=head(p);
+  if(d<.05){
+    vec2 g; if(uFast>0.5){ g=normalize(vec2(dFdx(d),dFdy(d))+1e-5); } else { vec2 e=vec2(.008,0.); g=normalize(vec2(head(p+e.xy)-head(p-e.xy),head(p+e.yx)-head(p-e.yx))+1e-6); }
+    vec3 col=shade(d,g,p,.55,vec3(.96,.93,.87),vec3(1.,.8,.6),70.,.75,.1);
+    over(acc,col,cov(d));
+    float sd=screenD(p);
+    over(acc,vec3(.25,.2,.12),exp(-max(sd,0.)*28.)*.35*cov(d+.02));
+    over(acc,mix(vec3(.58,.43,.14),vec3(1.,.87,.52),ss(-.4,.6,p.y-1.0-p.x*.3)),cov(abs(sd)-.026));
+    if(sd<0.){
+      vec3 sc=mix(vec3(.03,.028,.035),vec3(.085,.075,.08),ss(.4,1.6,p.y));
+      over(acc,sc,cov(sd+.026));
+      float clip=cov(sd+.06);
+      vec2 f=p-vec2(0.,1.02+uFaceY)-uLook*vec2(.13,.08);
+      f.x+=uGlitch*.07*(step(.5,fract(gl_FragCoord.y*.045+uT*9.))-.5);
+      float scan=.86+.14*sin(gl_FragCoord.y*1.6);
+      for(int i=0;i<2;i++){ float sx=i==0?-1.:1.; vec2 q=f-vec2(sx*.3,.1)-uPup*vec2(.03,.02);
+        float op=i==0?uLid.x:uLid.y; float lw=i==0?uLow.x:uLow.y;
+        float hh=max(.13*op*(1.-.5*lw),.02);
+        float de=mix(sdRB(q+vec2(0.,.13*(1.-min(op,1.))*.5-.13*lw*.5),vec2(.085,hh),min(.085,hh)), eyeShape(q,vec2(.11,.12),1.,0.,0.,1.), uHappy);
+        de=max(de, q.y-q.x*sx*uSlope-.15*(1.1-.8*min(abs(uSlope),1.)));
+        glowAdd(acc,led,max(exp(-max(de,0.)*22.)-.02,0.)*.55*clip);
+        over(acc,mix(led,vec3(1.,.97,.86),.35)*scan,cov(de)*clip);
+        float bh=i==0?uBrow.y:uBrow.w; float ba=i==0?uBrow.x:-uBrow.z;
+        vec2 bq=rot(-ba)*(q-vec2(0.,.3+bh)); float db=sdSeg(bq,vec2(-.08,0.),vec2(.08,0.),.02,.02);
+        over(acc,led*scan,cov(db)*clip*clamp(uThink+uErr,0.,1.));
+      }
+      vec2 mq=f-vec2(0.,-.24);
+      float de; vec2 bb; float dm=mouthD(mq,de,bb);
+      // viseme LED while listening
+      float vw=.05+.11*uMouth.y/.12*(1.-.45*uMouth.w), vh=.018+.36*uMouth.x;
+      float dv=sdRB(mq+vec2(0.,uMouth.x*.2),vec2(vw,vh),min(vw,vh));
+      dm=mix(dm,dv,uListen*(1.-uHappy));
+      // thinking: loading dots
+      float dd=1e3; for(int j=0;j<3;j++){ float fj=float(j); float bump=max(0.,sin(uT*6.-fj*1.1))*.05; dd=min(dd,length(mq-vec2((fj-1.)*.11,bump))-.032); }
+      dm=mix(dm,dd,uThink);
+      glowAdd(acc,led,max(exp(-max(dm,0.)*22.)-.02,0.)*.5*clip);
+      over(acc,mix(led,vec3(1.,.97,.86),.3)*scan,cov(dm)*clip);
+      float rf=ss(.0,.04,p.y-1.25+p.x*.55)*ss(.22,.1,p.y-1.25+p.x*.55);
+      over(acc,vec3(1.),rf*.07*clip);
+    }
+  }
+  if(fr>.5) sparkle(acc,p-sp,.15,uSpark);
+  finish(acc);
+}
+`;
+
+export const SPIRIT_FS = SHARED_FS + `
+/* ===== C · GLOW SPIRIT ===== */
+float body(vec2 p){
+  float t=uT;
+  float d=length(p-vec2(0.,1.))-(.74+.015*sin(t*2.));
+  d=smin(d,length(p-vec2(-.58,.9))-(.46+.02*sin(t*1.7+1.)),.4);
+  d=smin(d,length(p-vec2(.58,.9))-(.46+.02*sin(t*1.9+2.)),.4);
+  d=smin(d,length(p-vec2(0.,1.36))-(.62+.02*sin(t*1.5+3.)),.5);
+  vec2 tb=vec2(0.,.42), tt=tb+uTip; vec2 tm=mix(tb,tt,.55)+vec2(-(tt-tb).y,(tt-tb).x)*.15;
+  d=smin(d,min(sdSeg(p,tb,tm,.36,.16),sdSeg(p,tm,tt,.16,.04)),.3);
+  vec2 tf=vec2(.05,1.9)+uTip2;
+  d=smin(d,length(p-tf)-.1,.34);
+  d=smin(d,length(p-vec2(-1.08,.75+uArm.x*.5))-.13,.14);
+  d=smin(d,length(p-vec2(1.08,.75+uArm.y*.5))-.13,.14);
+  return d;
+}
+void main(){
+  PX=1./uU; vec2 p0=(gl_FragCoord.xy-uC)/uU; vec2 p=charP(p0);
+  vec4 acc=vec4(0.); shadow(acc,p0,.8);
+  float d=body(p);
+  vec3 gc=mix(vec3(1.,.7,.34),RED,uErr*.7);
+  glowAdd(acc,gc,max(exp(-max(d,0.)*3.)-.012,0.)*(.24+uGlow*.5));
+  for(int i=0;i<4;i++){ float fi=float(i); float a=uT*(.5+.17*fi)+fi*1.7; vec2 mp=vec2(cos(a)*(1.55+.25*uBeat),1.1+sin(a*1.3)*.75);
+    sparkle(acc,p-mp,.05+.02*sin(uT*3.+fi)+.05*uBeat,.45+.5*uBeat); }
+  float fr; vec2 sp=sparkPos(uT,fr);
+  if(fr<.5) sparkle(acc,p-sp,.16,uSpark);
+  if(d<.08){
+    float depth=clamp(-d/.6,0.,1.);
+    vec3 base=mix(vec3(1.,.72,.42),vec3(1.,.96,.88),ss(.0,.8,depth));
+    base=mix(base,vec3(1.,.6,.5),uErr*.4);
+    vec3 col=base*(.88+.2*ss(.2,1.9,p.y)-.1*ss(-.2,.9,p.x+.2))*(.9+.25*uGlow);
+    col+=vec3(1.,.6,.3)*exp(d/.12)*.35;
+    col+=vec3(1.,.98,.92)*exp(-dot(p-vec2(-.35,1.55),p-vec2(-.35,1.55))*5.)*.28;
+    col*=mix(.82,1.,ss(.2,.9,p.y));
+    col+=vec3(1.,.95,.85)*.04*sin(p.y*4.-uT*2.)*depth;
+    over(acc,col,covS(d+.01,.045));
+    float clip=cov(d+.06);
+    vec2 f=p-vec2(0.,uFaceY)-uLook*vec2(.16,.1);
+    float cy=.84+.06*uCheek;
+    blush(acc,f-vec2(-.55,cy),vec2(.15,.09)*(1.+.12*uCheek),vec3(1.,.46,.42),uBlush*clip);
+    blush(acc,f-vec2(.55,cy),vec2(.15,.09)*(1.+.12*uCheek),vec3(1.,.46,.42),uBlush*clip);
+    vec3 ink=vec3(.15,.07,.07), iris=vec3(.55,.3,.18);
+    drawEye(acc,f-vec2(-.31,1.08),vec2(.155,.2),uLid.x,uLow.x,uSlope,ink,iris,1.,clip);
+    drawEye(acc,f-vec2(.31,1.08),vec2(.155,.2),uLid.y,uLow.y,-uSlope,ink,iris,1.,clip);
+    drawBrow(acc,f-vec2(-.32,1.38+uBrow.y),uBrow.x,.075,.022,vec3(.85,.55,.35),clip*.8);
+    drawBrow(acc,f-vec2(.32,1.38+uBrow.w),-uBrow.z,.075,.022,vec3(.85,.55,.35),clip*.8);
+    drawMouth(acc,f-vec2(0.,.8),vec3(.42,.2,.14),vec3(.36,.11,.09),vec3(.95,.5,.45),clip);
+  }
+  if(fr>.5) sparkle(acc,p-sp,.16,uSpark);
+  finish(acc);
+}
+`;
+
+export const PEBBLE_FS = SHARED_FS + `
+/* ===== D · PEBBLE ===== */
+float mainB(vec2 p){
+  vec2 q=p-vec2(0.,.9); q.x*=1.+.09*q.y;
+  float ang=atan(q.y,q.x);
+  float wob=uWob.x*cos(2.*ang)+uWob.y*sin(3.*ang);
+  float ex=2.6; float r=pow(pow(abs(q.x),ex)+pow(abs(q.y)/.9,ex),1./ex);
+  return (r-1.)*.88-wob*.04;
+}
+float fuzz(vec2 p){ vec2 q=p-vec2(0.,.9); float ang=atan(q.y,q.x); return (vnoise(ang*34.+uT*.3)-.5)*.016+(vnoise(ang*85.)-.5)*.005; }
+vec2 earC(float s){ return vec2(s*.5,1.7)+(s<0.?uTip:uTip2); }
+float body(vec2 p){
+  float d=mainB(p);
+  d=smin(d,length(p-earC(-1.))-.19,.14);
+  d=smin(d,length(p-earC(1.))-.19,.14);
+  d=smin(d,length(p-vec2(-.97,.52+uArm.x*.38))-.14,.1);
+  d=smin(d,length(p-vec2(.97,.52+uArm.y*.38))-.14,.1);
+  return d;
+}
+void main(){
+  PX=1./uU; vec2 p0=(gl_FragCoord.xy-uC)/uU; vec2 p=charP(p0);
+  vec4 acc=vec4(0.); shadow(acc,p0,1.0);
+  glowAdd(acc,mix(GOLD,AMBER,.3),aura(p)*uGlow*.4);
+  float fr; vec2 sp=sparkPos(uT,fr);
+  if(fr<.5) sparkle(acc,p-sp,.15,uSpark);
+  float d=body(p);
+  if(d<.05){
+    vec2 g; if(uFast>0.5){ g=normalize(vec2(dFdx(d),dFdy(d))+1e-5); } else { vec2 e=vec2(.008,0.); g=normalize(vec2(body(p+e.xy)-body(p-e.xy),body(p+e.yx)-body(p-e.yx))+1e-6); }
+    vec3 base=mix(vec3(.98,.92,.83),vec3(1.,.8,.72),uErr*.3);
+    vec3 col=shade(d,g,p,.8,base,vec3(1.,.58,.46),12.,.12,.05);
+    col+=vec3(1.)*ss(-.06,0.,d)*.12;
+    over(acc,col,covS(d+fuzz(p),.024));
+    float mb=mainB(p);
+    for(int i=0;i<2;i++){ float s=i==0?-1.:1.; float di=length(p-earC(s)-vec2(0.,.02))-.095;
+      over(acc,vec3(1.,.68,.6),cov(di)*ss(-.02,.06,mb)*.9); }
+    float clip=cov(d+.04);
+    vec2 f=p-vec2(0.,uFaceY)-uLook*vec2(.2,.12);
+    float cy=.76+.06*uCheek;
+    blush(acc,f-vec2(-.5,cy),vec2(.15,.085)*(1.+.15*uCheek),vec3(1.,.48,.46),uBlush*1.25*clip);
+    blush(acc,f-vec2(.5,cy),vec2(.15,.085)*(1.+.15*uCheek),vec3(1.,.48,.46),uBlush*1.25*clip);
+    vec3 ink=vec3(.07,.055,.055);
+    drawEye(acc,f-vec2(-.27,1.0),vec2(.085,.105),uLid.x,uLow.x,uSlope,ink,vec3(.32,.24,.22),.8,clip);
+    drawEye(acc,f-vec2(.27,1.0),vec2(.085,.105),uLid.y,uLow.y,-uSlope,ink,vec3(.32,.24,.22),.8,clip);
+    drawMouth(acc,f-vec2(0.,.75),vec3(.26,.12,.1),vec3(.32,.09,.08),vec3(.92,.48,.44),clip);
+  }
+  if(fr>.5) sparkle(acc,p-sp,.15,uSpark);
+  finish(acc);
+}
+`;
+
+export type CharacterKey = "blob" | "buddy" | "spirit" | "pebble";
+
+export function characterFragment(key: CharacterKey): string {
+  if (key === "buddy") return BUDDY_FS;
+  if (key === "spirit") return SPIRIT_FS;
+  if (key === "pebble") return PEBBLE_FS;
+  return BLOB_FS;
+}

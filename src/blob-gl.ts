@@ -1,12 +1,15 @@
 import { BLOB_UNIT, type BlobUniforms } from "./blob-actor";
-import { BLOB_FS, BLOB_VS } from "./blob-shaders";
+import { BLOB_VS, characterFragment, type CharacterKey } from "./blob-shaders";
 
 export type BlobProgram = {
   program: WebGLProgram;
   uniforms: Record<string, WebGLUniformLocation | null>;
 };
 
-export function createBlobGl(canvas: HTMLCanvasElement): { gl: WebGL2RenderingContext; program: BlobProgram } | null {
+export function createBlobGl(
+  canvas: HTMLCanvasElement,
+  key: CharacterKey = "blob",
+): { gl: WebGL2RenderingContext; program: BlobProgram } | null {
   const gl = canvas.getContext("webgl2", {
     alpha: true,
     premultipliedAlpha: true,
@@ -16,7 +19,7 @@ export function createBlobGl(canvas: HTMLCanvasElement): { gl: WebGL2RenderingCo
     powerPreference: "low-power",
   });
   if (!gl) return null;
-  const program = link(gl, BLOB_VS, BLOB_FS);
+  const program = link(gl, BLOB_VS, characterFragment(key));
   if (!program) return null;
   gl.bindVertexArray(gl.createVertexArray());
   gl.disable(gl.DEPTH_TEST);
@@ -75,6 +78,8 @@ export function drawBlob(
   program: BlobProgram,
   canvas: HTMLCanvasElement,
   uniforms: BlobUniforms,
+  unit = BLOB_UNIT,
+  drift = false,
 ): void {
   const w = canvas.width;
   const h = canvas.height;
@@ -87,10 +92,10 @@ export function drawBlob(
   const cssW = canvas.clientWidth || w;
   const dpr = w / cssW;
   const show = Math.max(0.001, uniforms.shw);
-  const unit = BLOB_UNIT * dpr * show;
-  const cx = w * 0.48;
+  const unitPx = unit * dpr * show;
+  const cx = w * 0.48 + (drift ? Math.sin(uniforms.uT * 0.7) * 0.18 * unitPx : 0);
   const cy = h * 0.2;
-  const bound = BLOB_UNIT * dpr * Math.max(1, show);
+  const bound = unit * dpr * Math.max(1, show);
   const sx = Math.max(0, Math.floor(cx - 2.15 * bound));
   const sy = Math.max(0, Math.floor(cy - 0.65 * bound));
   const sw = Math.min(w - sx, Math.ceil(4.3 * bound));
@@ -100,7 +105,7 @@ export function drawBlob(
   gl.useProgram(program.program);
   setUniform(gl, program, "uRes", [w, h]);
   setUniform(gl, program, "uC", [cx, cy]);
-  setUniform(gl, program, "uU", unit);
+  setUniform(gl, program, "uU", unitPx);
   for (const key of Object.keys(uniforms) as Array<keyof BlobUniforms>) {
     if (key === "shw") continue;
     setUniform(gl, program, key, uniforms[key]);

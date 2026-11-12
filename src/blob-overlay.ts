@@ -16,23 +16,25 @@ import {
 import { CuePlayer } from "./cues";
 import { activeCharacter } from "./characters";
 import { buildFixCard, resetFixCard } from "./fix-card";
-import { normalizeListener } from "./listener-style";
+import { isAnimatedListener, normalizeListener, type ListenerId } from "./listener-style";
 import type { DictationEvent, DictationPhase, Settings } from "./types";
 
 const LISTENER_CACHE = "bolo.listener";
 
-export function mountBlobOverlay(root: HTMLElement): (() => void) | null {
+export function mountBlobOverlay(root: HTMLElement, listener: ListenerId = "blob"): (() => void) | null {
+  const character = isAnimatedListener(listener) ? listener : "blob";
   root.replaceChildren();
   const stage = document.createElement("div");
   stage.className = "blob-stage";
   stage.dataset.pose = "hidden";
+  stage.dataset.character = character;
   stage.setAttribute("role", "status");
   stage.setAttribute("aria-live", "polite");
 
   const canvas = document.createElement("canvas");
   canvas.className = "blob-canvas";
   canvas.setAttribute("aria-hidden", "true");
-  const bundle = createBlobGl(canvas);
+  const bundle = createBlobGl(canvas, character);
   if (!bundle) {
     root.replaceChildren();
     return null;
@@ -67,7 +69,7 @@ export function mountBlobOverlay(root: HTMLElement): (() => void) | null {
   stage.append(canvas, pill, qm, fixCard);
   root.append(stage);
 
-  const actor = new BlobActor(prefersReducedMotion());
+  const actor = new BlobActor(prefersReducedMotion(), character);
   const cues = new CuePlayer();
   let prefs: Partial<Settings> = {};
   let state: CharacterState = "hidden";
@@ -149,7 +151,7 @@ export function mountBlobOverlay(root: HTMLElement): (() => void) | null {
     resizeCanvas(canvas, dpr);
     const voice = state === "listening" ? shapeVoice(demoLevel(level, actor.t, state), bands) : shapeVoice(0, null);
     const uniforms = actor.step(1 / 60, voice, quality === "low");
-    drawBlob(bundle.gl, bundle.program, canvas, uniforms);
+    drawBlob(bundle.gl, bundle.program, canvas, uniforms, actor.rig.unit, character === "spirit" && !reduced);
     paintPill();
   };
 
@@ -173,7 +175,9 @@ export function mountBlobOverlay(root: HTMLElement): (() => void) | null {
     resizeCanvas(canvas, dpr);
     const voice = state === "listening" ? shapeVoice(demoLevel(level, actor.t, state), bands) : null;
     const uniforms = actor.step(dt, voice, quality === "low");
-    if (uniforms.uAlpha > 0.001) drawBlob(bundle.gl, bundle.program, canvas, uniforms);
+    if (uniforms.uAlpha > 0.001) {
+      drawBlob(bundle.gl, bundle.program, canvas, uniforms, actor.rig.unit, character === "spirit" && !reduced);
+    }
     else {
       bundle.gl.viewport(0, 0, canvas.width, canvas.height);
       bundle.gl.clearColor(0, 0, 0, 0);

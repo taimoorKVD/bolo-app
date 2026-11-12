@@ -95,10 +95,10 @@ fn default_listener() -> String {
 }
 
 pub fn normalize_listener(id: &str) -> String {
-    if id.trim().eq_ignore_ascii_case("classic") {
-        "classic".into()
-    } else {
-        default_listener()
+    match id.trim().to_ascii_lowercase().as_str() {
+        "classic" => "classic".into(),
+        "blob" | "buddy" | "spirit" | "pebble" => id.trim().to_ascii_lowercase(),
+        _ => default_listener(),
     }
 }
 
@@ -848,7 +848,10 @@ mod carryover {
         assert!(listener_is_animated("nope"));
         assert!(!listener_is_animated(" classic "));
         assert_eq!(normalize_listener("CLASSIC"), "classic");
-        assert_eq!(normalize_listener("buddy"), "blob");
+        assert_eq!(normalize_listener("buddy"), "buddy");
+        assert_eq!(normalize_listener("SPIRIT"), "spirit");
+        assert_eq!(normalize_listener("pebble"), "pebble");
+        assert!(listener_is_animated("buddy") && listener_is_animated("spirit") && listener_is_animated("pebble"));
         assert_eq!(overlay_logical_size("classic", "recording"), (268.0, 150.0));
         assert_eq!(overlay_logical_size("classic", "error"), (280.0, 200.0));
         assert_eq!(overlay_logical_size("blob", "recording"), (560.0, 220.0));

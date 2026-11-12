@@ -20,7 +20,7 @@ export function mountOverlay(root: HTMLElement): void {
     if (id === mode) return;
     dispose?.();
     mode = id;
-    const started = id === "classic" ? mountClassicOverlay(root) : mountBlobOverlay(root);
+    const started = id === "classic" ? mountClassicOverlay(root) : mountBlobOverlay(root, id);
     if (started) {
       dispose = started;
       return;

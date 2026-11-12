@@ -4,10 +4,28 @@ import {
   type CharacterState,
   type Voice,
 } from "./blob-state";
+import type { CharacterKey } from "./blob-shaders";
 
-/** Bolo Blob's size in CSS pixels. The curl, arms, and hop fit in the overlay canvas. */
+/** Size in CSS pixels. The curl, arms, ears, and hop fit in the overlay canvas. */
 export const BLOB_UNIT = 50;
-export const BLOB_BLUSH = 0.36;
+
+export type Rig = {
+  key: CharacterKey;
+  unit: number;
+  hover: number;
+  /** Mouth size. Pebble is smaller. */
+  ms: number;
+  blush: number;
+};
+
+export const RIGS: Record<CharacterKey, Rig> = {
+  blob: { key: "blob", unit: 50, hover: 0, ms: 1, blush: 0.36 },
+  buddy: { key: "buddy", unit: 46, hover: 0.36, ms: 1, blush: 0 },
+  spirit: { key: "spirit", unit: 48, hover: 0.4, ms: 0.95, blush: 0.4 },
+  pebble: { key: "pebble", unit: 52, hover: 0, ms: 0.72, blush: 0.45 },
+};
+
+const BOUNCE: Record<CharacterKey, number> = { blob: 0.55, pebble: 0.4, buddy: 0.15, spirit: 0.25 };
 
 export class Spring {
   x: number;
@@ -174,6 +192,11 @@ export class BlobActor {
   readonly glow = new Spring(0.2, 60, 1);
   readonly err = new Spring(0, 90, 1);
   readonly spark = new Spring(0, 60, 1);
+  readonly hand = new Spring(0, 260, 0.55);
+  readonly handY = new Spring(0, 200, 0.6);
+  readonly pulse = new Spring(0, 90, 0.6);
+  readonly glitch = new Spring(0, 300, 0.7);
+  readonly hover = new Spring(0, 40, 0.7);
   readonly faceY = new Spring(0, 180, 0.45);
   readonly listen = new Spring(0, 80, 1);
   readonly think = new Spring(0, 80, 1);
@@ -183,8 +206,9 @@ export class BlobActor {
   readonly qm = new Spring(0, 180, 0.5);
   private random = rng(11);
   private springs: Spring[];
+  rig: Rig = RIGS.blob;
 
-  constructor(reduced: boolean) {
+  constructor(reduced: boolean, key: CharacterKey = "blob") {
     this.reduced = reduced;
     this.springs = [
       this.sq, this.tilt, this.lean, this.gx, this.gy, this.px, this.py,
@@ -192,11 +216,19 @@ export class BlobActor {
       this.bLh, this.bLa, this.bRh, this.bRa, this.cheek, this.blush,
       this.mo, this.mw, this.ms, this.mr, this.mx, this.mt,
       this.armL, this.armR, this.jx, this.jy, this.wa, this.wb, this.tx, this.ty,
-      this.glow, this.err, this.spark, this.faceY, this.listen, this.think, this.done,
+      this.glow, this.err, this.spark, this.hand, this.handY, this.pulse, this.glitch, this.hover,
+      this.faceY, this.listen, this.think, this.done,
       this.pop, this.pill, this.qm,
     ];
     this.pop.snap(0);
     this.pill.snap(0);
+    this.useCharacter(key);
+  }
+
+  useCharacter(key: CharacterKey): void {
+    this.rig = RIGS[key];
+    this.hover.t = this.rig.hover;
+    if (this.reduced) this.hover.snap(this.rig.hover);
   }
 
   setReduced(reduced: boolean): void {
@@ -346,55 +378,63 @@ export class BlobActor {
         this.ty.v -= 1;
       }
       if (lv > 0.45 && this.prevLv <= 0.45) {
-        this.sq.v -= 0.55;
-        this.wb.v += 0.55;
+        const kick = BOUNCE[this.rig.key];
+        this.sq.v -= kick;
+        this.wb.v += kick;
       }
     }
     this.prevLv = lv;
 
     const vis = this.vis;
+    const blush = this.rig.blush;
     const lo = (0.035 + 0.36 * (0.35 + 0.65 * vis.vo) * clamp(lv * 1.7)) * (1 - vis.cl * 0.9) * 0.8;
     const wave = this.reduced ? 0 : 1;
     const pose = {
       idle: {
         lid: [1, 1], low: [0.1, 0.1], sl: 0, bh: [0, 0], ba: [0, 0],
         m: [0, 0.13, 0.75, 0, 0, 0], tilt: 0.05 * Math.sin(t * 0.55) * wave, lean: 0, arm: [0, 0],
-        glow: 0.16, cheek: 0.3, blush: BLOB_BLUSH * 0.85,
+        glow: 0.16, cheek: 0.3, blush: blush * 0.85,
       },
       listening: {
         lid: [1.12, 1.12], low: [0, 0], sl: -0.06, bh: [0.07, 0.07], ba: [-0.08, -0.08],
         m: [lo, 0.115 * (0.72 + 0.42 * vis.vw), 0.38, clamp(vis.vr), 0, 0],
         tilt: 0.06 + 0.05 * Math.sin(t * 0.8) * wave, lean: 1, arm: [0.12, 0.12],
-        glow: 0.32 + lv * 0.9, cheek: 0.15, blush: BLOB_BLUSH * 0.8,
+        glow: 0.32 + lv * 0.9, cheek: 0.15, blush: blush * 0.8,
       },
       thinking: {
         lid: [0.84, 0.74], low: [0.16, 0.3], sl: 0.1, bh: [0.1, -0.03], ba: [-0.12, 0.28],
         m: [0, 0.085, -0.12, 0, 0.06, 0.2], tilt: -0.13 + 0.02 * Math.sin(t * 1.3) * wave,
-        lean: 0, arm: [0, 0.5], glow: 0.32, cheek: 0.1, blush: BLOB_BLUSH * 0.7,
+        lean: 0, arm: [0, 0.5], glow: 0.32, cheek: 0.1, blush: blush * 0.7,
       },
       done: {
         lid: [1, 1], low: [0.3, 0.3], sl: 0, bh: [0.08, 0.08], ba: [0, 0],
         m: [0.055, 0.135, 1.05, 0, 0, 0], tilt: 0, lean: 0.3,
         arm: ts > 0.25 && ts < 1.05 ? [0.8, 0.8] : [0.05, 0.05],
-        glow: 0.45, cheek: 1, blush: BLOB_BLUSH * 1.45,
+        glow: 0.45, cheek: 1, blush: blush * 1.45,
       },
       error: {
         lid: [1.06, 1.06], low: [0.05, 0.05], sl: -0.22, bh: [0.09, 0.06], ba: [-0.34, -0.34],
         m: [0.018, 0.085, -0.65, 0, -0.04, -0.24], tilt: 0.24, lean: 0,
         arm: ts > 0.1 && ts < 0.85 ? [1, 1] : [0.2, 0.2],
-        glow: 0.22, cheek: 0, blush: BLOB_BLUSH * 0.6,
+        glow: 0.22, cheek: 0, blush: blush * 0.6,
       },
     }[s];
 
     const lid = pose.lid.slice();
     let smile = pose.m[2] ?? 0;
-    if (!this.reduced && s === "idle" && ts > 0.9 && ts < 1.35) {
+    const key = this.rig.key;
+    if (!this.reduced && key === "blob" && s === "idle" && ts > 0.9 && ts < 1.35) {
       lid[1] = 0;
       smile = 1.2;
       if (this.beat("wink", 0.9, ts)) {
         this.sq.v -= 0.8;
         this.jx.v += 1.2;
       }
+    }
+    if (key === "pebble" && s === "idle" && ts > 0.9 && ts < 2.1) {
+      pose.blush = this.rig.blush * 1.5;
+      smile = 0.9;
+      this.gaze = [-0.7, -0.45];
     }
     this.lidL.t = lid[0] ?? 1;
     this.lidR.t = lid[1] ?? 1;
@@ -405,8 +445,9 @@ export class BlobActor {
     this.bRh.t = pose.bh[1] ?? 0;
     this.bLa.t = pose.ba[0] ?? 0;
     this.bRa.t = pose.ba[1] ?? 0;
-    this.mo.t = (pose.m[0] ?? 0);
-    this.mw.t = pose.m[1] ?? 0.13;
+    const mouth = this.rig.ms;
+    this.mo.t = (pose.m[0] ?? 0) * mouth;
+    this.mw.t = (pose.m[1] ?? 0.13) * mouth;
     this.ms.t = smile;
     this.mr.t = pose.m[3] ?? 0;
     this.mx.t = pose.m[4] ?? 0;
@@ -418,6 +459,27 @@ export class BlobActor {
     this.glow.t = pose.glow;
     this.cheek.t = pose.cheek;
     this.blush.t = pose.blush;
+    if (key === "buddy") {
+      if (!this.reduced && s === "idle" && (this.beat("ant1", 0.5, ts) || this.beat("ant2", 0.85, ts))) this.pulse.v += 9;
+      if (s === "done" && !this.reduced) {
+        const clap = (ts > 0.3 && ts < 0.48) || (ts > 0.62 && ts < 0.8);
+        this.hand.t = clap ? 1 : 0;
+        if (this.beat("clap1", 0.4, ts) || this.beat("clap2", 0.72, ts)) this.sq.v -= 0.6;
+      } else this.hand.t = 0;
+      this.glitch.t = !this.reduced && s === "error" && ts > 0.08 && ts < 0.5 ? 1 : 0;
+    } else {
+      this.hand.t = 0;
+      this.glitch.t = 0;
+    }
+    if (key === "spirit") {
+      if (!this.reduced && s === "done" && this.beat("burst", 0.35, ts)) this.pulse.v += 7;
+      this.hover.t = this.rig.hover + (s === "error" ? -0.12 : s === "listening" ? 0.06 : 0);
+    } else if (this.rig.hover) {
+      this.hover.t = this.rig.hover;
+    }
+    if (!this.reduced && key === "pebble" && s !== "done" && R() < 0.012) {
+      (R() < 0.5 ? this.tx : this.ty).v += (R() < 0.5 ? -1 : 1) * 3;
+    }
     this.happy.t = s === "done" && ts > 0.12 ? 1 : 0;
     this.err.t = s === "error" ? 1 : 0;
     this.spark.t = !this.reduced && s === "thinking" ? 1 : 0;
@@ -505,11 +567,26 @@ export class BlobActor {
     const sy = this.sq.x * sc;
     const sx = (1 + (1 - this.sq.x) * 0.75) * sc;
     const perk = this.listen.x;
-    const wave = this.reduced ? 0 : Math.sin(t * 0.9);
-    const tip: [number, number] = [
-      0.05 + 0.04 * wave - 0.04 * perk + this.jx.x * 0.6,
-      0.3 + 0.08 * perk + this.jy.x * 0.5,
-    ];
+    const droop = this.err.x;
+    const key = this.rig.key;
+    const wave = (speed: number) => (this.reduced ? 0 : Math.sin(t * speed));
+    let tip: [number, number] = [0, 0];
+    let tip2: [number, number] = [0, 0];
+    if (key === "blob") {
+      tip = [0.05 + 0.04 * wave(0.9) - 0.04 * perk + this.jx.x * 0.6, 0.3 + 0.08 * perk + this.jy.x * 0.5];
+    } else if (key === "buddy") {
+      tip = [this.jx.x * 0.9 + 0.04 * wave(1.1), 0.34 + 0.06 * perk + this.jy.x * 0.5];
+    } else if (key === "spirit") {
+      tip = [0.16 * Math.sin(t * 1.4 * (1 + 0.6 * perk)) * (this.reduced ? 0 : 1) + this.jx.x, -0.52 + 0.08 * wave(2.1) + this.jy.x * 0.6];
+      tip2 = [this.tx.x * 0.6 + 0.04 * wave(1.7), this.ty.x * 0.4];
+    } else {
+      tip = [this.jx.x * 0.4 - 0.02 * wave(1.2) + this.tx.x * 0.12 - 0.05 * droop, 0.05 * perk - 0.12 * droop + this.jy.x * 0.35];
+      tip2 = [
+        this.jx.x * 0.4 + 0.02 * (this.reduced ? 0 : Math.sin(t * 1.3 + 1)) + this.ty.x * 0.1 + 0.05 * droop,
+        0.05 * perk - 0.12 * droop + this.jy.x * 0.35 + this.ty.x * 0.08,
+      ];
+    }
+    const hover = this.rig.hover ? this.hover.x + 0.05 * wave(1.7) : 0;
     const lid: [number, number] = [
       Math.max(0, this.lidL.x * (1 - this.blink)),
       Math.max(0, this.lidR.x * (1 - this.blink)),
@@ -520,7 +597,7 @@ export class BlobActor {
       uSq: [sx, sy],
       uTilt: this.tilt.x,
       uLift: this.lift,
-      uHover: 0,
+      uHover: hover,
       uLook: [this.gx.x, this.gy.x],
       uPup: [this.px.x, this.py.x],
       uLid: lid,
@@ -531,13 +608,13 @@ export class BlobActor {
       uMouth: [Math.max(0, this.mo.x), Math.max(0.02, this.mw.x), this.ms.x, clamp(this.mr.x)],
       uMo2: [this.mx.x, this.mt.x],
       uTip: tip,
-      uTip2: [0, 0],
+      uTip2: tip2,
       uArm: [this.armL.x, this.armR.x],
       uWob: [
         this.wa.x * 0.5 + 0.06 * this.lv * perk * (this.reduced ? 0 : Math.sin(t * 9)),
         this.wb.x * 0.5 + 0.05 * this.bands[1] * perk * (this.reduced ? 0 : Math.sin(t * 7)),
       ],
-      uHand: [0, 0],
+      uHand: [clamp(this.hand.x, 0, 1.1), this.handY.x],
       uGlow: this.glow.x,
       uErr: this.err.x,
       uSpark: this.reduced ? 0 : this.spark.x,
@@ -548,8 +625,8 @@ export class BlobActor {
       uFaceY: this.faceY.x - 0.025 * lean,
       uCheek: this.cheek.x,
       uBlush: this.blush.x,
-      uBeat: 0,
-      uGlitch: 0,
+      uBeat: Math.max(0, this.pulse.x),
+      uGlitch: clamp(this.glitch.x),
       uAlpha: sm(shw / 0.35),
       uFast: fast ? 1 : 0,
       uT: t,
