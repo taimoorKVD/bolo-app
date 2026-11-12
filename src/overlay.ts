@@ -1,18 +1,60 @@
 import { api, inTauri, onDictation } from "./api";
+import { mountBlobOverlay, cachedListener } from "./blob-overlay";
 import {
   DEFAULT_CHARACTER,
   activeCharacter,
   clipUrls,
-  resolvePack,
-  soundUrl,
-  type SoundCue,
-  type SoundPackId,
 } from "./characters";
+import { CuePlayer } from "./cues";
+import { buildFixCard, resetFixCard } from "./fix-card";
+import { normalizeListener, type ListenerId } from "./listener-style";
 import type { DictationEvent, DictationPhase, Settings } from "./types";
 
 type Pose = "listen" | "write" | "leave" | "error" | "fix" | "hidden";
 
 export function mountOverlay(root: HTMLElement): void {
+  let mode: ListenerId | null = null;
+  let dispose: (() => void) | null = null;
+
+  const mount = (id: ListenerId) => {
+    if (id === mode) return;
+    dispose?.();
+    mode = id;
+    const started = id === "classic" ? mountClassicOverlay(root) : mountBlobOverlay(root, id);
+    if (started) {
+      dispose = started;
+      return;
+    }
+    mode = "classic";
+    dispose = mountClassicOverlay(root);
+  };
+
+  const fromSettings = (settings: Partial<Settings>) => {
+    const forced = previewListener();
+    mount(forced ?? normalizeListener(settings.listener ?? cachedListener()));
+  };
+
+  fromSettings({});
+  void api.getSettings().then(fromSettings).catch((error) => {
+    console.warn("overlay could not read settings", error);
+  });
+  if (inTauri()) {
+    void import("@tauri-apps/api/event").then(({ listen }) =>
+      listen("bolo-settings-changed", () => {
+        void api.getSettings().then(fromSettings).catch(() => {});
+      }),
+    );
+  }
+}
+
+function previewListener(): ListenerId | null {
+  if (inTauri()) return null;
+  const value = new URLSearchParams(location.search).get("listener");
+  if (!value) return null;
+  return normalizeListener(value);
+}
+
+function mountClassicOverlay(root: HTMLElement): () => void {
   root.replaceChildren();
   const stage = el("div", "listener");
   stage.dataset.pose = "hidden";
@@ -33,6 +75,9 @@ export function mountOverlay(root: HTMLElement): void {
   root.append(stage);
 
   const cues = new CuePlayer();
+  let disposed = false;
+  let unlistenDictation: (() => void) | null = null;
+  let unlistenSettings: (() => void) | null = null;
   let characterId = DEFAULT_CHARACTER;
   let alpha = initial.alpha;
   let prefs: Partial<Settings> = {};
@@ -54,7 +99,7 @@ export function mountOverlay(root: HTMLElement): void {
   const applyPrefs = (settings: Partial<Settings>) => {
     prefs = settings;
     const id = activeCharacter(settings);
-    cues.configure(resolvePack(settings.soundPack, id), settings.soundVolume ?? 0.6);
+    cues.configureSettings(settings, id);
     useCharacter(id);
   };
   const refreshPrefs = async () => {
@@ -68,9 +113,13 @@ export function mountOverlay(root: HTMLElement): void {
   if (inTauri()) {
     void import("@tauri-apps/api/event").then(({ listen }) =>
       listen("bolo-settings-changed", () => {
+        if (disposed) return;
         // Swap only while hidden so a take in progress never flashes.
         if (pose === "hidden") void refreshPrefs();
         else pendingRefresh = true;
+      }).then((un) => {
+        if (disposed) un();
+        else unlistenSettings = un;
       }),
     );
   }
@@ -139,7 +188,12 @@ export function mountOverlay(root: HTMLElement): void {
     }
   };
 
-  void onDictation(apply);
+  void onDictation((event) => {
+    if (!disposed) apply(event);
+  }).then((un) => {
+    if (disposed) un();
+    else unlistenDictation = un;
+  });
 
   const params = new URLSearchParams(location.search);
   const demo = params.get("demo");
@@ -150,6 +204,17 @@ export function mountOverlay(root: HTMLElement): void {
   } else {
     apply({ phase: "idle", message: null, elapsedMs: 0, level: 0 });
   }
+
+  return () => {
+    disposed = true;
+    unlistenDictation?.();
+    unlistenSettings?.();
+    listen.pause();
+    write.pause();
+    hide.pause();
+    cues.stop();
+    root.replaceChildren();
+  };
 }
 
 function clip(className: string, src: string): HTMLVideoElement {
@@ -245,65 +310,6 @@ function overlayProblem(message: string | null): string {
     .replace(/Groq/g, "the service");
 }
 
-/** Plays the start, done, and dismiss cues for the chosen pack. */
-class CuePlayer {
-  private pack: SoundPackId | null = null;
-  private volume = 0.6;
-  private audio = new Map<SoundCue, HTMLAudioElement>();
-  private tokens = new WeakMap<HTMLAudioElement, number>();
-
-  configure(pack: SoundPackId, volume: number): void {
-    this.volume = Math.max(0, Math.min(1, Number.isFinite(volume) ? volume : 0.6));
-    if (pack === this.pack) return;
-    this.pack = pack;
-    this.audio.clear();
-    for (const cue of ["start", "done", "dismiss"] as SoundCue[]) {
-      const url = soundUrl(pack, cue);
-      if (!url) continue;
-      const node = new Audio(url);
-      node.preload = "auto";
-      node.load();
-      this.audio.set(cue, node);
-      this.warm(node);
-    }
-  }
-
-  play(cue: SoundCue): void {
-    const node = this.audio.get(cue);
-    if (!node || this.volume <= 0) return;
-    this.tokens.set(node, (this.tokens.get(node) ?? 0) + 1);
-    // The mic is already open for the start cue, so keep it soft.
-    node.volume = cue === "start" ? this.volume * 0.45 : this.volume;
-    try {
-      node.pause();
-      node.currentTime = 0;
-    } catch {
-      // The element may not be seekable until the first bytes arrive.
-    }
-    const pending = node.play();
-    if (pending) void pending.catch(() => {});
-  }
-
-  /** Decode once silently so the first real cue is not late. */
-  private warm(node: HTMLAudioElement): void {
-    const mine = (this.tokens.get(node) ?? 0) + 1;
-    this.tokens.set(node, mine);
-    node.volume = 0;
-    const reset = () => {
-      if (mine !== this.tokens.get(node)) return;
-      node.pause();
-      try {
-        node.currentTime = 0;
-      } catch {
-        // Ignore a seek that races the first play.
-      }
-    };
-    const pending = node.play();
-    if (pending) void pending.then(reset).catch(reset);
-    else reset();
-  }
-}
-
 function demoEvent(demo: string | null): DictationEvent {
   if (demo === "transcribing" || demo === "inserting") {
     return { phase: "transcribing", message: null, elapsedMs: 2400, level: 0 };
@@ -378,47 +384,4 @@ function el(tag: string, className?: string, text?: string): HTMLElement {
   if (className) node.className = className;
   if (text) node.textContent = text;
   return node;
-}
-
-/** Small card offered for a few seconds after a paste. */
-function buildFixCard(): HTMLElement {
-  const card = el("div", "fix-card");
-  card.hidden = true;
-  const first = document.createElement("button");
-  first.type = "button";
-  first.className = "fix-main";
-  first.textContent = "↻ Fix last";
-  const choices = el("div", "fix-choices");
-  choices.hidden = true;
-  const again = document.createElement("button");
-  again.type = "button";
-  again.textContent = "Listen again";
-  const type = document.createElement("button");
-  type.type = "button";
-  type.textContent = "Type it";
-  choices.append(again, type);
-  const close = document.createElement("button");
-  close.type = "button";
-  close.className = "fix-close";
-  close.textContent = "✕";
-  close.setAttribute("aria-label", "No thanks");
-  first.addEventListener("click", () => {
-    first.hidden = true;
-    choices.hidden = false;
-  });
-  const send = (action: "relisten" | "type" | "dismiss") => {
-    void api.overlayFix(action).catch((error) => console.warn("fix", error));
-  };
-  again.addEventListener("click", () => send("relisten"));
-  type.addEventListener("click", () => send("type"));
-  close.addEventListener("click", () => send("dismiss"));
-  card.append(first, choices, close);
-  return card;
-}
-
-function resetFixCard(card: HTMLElement): void {
-  const first = card.querySelector<HTMLElement>(".fix-main");
-  const choices = card.querySelector<HTMLElement>(".fix-choices");
-  if (first) first.hidden = false;
-  if (choices) choices.hidden = true;
 }

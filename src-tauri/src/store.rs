@@ -73,6 +73,10 @@ pub struct Settings {
     /// The folder is local. Nothing in it is uploaded, and API keys are not written.
     #[serde(default)]
     pub debug_capture: bool,
+    /// Listening overlay. `blob` is Bolo Blob. `classic` is the clip overlay.
+    /// Missing files use Bolo Blob.
+    #[serde(default = "default_listener")]
+    pub listener: String,
     /// Local Store-rating bookkeeping. The settings window does not edit this.
     #[serde(default)]
     pub rating: crate::rating::RatingState,
@@ -84,6 +88,43 @@ const SOUND_PACKS: [&str; 9] = [
 
 fn default_character() -> String {
     "classic".into()
+}
+
+fn default_listener() -> String {
+    "blob".into()
+}
+
+pub fn normalize_listener(id: &str) -> String {
+    match id.trim().to_ascii_lowercase().as_str() {
+        "classic" => "classic".into(),
+        "blob" | "buddy" | "spirit" | "pebble" => id.trim().to_ascii_lowercase(),
+        _ => default_listener(),
+    }
+}
+
+pub fn listener_is_animated(id: &str) -> bool {
+    normalize_listener(id) != "classic"
+}
+
+/// Logical size of the overlay window. The animated listener needs room for
+/// the character and the pill; the classic clips keep their old box.
+pub fn overlay_logical_size(listener: &str, phase: &str) -> (f64, f64) {
+    if listener_is_animated(listener) {
+        (560.0, 220.0)
+    } else if phase == "error" {
+        (280.0, 200.0)
+    } else {
+        (268.0, 150.0)
+    }
+}
+
+/// How long the done pose stays up. The animated tuck needs longer than the clip fade.
+pub fn dismiss_ms(listener: &str) -> u64 {
+    if listener_is_animated(listener) {
+        1_700
+    } else {
+        700
+    }
 }
 
 fn default_sound_pack() -> String {
@@ -168,6 +209,7 @@ impl Default for Settings {
             smart_holiday: false,
             keep_recordings: false,
             debug_capture: false,
+            listener: default_listener(),
             keep_learning: true,
             rating: crate::rating::RatingState::default(),
         }
@@ -213,6 +255,7 @@ pub fn prepare_settings(mut settings: Settings) -> Settings {
     settings.character = normalize_character(&settings.character);
     settings.sound_pack = normalize_sound_pack(&settings.sound_pack);
     settings.sound_volume = normalize_volume(settings.sound_volume);
+    settings.listener = normalize_listener(&settings.listener);
     settings.dictionary = settings
         .dictionary
         .into_iter()
@@ -309,6 +352,7 @@ pub fn normalize_settings(mut settings: Settings) -> Settings {
     settings.character = normalize_character(&settings.character);
     settings.sound_pack = normalize_sound_pack(&settings.sound_pack);
     settings.sound_volume = normalize_volume(settings.sound_volume);
+    settings.listener = normalize_listener(&settings.listener);
     settings
 }
 
@@ -792,6 +836,30 @@ mod carryover {
         let raw: serde_json::Value = serde_json::from_str(&fs::read_to_string(dir.join("settings.json")).unwrap()).unwrap();
         assert_eq!(raw["keepLearning"], serde_json::json!(true));
         assert_eq!(raw["character"], serde_json::json!("c04"));
+        assert_eq!(loaded.listener, "blob", "older files gain Bolo Blob");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn listener_defaults_to_bolo_blob_and_classic_is_the_fallback() {
+        let old: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(old.listener, "blob");
+        assert!(listener_is_animated("blob"));
+        assert!(listener_is_animated("nope"));
+        assert!(!listener_is_animated(" classic "));
+        assert_eq!(normalize_listener("CLASSIC"), "classic");
+        assert_eq!(normalize_listener("buddy"), "buddy");
+        assert_eq!(normalize_listener("SPIRIT"), "spirit");
+        assert_eq!(normalize_listener("pebble"), "pebble");
+        assert!(listener_is_animated("buddy") && listener_is_animated("spirit") && listener_is_animated("pebble"));
+        assert_eq!(overlay_logical_size("classic", "recording"), (268.0, 150.0));
+        assert_eq!(overlay_logical_size("classic", "error"), (280.0, 200.0));
+        assert_eq!(overlay_logical_size("blob", "recording"), (560.0, 220.0));
+        assert_eq!(overlay_logical_size("blob", "error"), (560.0, 220.0));
+        assert_eq!(dismiss_ms("classic"), 700);
+        assert_eq!(dismiss_ms("blob"), 1_700);
+        let mut saved = Settings::default();
+        saved.listener = " CLASSIC ".into();
+        assert_eq!(prepare_settings(saved).listener, "classic");
     }
 }

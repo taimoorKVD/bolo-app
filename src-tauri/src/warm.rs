@@ -39,6 +39,7 @@ struct Armed {
     active_name: String,
     note: String,
     level: Arc<AtomicU32>,
+    bands: Arc<[AtomicU32; 4]>,
     chunks: Arc<Mutex<VecDeque<FinishedAudio>>>,
     pre_roll_samples: usize,
     first_sample: Arc<Mutex<Option<Instant>>>,
@@ -55,6 +56,7 @@ pub struct LiveTake {
     pub open_wait_ms: u64,
     stop: Arc<AtomicBool>,
     level: Arc<AtomicU32>,
+    bands: Arc<[AtomicU32; 4]>,
     chunks: Arc<Mutex<VecDeque<FinishedAudio>>>,
     /// Samples already in the ring when the key went down.
     pub pre_roll_samples: usize,
@@ -75,8 +77,8 @@ impl LiveTake {
         Arc::clone(&self.chunks)
     }
 
-    pub fn meter(&self) -> (Arc<AtomicU32>, Arc<AtomicBool>) {
-        (Arc::clone(&self.level), Arc::clone(&self.stop))
+    pub fn meter(&self) -> (Arc<AtomicU32>, Arc<[AtomicU32; 4]>, Arc<AtomicBool>) {
+        (Arc::clone(&self.level), Arc::clone(&self.bands), Arc::clone(&self.stop))
     }
 
     /// Milliseconds from `keydown` to audio that covers that instant.
@@ -138,6 +140,7 @@ pub struct WarmMic {
     cmd: Sender<Cmd>,
     watch: Arc<Watch>,
     level: Arc<AtomicU32>,
+    bands: Arc<[AtomicU32; 4]>,
     #[cfg_attr(not(test), allow(dead_code))]
     live: Arc<AtomicBool>,
 }
@@ -148,6 +151,7 @@ impl Clone for WarmMic {
             cmd: self.cmd.clone(),
             watch: Arc::clone(&self.watch),
             level: Arc::clone(&self.level),
+            bands: Arc::clone(&self.bands),
             live: Arc::clone(&self.live),
         }
     }
@@ -157,25 +161,32 @@ impl WarmMic {
     pub fn spawn(preference: Option<String>, config_dir: Option<PathBuf>) -> Self {
         let (cmd_tx, cmd_rx) = mpsc::channel();
         let level = Arc::new(AtomicU32::new(0));
+        let bands = Arc::new(crate::bands::blank_bands());
         let live = Arc::new(AtomicBool::new(false));
         let watch = Arc::new(Watch::new(preference.clone(), config_dir));
         let shared = Arc::clone(&level);
+        let shared_bands = Arc::clone(&bands);
         let shared_live = Arc::clone(&live);
         let shared_watch = Arc::clone(&watch);
         let _ = std::thread::Builder::new().name("bolo-warm".into()).spawn(move || {
-            run(cmd_rx, shared_watch, shared, shared_live);
+            run(cmd_rx, shared_watch, shared, shared_bands, shared_live);
         });
         // Ask the thread to record this preference even if spawn raced.
         // The same name does not reopen the stream.
         let _ = cmd_tx.send(Cmd::Retarget(preference));
         spawn_probe(Arc::clone(&watch), 1500);
-        Self { cmd: cmd_tx, watch, level, live }
+        Self { cmd: cmd_tx, watch, level, bands, live }
     }
 
     /// True once a capture stream is playing. Key-down does not wait on this.
     #[cfg(test)]
     pub fn is_live(&self) -> bool {
         self.live.load(Ordering::Relaxed)
+    }
+
+    /// Latest four band energies, 0..1, from the open microphone.
+    pub fn bands(&self) -> [f32; 4] {
+        crate::bands::read_bands(&self.bands)
     }
 
     /// Latest input level, 0.0–1.0, from the open microphone.
@@ -227,6 +238,7 @@ impl WarmMic {
             open_wait_ms: waited.elapsed().as_millis() as u64,
             stop: Arc::new(AtomicBool::new(false)),
             level: armed.level,
+            bands: armed.bands,
             chunks: armed.chunks,
             pre_roll_samples: armed.pre_roll_samples,
             first_sample: armed.first_sample,
@@ -245,6 +257,8 @@ struct Capture {
     noise_rms: f32,
     error: Option<String>,
     level: Arc<AtomicU32>,
+    bands: Arc<[AtomicU32; 4]>,
+    spectrum: crate::bands::BandMeter,
     chunks: Arc<Mutex<VecDeque<FinishedAudio>>>,
     take_silence_ms: u32,
     /// How many samples were copied out of the ring when this take was armed.
@@ -264,6 +278,10 @@ struct Capture {
 
 impl Capture {
     fn new(level: Arc<AtomicU32>) -> Self {
+        Self::with_bands(level, Arc::new(crate::bands::blank_bands()))
+    }
+
+    fn with_bands(level: Arc<AtomicU32>, bands: Arc<[AtomicU32; 4]>) -> Self {
         Self {
             ring: VecDeque::new(),
             cap: 16_000,
@@ -275,6 +293,8 @@ impl Capture {
             noise_rms: 0.004,
             error: None,
             level,
+            bands,
+            spectrum: crate::bands::BandMeter::new(),
             chunks: Arc::new(Mutex::new(VecDeque::new())),
             take_silence_ms: 0,
             take_mark_len: 0,
@@ -297,6 +317,7 @@ impl Capture {
         let format_changed = self.channels != channels || self.sample_rate != sample_rate;
         self.channels = channels;
         self.sample_rate = sample_rate;
+        self.spectrum.set_rate(sample_rate);
         if format_changed {
             self.ring.clear();
         }
@@ -450,8 +471,14 @@ fn reported_first_sample_ms(pre_roll_samples: usize, captured_after_ms: Option<u
     }
 }
 
-fn run(cmd_rx: Receiver<Cmd>, watch: Arc<Watch>, level: Arc<AtomicU32>, live: Arc<AtomicBool>) {
-    let state = Arc::new(Mutex::new(Capture::new(Arc::clone(&level))));
+fn run(
+    cmd_rx: Receiver<Cmd>,
+    watch: Arc<Watch>,
+    level: Arc<AtomicU32>,
+    bands: Arc<[AtomicU32; 4]>,
+    live: Arc<AtomicBool>,
+) {
+    let state = Arc::new(Mutex::new(Capture::with_bands(Arc::clone(&level), Arc::clone(&bands))));
     let io_state = Arc::clone(&state);
     let io_live = Arc::clone(&live);
     let io_watch = Arc::clone(&watch);
@@ -1084,17 +1111,20 @@ fn push_samples(state: &Mutex<Capture>, samples: impl IntoIterator<Item = f32>) 
         }
         chunk.push(sample);
         if chunk.len() >= 480 {
-            let energy = rms(&chunk);
-            let frame_ms = frame_duration_ms(chunk.len(), state.sample_rate, state.channels);
-            note_energy(&mut state, energy, frame_ms);
+            publish_chunk(&mut state, &chunk);
             chunk.clear();
         }
     }
     if !chunk.is_empty() {
-        let energy = rms(&chunk);
-        let frame_ms = frame_duration_ms(chunk.len(), state.sample_rate, state.channels);
-        note_energy(&mut state, energy, frame_ms);
+        publish_chunk(&mut state, &chunk);
     }
+}
+
+fn publish_chunk(state: &mut Capture, chunk: &[f32]) {
+    state.spectrum.publish(chunk, state.channels, &state.bands);
+    let energy = rms(chunk);
+    let frame_ms = frame_duration_ms(chunk.len(), state.sample_rate, state.channels);
+    note_energy(state, energy, frame_ms);
 }
 
 fn frame_duration_ms(samples: usize, sample_rate: u32, channels: u16) -> u32 {
@@ -1198,6 +1228,7 @@ fn arm_take(
         active_name: active_name.to_string(),
         note,
         level: Arc::clone(&guard.level),
+        bands: Arc::clone(&guard.bands),
         chunks,
         pre_roll_samples,
         first_sample,

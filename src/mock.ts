@@ -31,6 +31,7 @@ const settings: Settings = {
   verbatim: false,
   cleanupModel: "openai/gpt-oss-20b",
   character: "classic",
+  listener: previewParam("listener") === "classic" ? "classic" : "blob",
   soundPack: "match",
   soundVolume: 0.6,
   smartMood: false,
