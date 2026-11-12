@@ -68,6 +68,8 @@ dialog::backdrop{background:rgba(0,0,0,.62)}
 .qr{background:#fff;border-radius:12px;padding:8px;display:inline-block;margin:8px 0}
 code{font-family:Consolas,ui-monospace,monospace;color:var(--gold2);font-size:13px}
 .mute{color:var(--mute)}
+.spin{display:inline-block;width:12px;height:12px;border:2px solid var(--line);border-top-color:var(--gold);border-radius:50%;animation:bolo-spin .7s linear infinite;vertical-align:-2px;margin-right:6px}
+@keyframes bolo-spin{to{transform:rotate(360deg)}}
 @media(max-width:860px){
 #gate{flex-direction:column}.panel{order:1;padding:28px 18px 8px}.brand{order:2;padding:8px 22px 28px}
 .brand h2,.facts,.wave{display:none}.mark{font-size:22px}
@@ -160,7 +162,7 @@ function codeBoxes(){
     const inp=h("input",{inputmode:"numeric",maxlength:"1","aria-label":"Digit "+(i+1),autocomplete:i===0?"one-time-code":"off"});
     inp.addEventListener("input",()=>{inp.value=(inp.value||"").replace(/\D/g,"").slice(-1);if(inp.value&&inp.nextElementSibling)inp.nextElementSibling.focus()});
     inp.addEventListener("keydown",(e)=>{if(e.key==="Backspace"&&!inp.value&&inp.previousElementSibling){inp.previousElementSibling.focus();inp.previousElementSibling.value=""}});
-    inp.addEventListener("paste",(e)=>{const t=(e.clipboardData.getData("text")||"").replace(/\D/g,"").slice(0,6);if(!t)return;e.preventDefault();[...wrap.children].forEach((el,idx)=>{el.value=t[idx]||""});(wrap.children[Math.min(t.length,5)]).focus()});
+    inp.addEventListener("paste",(e)=>{const t=(e.clipboardData.getData("text")||"").replace(/\D/g,"").slice(0,6);if(!t)return;e.preventDefault();[...wrap.children].forEach((el,idx)=>{el.value=t[idx]||""});(wrap.children[Math.min(t.length,5)]).focus();wrap.dispatchEvent(new Event("input",{bubbles:true}))});
     wrap.append(inp);
   }
   return wrap;
@@ -204,32 +206,42 @@ function step2(j,email){
   showGate();
   const err=h("p",{class:"err",role:"alert",hidden:true});
   const boxes=codeBoxes();
+  const spin=h("p",{class:"hint",hidden:true},h("span",{class:"spin","aria-hidden":"true"},""),"Checking the code");
   const resend=h("button",{type:"button",class:"textbtn",id:"resend"},"Resend code");
   const back=h("button",{type:"button",class:"textbtn"},"Back");
-  const btn=h("button",{class:"btn",type:"submit"},"Sign in");
-  let challenge=j.challenge, timer;
+  let challenge=j.challenge, timer, busy=false;
   function arm(sec){clearInterval(timer);let left=sec|0;const tick=()=>{if(left<=0){resend.disabled=false;resend.textContent="Resend code";clearInterval(timer);return}resend.disabled=true;const m=Math.floor(left/60),s=String(left%60).padStart(2,"0");resend.textContent="Resend code in "+m+":"+s;left-=1};tick();timer=setInterval(tick,1000)}
   arm(j.resendAfterSeconds||60);
   resend.addEventListener("click",async()=>{err.hidden=true;try{const r=await api("/login/resend",{method:"POST",body:JSON.stringify({challenge})});arm(r.resendAfterSeconds||60)}catch(ex){err.textContent=ex.message||"Sign-in failed.";err.hidden=false}});
   back.addEventListener("click",()=>{clearInterval(timer);login()});
+  async function submitCode(){
+    if(busy)return;
+    const code=codeValue(boxes);
+    if(code.length<6)return;
+    busy=true; err.hidden=true; spin.hidden=false;
+    boxes.querySelectorAll("input").forEach(i=>{i.disabled=true});
+    try{
+      const r=await api("/login/code",{method:"POST",body:JSON.stringify({challenge,code})});
+      if(!r.token)throw new Error("no token");
+      clearInterval(timer); T=r.token; sessionStorage.setItem("bolo_admin",T); boot();
+    }catch(_){
+      err.textContent="That code is wrong or expired. Try again.";
+      err.hidden=false; spin.hidden=true; busy=false;
+      boxes.querySelectorAll("input").forEach(i=>{i.disabled=false;i.value=""});
+      const first=boxes.querySelector("input"); if(first)first.focus();
+    }
+  }
+  boxes.addEventListener("input",()=>{ if(codeValue(boxes).length===6) submitCode(); });
+  boxes.addEventListener("keydown",(e)=>{ if(e.key==="Enter"){ e.preventDefault(); submitCode(); } });
   const form=h("form",{novalidate:true},
     h("h1",{},"Enter your code"),
     h("p",{class:"mute"},"We emailed a 6-digit code to "+email+". It works once and expires in 10 minutes."),
     h("span",{class:"k",id:"codelab"},"Email code"),
-    boxes,
+    boxes, err,
     j.totpAvailable?h("p",{class:"hint"},"You can type an authenticator code here instead."):"",
-    err,btn,h("div",{class:"links"},resend,back)
+    spin, h("div",{class:"links"},resend,back)
   );
-  form.addEventListener("submit",async(e)=>{
-    e.preventDefault(); const code=codeValue(boxes);
-    if(code.length<6){err.textContent="Enter all 6 digits.";err.hidden=false;return}
-    err.hidden=true; btn.disabled=true; btn.textContent="Signing in…";
-    try{
-      const r=await api("/login/code",{method:"POST",body:JSON.stringify({challenge,code})});
-      if(!r.token)throw new Error("Sign-in failed.");
-      clearInterval(timer); T=r.token; sessionStorage.setItem("bolo_admin",T); boot();
-    }catch(ex){err.textContent=ex.message||"Sign-in failed.";err.hidden=false;btn.disabled=false;btn.textContent="Sign in"}
-  });
+  form.addEventListener("submit",(e)=>{ e.preventDefault(); submitCode(); });
   $("#panel").replaceChildren(form); boxes.querySelector("input").focus();
 }
 function enrollBlock(en){
