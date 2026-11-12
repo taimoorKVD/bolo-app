@@ -664,6 +664,14 @@ async fn speech_raw(
             spoken.language = pin.into();
         }
     }
+    if unlikely_language(language, &spoken.language) {
+        // Language lock for the short-take English pass too: if it came back
+        // empty, an off-list tag (fr, es) must still never reach audio
+        // translation. Keep the words, tagged as the user's language.
+        let pin = if transcribe::has_arabic(&spoken.text) || transcribe::has_devanagari(&spoken.text) { "ur" } else { "en" };
+        crate::diag::note(format!("language lock: retag {} as {pin}", spoken.language));
+        spoken.language = pin.into();
+    }
     if urdu_needs_clean_pass(language, &spoken.language, &spoken.text) && !flags.repass {
         // Auto-detect heard Urdu but the English prompt leaked English
         // look-alike words in. Transcribe again as Urdu with an Urdu prompt.
