@@ -70,7 +70,7 @@ const admin = new AdminService(backend, "supabase");
 // ADMIN_ACCOUNTS = "owner:you@x.com:Name;support:a@x.com:Name"  ADMIN_TOTP_SECRETS = "you@x.com:BASE32;a@x.com:BASE32"
 for (const part of need("ADMIN_ACCOUNTS").split(";").filter(Boolean)) {
   const [role, email, label] = part.split(":");
-  if (!["owner", "support", "viewer"].includes(role)) throw new Error(`bad admin role ${role}`);
+  if (!["owner", "admin", "support", "viewer"].includes(role)) throw new Error(`bad admin role ${role}`);
   admin.addAdmin({
     email: email.toLowerCase(),
     role: role as "owner",
@@ -91,10 +91,15 @@ if (ownerHashEnv) admin.setOwnerPasswordHash(ownerEmailFixed, ownerHashEnv);
 admin.configureOwnerSetup(E.OFFICE_SETUP_TOKEN);
 const totp = new TotpVerifier(secrets);
 admin.codeVerifier = (e, c) => totp.verify(e, c);
-admin.officeMailer = (email, code) => mailer.sendOfficeCode(email, code);
+admin.officeMailer = async (email, code) => {
+  const ok = await mailer.sendOfficeCode(email, code);
+  return ok;
+};
+admin.officeCodeRedirect = E.OFFICE_CODE_REDIRECT;
 
 const keys = need("GROQ_API_KEYS").split(",").map((s) => s.trim()).filter(Boolean);
 const ai = new GroqGateway(keys);
+ai.keyPicker = () => admin.ops.selectSecret();
 const store = E.SUPABASE_URL ? new SupabaseStateStore(E.SUPABASE_URL, need("SUPABASE_SERVICE_ROLE_KEY")) : new FileStateStore(E.STATE_FILE || "./bolo-state.json");
 const saver = autosave(store, () => snapshot(backend, admin));
 const allowIps = (E.ADMIN_ALLOWED_IPS || "").split(",").map((s) => s.trim()).filter(Boolean);
@@ -114,7 +119,28 @@ async function main() {
   }
   for (const [email, secret] of secrets) admin.setTotpSecret(email, secret, true);
   admin.applyEmail2faMigration();
-  for (const [i, k] of keys.entries()) await admin.addPool({ id: `pool_groq_${i + 1}`, label: `Groq · Pool ${i + 1}`, provider: "groq", status: "active" }, k);
+  for (const [i, k] of keys.entries()) {
+    const id = `pool_groq_${i + 1}`;
+    await admin.addPool({ id, label: `Groq · Pool ${i + 1}`, provider: "groq", status: "active" }, k);
+    await admin.ops.ensureEnvKey(id, k);
+  }
+  const noteSpeech = (kind: "transcribe" | "cleanup", started: number, err?: { status?: number }) => {
+    const outcome = !err ? "ok" as const : err.status === 429 ? "rate_limit" as const : err.status === 401 || err.status === 403 ? "rejected_key" as const : "unavailable" as const;
+    admin.ops.recordSpeech({ kind, outcome, latencyMs: Date.now() - started });
+    if (admin.ops.consumeAlert() && mailer.sendNotice) void mailer.sendNotice(ownerEmailFixed, "Bolo Office speech alert", "Online speech failures are high. Open Office health.");
+  };
+  const transcribe = ai.transcribe.bind(ai);
+  const cleanup = ai.cleanup.bind(ai);
+  ai.transcribe = async (...args) => {
+    const t0 = Date.now();
+    try { const out = await transcribe(...args); noteSpeech("transcribe", t0); return out; }
+    catch (e) { noteSpeech("transcribe", t0, e as { status?: number }); throw e; }
+  };
+  ai.cleanup = async (...args) => {
+    const t0 = Date.now();
+    try { const out = await cleanup(...args); noteSpeech("cleanup", t0); return out; }
+    catch (e) { noteSpeech("cleanup", t0, e as { status?: number }); throw e; }
+  };
   const handle = createApp(backend, ai, env, admin);
   const port = Number(E.PORT || 8787);
 
@@ -144,6 +170,15 @@ async function main() {
       }
       const rawPath = (req.url || "/").split("?")[0];
       const isApi = rawPath === "/v1" || rawPath.startsWith("/v1/") || rawPath === "/health" || rawPath === "/admin" || rawPath.startsWith("/admin/");
+      if (!onOffice && rawPath === "/updates/latest.json" && (methodEarly === "GET" || methodEarly === "HEAD")) {
+        const pinned = admin.ops.pinnedLatest();
+        if (pinned) {
+          res.statusCode = 200;
+          res.setHeader("content-type", "application/json; charset=utf-8");
+          res.setHeader("cache-control", "no-store");
+          return res.end(methodEarly === "HEAD" ? undefined : JSON.stringify(pinned));
+        }
+      }
       if (onOffice && decision.type === "next" && !isApi) { res.statusCode = 404; return res.end(); }
       if (!onOffice && !isApi && (methodEarly === "GET" || methodEarly === "HEAD")) {
         if ((rawPath === "/contact" || rawPath === "/contact/") && await boloProxyContactPhp(req, res)) return;
@@ -151,7 +186,8 @@ async function main() {
       }
       if (rawPath === "/v1/health") req.url = "/health";
       const path = (req.url || "/").split("?")[0];
-      if (path.startsWith("/admin") && allowIps.length && !allowIps.includes(ip.replace(/^::ffff:/, ""))) { res.statusCode = 404; return res.end(); }
+      const runtimeIps = admin.ops.state.settings.ipAllowlist.length ? admin.ops.state.settings.ipAllowlist : allowIps;
+      if (path.startsWith("/admin") && runtimeIps.length && !runtimeIps.includes(ip.replace(/^::ffff:/, ""))) { res.statusCode = 404; return res.end(); }
       if (path === "/admin/preview") { res.statusCode = 404; return res.end(); }
       if (path.startsWith("/admin") && !["GET", "HEAD", "OPTIONS"].includes(methodEarly)) {
         const origin = typeof req.headers.origin === "string" ? req.headers.origin : undefined;

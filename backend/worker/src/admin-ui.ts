@@ -100,6 +100,14 @@ th:nth-child(n+5),td:nth-child(n+5){display:none}
     <button type="button" data-v="users">Users</button>
     <button type="button" data-v="team" id="navTeam" hidden>Team</button>
     <button type="button" data-v="audit">Audit log</button>
+    <button type="button" data-v="health">Health</button>
+    <button type="button" data-v="devices">Devices</button>
+    <button type="button" data-v="limits">Limits</button>
+    <button type="button" data-v="releases">Releases</button>
+    <button type="button" data-v="keys" data-perm="view_keys" hidden>Keys</button>
+    <button type="button" data-v="errors" data-perm="manage_feedback" hidden>Errors</button>
+    <button type="button" data-v="feedback" data-perm="manage_feedback" hidden>Feedback</button>
+    <button type="button" data-v="settings" data-perm="manage_settings" hidden>Settings</button>
   </nav>
   <div class="acct">
     <button type="button" id="who" aria-haspopup="menu" aria-expanded="false" aria-controls="menu"></button>
@@ -244,6 +252,7 @@ async function boot(){
   if(ME.needsEnrollment){try{const en=await api("/enroll");return enrollView(en)}catch(e){toast(e.message);return}}
   $("#who").textContent=ME.email+" · "+ME.role;
   $("#navTeam").hidden=!allowed("manage_team");
+  document.querySelectorAll("nav button[data-perm]").forEach(b=>{b.hidden=!(ME.permissions||[]).includes(b.dataset.perm)});
   $("#m2fa").textContent=ME.email2fa?"Email codes are on":"Turn on email codes";
   $("#mtotp").hidden=!!ME.totpEnrolled;
   show(location.hash.slice(1)||"dash");
@@ -265,7 +274,7 @@ $("#m2fa").onclick=async()=>{
     ME.email2fa=true; $("#m2fa").textContent="Email codes are on"; toast("Email codes are on");
   }catch(e){toast(e.message)}
 };
-function show(v){location.hash=v;document.querySelectorAll("nav button[data-v]").forEach(b=>b.classList.toggle("on",b.dataset.v===v.split("/")[0]));if(v.startsWith("user/"))return userView(v.slice(5));({dash,users,audit,team}[v]||dash)()}
+function show(v){location.hash=v;document.querySelectorAll("nav button[data-v]").forEach(b=>b.classList.toggle("on",b.dataset.v===v.split("/")[0]));if(v.startsWith("user/"))return userView(v.slice(5));({dash,users,audit,team,health,devices,limits,releases,keys,errors,feedback,settings}[v]||dash)()}
 const stat=(k,v,extra)=>h("div",{class:"card stat"},h("div",{class:"k"},k),h("div",{class:"v"},v),extra||"");
 function askSecret(title,text,mode){
   return new Promise((resolve)=>{
@@ -290,10 +299,53 @@ async function ensureRecent(){
   }catch(e){toast(e.message);return false}
 }
 function confirmAction(title,text,extra,run){$("#dtitle").textContent=title;$("#dtext").textContent=text;$("#dextra").replaceChildren(extra||"");$("#dreason").value="";const d=$("#dlg");d.showModal();d.onclose=async()=>{if(d.returnValue!=="ok")return;if(!(await ensureRecent()))return;try{await run($("#dreason").value);toast("Done. Recorded in the audit log.");show(location.hash.slice(1))}catch(e){toast(e.message)}}}
+function empty(text){return h("p",{class:"empty"},text)}
+async function health(){
+  const d=await api("/ops/health");
+  const bits=[h("h2",{style:"margin-top:0"},"Speech health")];
+  if(d.alert)bits.push(h("div",{class:"card"},"Online speech failures are high."));
+  if(!d.samples)bits.push(empty("No speech samples in the last hour."));
+  else bits.push(h("div",{class:"grid"},stat("Samples",d.samples),stat("Online failures",d.onlineFail+" / "+d.online),stat("p50",d.p50==null?"—":d.p50+" ms"),stat("p95",d.p95==null?"—":d.p95+" ms")));
+  $("#app").replaceChildren(...bits);
+}
+async function devices(){
+  const d=await api("/ops/devices");
+  const rows=(d.devices||[]).map(x=>h("tr",{},h("td",{},x.id),h("td",{},x.version||"—"),h("td",{},x.lastSeenAt?new Date(x.lastSeenAt).toLocaleString():"—"),h("td",{},x.engine||"—"),h("td",{},x.blocked?"blocked":x.status)));
+  $("#app").replaceChildren(h("h2",{style:"margin-top:0"},"Devices"),h("div",{class:"card"},rows.length?h("table",{},h("tr",{},h("th",{},"Install"),h("th",{},"Version"),h("th",{},"Last seen"),h("th",{},"Engine"),h("th",{},"State")),...rows):empty("No devices yet.")));
+}
+async function limits(){
+  const d=await api("/ops/limits");
+  $("#app").replaceChildren(h("h2",{style:"margin-top:0"},"Usage limits"),h("div",{class:"card"},h("p",{},"Free minutes per day: "+d.freeMinutesPerDay),h("p",{},"Soft warning at "+Math.round(d.softWarnRatio*100)+"% of that cap.")));
+}
+async function releases(){
+  const d=await api("/ops/releases");
+  const c=d.channels||{};
+  $("#app").replaceChildren(h("h2",{style:"margin-top:0"},"Releases"),h("div",{class:"card"},h("p",{},"Website: "+(c.website||"Not set")),h("p",{},"Updater: "+(c.updater||"Not set")),h("p",{},"Store: "+(c.store||"Not set")),h("p",{},d.paused?"Updater file is pinned.":"Updater file is the website copy.")));
+}
+async function keys(){
+  const d=await api("/ops/keys");
+  const rows=(d.keys||[]).map(k=>h("tr",{},h("td",{},k.poolId),h("td",{},h("code",{},k.fingerprint)),h("td",{},k.status),h("td",{},k.dailyMinuteCap?k.minutesToday+" / "+k.dailyMinuteCap:"no cap")));
+  $("#app").replaceChildren(h("h2",{style:"margin-top:0"},"Provider keys"),h("div",{class:"card"},rows.length?h("table",{},h("tr",{},h("th",{},"Pool"),h("th",{},"Fingerprint"),h("th",{},"State"),h("th",{},"Today")),...rows):empty("No keys yet.")));
+}
+async function errors(){
+  const d=await api("/ops/errors");
+  const rows=(d.reports||[]).map(r=>h("tr",{},h("td",{},r.kind),h("td",{},r.version||"—"),h("td",{},r.line),h("td",{},r.fixedIn||"—")));
+  $("#app").replaceChildren(h("h2",{style:"margin-top:0"},"Error reports"),h("div",{class:"card"},rows.length?h("table",{},h("tr",{},h("th",{},"Kind"),h("th",{},"Version"),h("th",{},"Line"),h("th",{},"Fixed in")),...rows):empty("No reports yet.")));
+}
+async function feedback(){
+  const d=await api("/ops/feedback");
+  const rows=(d.items||[]).map(r=>h("tr",{},h("td",{},r.source),h("td",{},r.issueType),h("td",{},r.text)));
+  $("#app").replaceChildren(h("h2",{style:"margin-top:0"},"Feedback"),h("div",{class:"card"},rows.length?h("table",{},h("tr",{},h("th",{},"From"),h("th",{},"Type"),h("th",{},"Note")),...rows):empty("No feedback yet.")));
+}
+async function settings(){
+  const d=await api("/ops/settings");
+  $("#app").replaceChildren(h("h2",{style:"margin-top:0"},"Settings and privacy"),h("div",{class:"card"},h("p",{},"Retention: "+d.retentionDays+" days"),h("p",{},"Privacy policy version: "+(d.privacyPolicyVersion||"Not set")),h("p",{},"Email codes required: "+(d.requireEmail2fa?"yes":"no")),h("p",{},"IP allowlist: "+((d.ipAllowlist&&d.ipAllowlist.length)?d.ipAllowlist.join(", "):"Not set")),h("p",{},"Active sessions: "+((d.sessions&&d.sessions.length)||0))));
+}
 async function dash(){
   const d=await api("/dashboard"); $("#ex").hidden=!d.exampleData; const app=$("#app");
+  const alert=d.healthAlert?h("div",{class:"card"},"Online speech failures are high. Open Health."):null;
   const pools=d.pools&&d.pools.length?h("table",{},h("tr",{},h("th",{},"Pool"),h("th",{},"Provider"),h("th",{},"Key fingerprint"),h("th",{},"Devices"),h("th",{},"State")),d.pools.map(p=>h("tr",{},h("td",{},p.label),h("td",{},p.provider),h("td",{},h("code",{},p.fingerprint)),h("td",{},p.installs),h("td",{},h("span",{class:"tag "+(p.full?"revoked":"active")},p.full?"full":p.status))))):h("p",{class:"empty"},"No provider pools yet.");
-  app.replaceChildren(
+  app.replaceChildren(alert||"",
     h("div",{class:"grid"},stat("Users",d.users,h("div",{class:"mute"},d.freeUsers+" free · "+d.paidUsers+" paid")),stat("Active devices",d.activeInstalls),stat("Minutes today",d.todayMinutes,h("div",{},h("div",{class:"bar"},h("i",{style:"width:"+d.budgetUsedPct+"%"})),h("div",{class:"mute"},d.budgetUsedPct+"% of "+d.dailyBudgetMinutes+" min"))),stat("This month",d.monthMinutes+" min"),stat("Errors today",d.errorsToday)),
     h("h2",{},"Safety controls"),
     h("div",{class:"card row",style:"justify-content:space-between"},h("div",{},h("b",{},"Kill switch "),h("span",{class:"tag "+(d.killSwitch?"revoked":"active")},d.killSwitch?"On — managed dictation paused":"Off")),
@@ -356,7 +408,7 @@ async function team(){
     h("div",{class:"grid"},
       h("div",{},h("label",{class:"k",for:"te"},"Email"),h("input",{id:"te",type:"email"})),
       h("div",{},h("label",{class:"k",for:"tn"},"Name"),h("input",{id:"tn"})),
-      h("div",{},h("label",{class:"k",for:"tr"},"Role"),h("select",{id:"tr"},h("option",{value:"support"},"support"),h("option",{value:"viewer"},"viewer"),h("option",{value:"owner"},"owner"))),
+      h("div",{},h("label",{class:"k",for:"tr"},"Role"),h("select",{id:"tr"},h("option",{value:"admin"},"admin"),h("option",{value:"support"},"support"),h("option",{value:"viewer"},"viewer"),h("option",{value:"owner"},"owner"))),
       h("div",{},h("label",{class:"k",for:"tp"},"Password (14+ characters)"),h("input",{id:"tp",type:"password"}))
     ),
     h("button",{class:"btn",style:"width:auto",on:{click:()=>confirmAction("Create staff account","They can sign in with the password. Email codes stay off until turned on.",null,async(r)=>{

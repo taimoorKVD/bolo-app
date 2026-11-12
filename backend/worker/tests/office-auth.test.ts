@@ -220,7 +220,7 @@ describe("email sign-in codes", () => {
     expect(step.value.needsEmailCode).toBe(true);
     expect(step.value.challenge).toBeTruthy();
     expect(sent).toHaveLength(1);
-    expect(sent[0].email).toBe("info@kingdomvision.com");
+    expect(sent[0].email).toBe("taimoor.kingdomvision@gmail.com");
     expect(sent[0].code).toMatch(/^\d{6}$/);
     expect(admin.storesPlaintextCode(sent[0].code)).toBe(false);
     expect(JSON.stringify(snapshot(backend, admin))).not.toContain(sent[0].code);

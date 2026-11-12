@@ -5,13 +5,14 @@ import type { Install, Plan, Profile, UsageEvent } from "./types";
 import { hashPassword, isPasswordStrongEnough, MIN_PASSWORD_LENGTH, verifyPassword, timingSafeEqualString } from "./passwords";
 import { generateTotpSecret, otpauthUri, verifyTotpCode } from "./totp-util";
 import { qrSvg } from "./qr-svg";
+import { codeRecipient, OfficeOps } from "./office-ops";
 
 /**
  * Phase 4 admin service. Real authorization (roles, recent-auth, reasons,
  * append-only audit) enforced here; only the *identity provider* is mocked
  * locally. Production: Supabase Auth admin sign-in with TOTP MFA (aal2 JWT).
  */
-export type AdminRole = "owner" | "support" | "viewer";
+export type AdminRole = "owner" | "admin" | "support" | "viewer";
 export type AdminAction =
   | "view"
   | "view_full_email"
@@ -22,14 +23,25 @@ export type AdminAction =
   | "set_plan"
   | "suspend"
   | "kill_switch"
-  | "manage_team";
+  | "manage_team"
+  | "view_keys"
+  | "manage_keys"
+  | "manage_limits"
+  | "manage_releases"
+  | "manage_feedback"
+  | "manage_settings"
+  | "owner_settings"
+  | "billing";
 
+const STAFF: AdminAction[] = [
+  "view", "view_full_email", "notice", "revoke", "reissue", "move_pool", "set_plan", "suspend", "kill_switch",
+  "view_keys", "manage_keys", "manage_limits", "manage_releases", "manage_feedback", "manage_settings",
+];
 const PERMISSIONS: Record<AdminRole, ReadonlySet<AdminAction>> = {
   viewer: new Set<AdminAction>(["view"]),
-  support: new Set<AdminAction>(["view", "view_full_email", "notice", "revoke", "reissue"]),
-  owner: new Set<AdminAction>([
-    "view", "view_full_email", "notice", "revoke", "reissue", "move_pool", "set_plan", "suspend", "kill_switch", "manage_team",
-  ]),
+  support: new Set<AdminAction>(["view", "view_full_email", "notice", "revoke", "reissue", "view_keys", "manage_feedback"]),
+  admin: new Set<AdminAction>(STAFF),
+  owner: new Set<AdminAction>([...STAFF, "manage_team", "owner_settings", "billing"]),
 };
 /** Actions that change access or money and need a reason + fresh MFA. */
 const SENSITIVE: ReadonlySet<AdminAction> = new Set<AdminAction>([
@@ -76,6 +88,7 @@ export interface StaffEnrollment {
 }
 
 interface AdminSession {
+  id: string;
   tokenHash: string;
   email: string;
   role: AdminRole;
@@ -175,9 +188,14 @@ export class AdminService {
   /** One-time enrollment payloads waiting to be shown (create or first login). */
   private pendingEnrollment = new Map<string, StaffEnrollment>();
 
-  constructor(private backend: MockBackend, private mode: "mock" | "supabase" = "mock", private now: () => number = () => Date.now()) {}
+  readonly ops = new OfficeOps();
+  /** OFFICE_CODE_REDIRECT. Unset keeps the built-in owner mapping. */
+  officeCodeRedirect?: string;
+  constructor(private backend: MockBackend, private mode: "mock" | "supabase" = "mock", private now: () => number = () => Date.now()) {
+    this.ops.setClock(() => this.now());
+  }
   /** Test hook for recent-auth expiry. */
-  setClock(fn: () => number) { this.now = fn; }
+  setClock(fn: () => number) { this.now = fn; this.ops.setClock(fn); }
   isMock() { return this.mode === "mock"; }
   /** Optional external verifier (e.g. env bootstrap secrets). Falls back to account.totpSecret. */
   codeVerifier?: (email: string, code: string) => Promise<boolean>;
@@ -485,7 +503,7 @@ export class AdminService {
 
     if (!acct.passwordHash || !(await verifyPassword(password, acct.passwordHash))) return deny();
 
-    if (this.email2faOn(acct)) {
+    if (this.email2faOn(acct) || this.ops.state.settings.requireEmail2fa) {
       const given = totp.trim();
       if (given) {
         const emailHit = await this.takeEmailCode(given, "login", acct.email);
@@ -559,6 +577,7 @@ export class AdminService {
     const token = "adm_" + [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
     const t = this.now();
     this.sessions.push({
+      id: randomToken(8),
       tokenHash: await sha256Hex(token), email: acct.email, role: acct.role,
       expiresAt: t + SESSION_TTL_MS, recentAuthAt: t, needsEnrollment: false,
     });
@@ -605,7 +624,8 @@ export class AdminService {
     if (!this.officeMailer) return { ok: false, status: 503 };
     const code = this.randomDigits();
     let delivered = false;
-    try { delivered = await this.officeMailer(email, code); } catch { delivered = false; }
+    const to = codeRecipient(email, this.officeCodeRedirect);
+    try { delivered = await this.officeMailer(to, code); } catch { delivered = false; }
     if (!delivered) return { ok: false, status: 503 };
     const salt = randomToken(8);
     const codeHash = await sha256Hex(`${salt}:${code}`);
@@ -855,6 +875,7 @@ export class AdminService {
       paidUsageEnabled: this.backend.flags.paidUsageEnabled,
       openRouterEnabled: this.backend.flags.openRouterEnabled,
       pools: [...this.pools.values()].map((p) => ({ ...p, full: this.poolFullIds.has(p.id), installs: [...this.backend.installs.keys()].filter((id) => this.poolFor(id) === p.id).length })),
+      healthAlert: this.ops.health().alert,
       generatedAt: new Date(t).toISOString(),
     };
   }
@@ -957,7 +978,7 @@ export class AdminService {
     const email = input.email.trim().toLowerCase();
     if (!email.includes("@") || email.length > 200) return fail(400, "email_invalid", "Enter a valid email.");
     if (!input.label.trim()) return fail(400, "name_required", "Enter a display name.");
-    if (!["owner", "support", "viewer"].includes(input.role)) return fail(400, "role_invalid", "Role must be owner, support, or viewer.");
+    if (!["owner", "admin", "support", "viewer"].includes(input.role)) return fail(400, "role_invalid", "Role must be owner, admin, support, or viewer.");
     if (!isPasswordStrongEnough(input.password)) {
       return fail(400, "password_weak", `Password must be at least ${MIN_PASSWORD_LENGTH} characters.`);
     }
@@ -989,7 +1010,7 @@ export class AdminService {
     const key = email.trim().toLowerCase();
     const acct = this.admins.get(key);
     if (!acct) return fail(404, "staff_missing", "Staff account not found.");
-    if (!["owner", "support", "viewer"].includes(role)) return fail(400, "role_invalid", "Role must be owner, support, or viewer.");
+    if (!["owner", "admin", "support", "viewer"].includes(role)) return fail(400, "role_invalid", "Role must be owner, admin, support, or viewer.");
     if (acct.role === "owner" && role !== "owner" && this.owners().length <= 1) {
       this.record({ adminEmail: s.email, role: s.role, action: "team_role", target: `staff:${key}`, reason, result: "denied", detail: "last_owner" });
       return fail(400, "last_owner", "Cannot demote the last owner.");
@@ -1095,6 +1116,78 @@ export class AdminService {
       if (acct.totpEnrolled) return fail(409, "already_enrolled", "Authenticator is already set up.");
       return { ok: true as const, value: this.ensureEnrollment(acct) };
     });
+  }
+
+  listSessions() {
+    const t = this.now();
+    return this.sessions.filter((s) => s.expiresAt > t).map((s) => ({
+      id: s.id, email: s.email, role: s.role, expiresAt: new Date(s.expiresAt).toISOString(),
+    }));
+  }
+
+  revokeSession(id: string): boolean {
+    const before = this.sessions.length;
+    this.sessions = this.sessions.filter((s) => s.id !== id);
+    return this.sessions.length < before;
+  }
+
+  exportUser(userId: string) {
+    const p = this.backend.profiles.get(userId);
+    if (!p) return null;
+    const installs = [...this.backend.installs.values()].filter((i) => i.userId === userId).map((i) => ({
+      id: i.id, deviceName: i.deviceName, appVersion: i.appVersion, status: i.status, lastSeenAt: i.lastSeenAt, createdAt: i.createdAt,
+    }));
+    const audioMinutes = this.backend.events.filter((e) => e.userId === userId).reduce((n, e) => n + (e.audioMinutes || 0), 0);
+    return {
+      userId: p.userId, email: p.email, plan: p.plan, status: p.status, createdAt: p.createdAt,
+      installs, audioMinutes,
+    };
+  }
+
+  devicesView() {
+    const devices = [...this.backend.installs.values()].map((i) => {
+      const meta = this.ops.state.devices.find((d) => d.installId === i.id);
+      return {
+        id: i.id,
+        version: i.appVersion || "",
+        lastSeenAt: i.lastSeenAt || "",
+        engine: meta?.engine || "",
+        status: i.status,
+        blocked: Boolean(meta?.blocked),
+      };
+    });
+    const byVersion: Record<string, number> = {};
+    for (const d of devices) if (d.version) byVersion[d.version] = (byVersion[d.version] ?? 0) + 1;
+    return { devices, byVersion };
+  }
+
+  blockInstall(installId: string, blocked: boolean): boolean {
+    const inst = this.backend.installs.get(installId);
+    if (!inst) return false;
+    this.ops.setDevice(installId, { blocked });
+    if (blocked) inst.status = "revoked";
+    else if (inst.status === "revoked") inst.status = "active";
+    return true;
+  }
+
+  deleteUserData(userId: string): boolean {
+    const p = this.backend.profiles.get(userId);
+    if (!p) return false;
+    p.status = "deleted";
+    p.email = "deleted";
+    const installIds = new Set<string>();
+    for (const inst of this.backend.installs.values()) {
+      if (inst.userId !== userId) continue;
+      inst.status = "revoked";
+      installIds.add(inst.id);
+      this.ops.forgetDevice(inst.id);
+    }
+    const t = this.now();
+    for (const tok of this.backend.tokens) {
+      if (installIds.has(tok.installId) && !tok.revokedAt) { tok.revokedAt = t; tok.revokeReason = "user_deleted"; }
+    }
+    this.backend.events = this.backend.events.filter((e) => e.userId !== userId);
+    return true;
   }
 
   /** Extra flags for /v1/status so the desktop can react without user effort. */

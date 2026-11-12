@@ -4,6 +4,7 @@ import nodemailer from "nodemailer";
 export interface Mailer {
   sendOtp(email: string, code: string): Promise<boolean>;
   sendOfficeCode(email: string, code: string): Promise<boolean>;
+  sendNotice?(to: string, subject: string, text: string): Promise<boolean>;
 }
 
 /**
@@ -65,6 +66,10 @@ export class SmtpMailer implements Mailer {
   async sendOfficeCode(email: string, code: string): Promise<boolean> {
     return this.deliver(buildOfficeCodeMessage(this.sender, email, code));
   }
+  async sendNotice(to: string, subject: string, text: string): Promise<boolean> {
+    if (/[\r\n]/.test(to + subject) || !to.includes("@")) return false;
+    return this.deliver({ from: this.sender, to, subject: subject.slice(0, 120), text: text.slice(0, 500), html: `<p>${text.slice(0, 500)}</p>` });
+  }
   private async deliver(msg: object): Promise<boolean> {
     try { const r = await this.t.sendMail(msg); return (r.accepted?.length ?? 0) > 0; }
     catch { return false; }
@@ -78,6 +83,10 @@ export class Smtp2GoMailer implements Mailer {
   }
   async sendOfficeCode(email: string, code: string): Promise<boolean> {
     return this.deliver(buildOfficeCodeMessage(this.sender, email, code));
+  }
+  async sendNotice(to: string, subject: string, text: string): Promise<boolean> {
+    if (/[\r\n]/.test(to + subject) || !to.includes("@")) return false;
+    return this.deliver({ from: this.sender, to, subject: subject.slice(0, 120), text: text.slice(0, 500), html: `<p>${text.slice(0, 500)}</p>` });
   }
   private async deliver(msg: { from: string; to: string; subject: string; text: string; html: string }): Promise<boolean> {
     try {
@@ -99,4 +108,5 @@ export class MemoryMailer implements Mailer {
   ok = true;
   async sendOtp(email: string, code: string) { if (this.ok) this.sent.push({ email, code, kind: "otp" }); return this.ok; }
   async sendOfficeCode(email: string, code: string) { if (this.ok) this.sent.push({ email, code, kind: "office" }); return this.ok; }
+  async sendNotice(to: string, subject: string) { if (this.ok) this.sent.push({ email: to, code: subject, kind: "notice" }); return this.ok; }
 }

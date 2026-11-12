@@ -46,6 +46,7 @@ export function snapshot(b: MockBackend, a: AdminService) {
     usedProofs: [...b.usedProofs.entries()].filter(([, t]) => t > now - 864e5),
     audit: ad.audit, installPool: [...ad.installPool.entries()], notices: ad.notices, poolFullIds: [...ad.poolFullIds],
     staff: a.exportStaff(),
+    ops: a.ops.exportState(),
   };
 }
 
@@ -58,6 +59,7 @@ export function restore(b: MockBackend, a: AdminService, s: Any | null) {
   for (const [k, v] of (s.installPool || [])) ad.installPool.set(k, v);
   ad.notices.push(...(s.notices || [])); for (const id of (s.poolFullIds || [])) ad.poolFullIds.add(id);
   a.importStaff(s.staff);
+  if (s.ops) a.ops.importState(s.ops);
 }
 
 /** Debounced writer; flush() on shutdown. */

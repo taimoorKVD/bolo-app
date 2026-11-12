@@ -6,8 +6,10 @@ export class GroqGateway implements AiGateway {
   constructor(private keys: string[], private base = "https://api.groq.com/openai/v1") {
     if (!keys.length) throw new Error("GROQ_API_KEYS is empty");
   }
+  /** When set, Office key failover chooses the secret. Falls back to the env list. */
+  keyPicker?: () => string | null;
   private i = 0;
-  private key() { return this.keys[this.i++ % this.keys.length]; }
+  private key() { return this.keyPicker?.() || this.keys[this.i++ % this.keys.length]; }
 
   async transcribe(audio: ArrayBuffer, model: string, opts: TranscribeOptions = {}): Promise<TranscribeResult> {
     const form = new FormData();
