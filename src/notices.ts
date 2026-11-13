@@ -11,19 +11,26 @@ const STATUS_TITLES: Record<string, string> = {
   transcribing: "Transcribing",
   inserting: "Inserting",
   done: "Inserted",
-  typed: "Typed",
+  // Legacy phase from older builds; treat as a successful insert.
+  typed: "Inserted",
   error: "Dictation failed",
 };
 
 /**
  * Settings status line. Null when it would only repeat itself
- * ("Typed — Typed"), which is not a useful row.
+ * ("Inserted — Inserted"), which is not a useful row.
  */
 export function statusBanner(phase: string, message: string | null | undefined): string | null {
   const title = STATUS_TITLES[phase] ?? "Bolo";
   const detail = visibleMessage(message);
-  if (phase === "typed" && (!detail || detail.toLowerCase() === title.toLowerCase())) return null;
-  return detail ? `${title} — ${detail}` : title;
+  if (!detail) {
+    // Bare legacy "typed" with no note: hide the empty row.
+    return phase === "typed" ? null : title;
+  }
+  const same =
+    detail.toLowerCase() === title.toLowerCase() || detail.toLowerCase() === "typed";
+  if (same) return title;
+  return `${title} — ${detail}`;
 }
 
 /** Copy for the hotkey banner. Null when the hook is active and the banner should not render. */

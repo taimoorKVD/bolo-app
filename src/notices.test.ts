@@ -28,15 +28,15 @@ assert(
   "a real hook error is shown",
 );
 
-assert(statusBanner("typed", "Typed") === null, "Typed — Typed is not shown");
-assert(statusBanner("typed", " typed ") === null, "a repeated Typed status is not shown");
+assert(statusBanner("typed", "Typed") === "Inserted", "legacy Typed becomes Inserted");
+assert(statusBanner("typed", " typed ") === "Inserted", "a repeated Typed status collapses");
 assert(statusBanner("typed", null) === null, "a bare Typed phase is not a row");
 assert(
   statusBanner("typed", "Part of this take didn't transcribe.") ===
-    "Typed — Part of this take didn't transcribe.",
+    "Inserted — Part of this take didn't transcribe.",
   "a typed take with a real note still explains it",
 );
 assert(statusBanner("recording", null) === "Listening", "listening stays a single label");
-assert(statusBanner("done", "Inserted") === "Inserted — Inserted", "other statuses are left as they are");
+assert(statusBanner("done", "Inserted") === "Inserted", "Inserted — Inserted collapses");
 
 console.log("notices ok");

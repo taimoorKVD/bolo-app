@@ -161,9 +161,10 @@ fn preview_client() -> &'static reqwest::Client {
     CLIENT.get_or_init(|| {
         reqwest::Client::builder()
             // A live caption that waits on the 45s transcription client would
-            // freeze the words for the rest of the hold.
-            .timeout(Duration::from_millis(2_800))
-            .connect_timeout(Duration::from_secs(2))
+            // freeze the words for the rest of the hold. Keep this short so a
+            // stalled preview cannot delay the final paste.
+            .timeout(Duration::from_millis(1_600))
+            .connect_timeout(Duration::from_millis(800))
             .pool_idle_timeout(Duration::from_secs(30))
             .http1_only()
             .user_agent(concat!("Bolo/", env!("CARGO_PKG_VERSION")))
@@ -205,34 +206,29 @@ pub fn preview_transcript(config_dir: &std::path::Path, bytes: Vec<u8>, language
         }
     };
     let language = language.to_string();
+    // One key only: live captions must stay cheap. Walking every ready key on
+    // each preview round-trip delayed the final paste when a stale key 401'd.
     tauri::async_runtime::block_on(async move {
-        let mut last = String::from("no key");
-        for (api_key, using_builtin) in keys.iter().take(3) {
-            let result = request_audio_once(
-                preview_client(),
-                &api_key.0,
-                bytes.clone(),
-                TRANSCRIPTIONS,
-                WHISPER_TURBO,
-                &language,
-                None,
-                0.0,
-                *using_builtin,
-            )
-            .await;
-            match result {
-                Ok(attempt) => return Ok(attempt.text.trim().to_string()),
-                Err(failure) => {
-                    last = crate::builtin::redact_secrets(&failure.log_detail);
-                    let auth = matches!(failure.status, Some(401) | Some(403));
-                    if !auth {
-                        break;
-                    }
-                }
-            }
+        let Some((api_key, using_builtin)) = keys.into_iter().next() else {
+            return Err(String::from("no key"));
+        };
+        let result = request_audio_once(
+            preview_client(),
+            &api_key.0,
+            bytes,
+            TRANSCRIPTIONS,
+            WHISPER_TURBO,
+            &language,
+            None,
+            0.0,
+            using_builtin,
+        )
+        .await;
+        drop(api_key);
+        match result {
+            Ok(attempt) => Ok(attempt.text.trim().to_string()),
+            Err(failure) => Err(crate::builtin::redact_secrets(&failure.log_detail)),
         }
-        drop(keys);
-        Err(last)
     })
 }
 
@@ -364,23 +360,27 @@ pub fn whisper_prompt_with(words: &[String], recent: &[String]) -> Option<String
     Some(format!("{}.", terms.join(", ")))
 }
 
-/// Capitalized names and addresses from recent pastes. The first word of a
-/// sentence is skipped: it is capitalized because it starts the sentence.
+/// Capitalized names, bilingual spellings, and addresses from recent pastes.
+/// The first word of a sentence is skipped: it is capitalized because it
+/// starts the sentence.
 fn context_terms(recent: &[String]) -> Vec<String> {
     let mut out = Vec::new();
     for text in recent.iter().take(2) {
         let mut boundary = true;
         for token in text.split_whitespace() {
-            let ends = token.ends_with(['.', '?', '!', '۔']);
-            let mut bare: String = token.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '.' || *c == '@').collect();
+            let ends = token.ends_with(['.', '?', '!', '۔', '؟']);
+            let mut bare: String = token
+                .chars()
+                .filter(|c| c.is_alphanumeric() || *c == '.' || *c == '@' || *c == '\'' || *c == '-')
+                .collect();
             if ends {
-                bare = bare.trim_end_matches(['.', '?', '!']).to_string();
+                bare = bare.trim_end_matches(['.', '?', '!', '۔', '؟']).to_string();
             }
             if !boundary && name_like(&bare) && !out.iter().any(|have: &String| have.eq_ignore_ascii_case(&bare)) {
                 out.push(bare);
             }
             boundary = ends;
-            if out.len() >= 6 {
+            if out.len() >= 8 {
                 return out;
             }
         }
@@ -390,11 +390,15 @@ fn context_terms(recent: &[String]) -> Vec<String> {
 
 fn name_like(bare: &str) -> bool {
     if bare.contains('.') || bare.contains('@') {
-        return bare.chars().any(|c| c.is_ascii_alphabetic());
+        return bare.chars().any(|c| c.is_alphabetic());
     }
     let chars: Vec<char> = bare.chars().collect();
-    if chars.len() < 3 || chars.len() > 32 {
+    if chars.len() < 2 || chars.len() > 40 {
         return false;
+    }
+    // Urdu / Arabic script names from mixed takes — keep them in the prompt.
+    if chars.iter().any(|c| matches!(*c, '\u{0600}'..='\u{06FF}' | '\u{0750}'..='\u{077F}')) {
+        return chars.iter().filter(|c| c.is_alphabetic()).count() >= 2;
     }
     let head = chars[0].is_uppercase();
     let tail_lower = chars.iter().skip(1).any(|c| c.is_lowercase());
@@ -1532,6 +1536,13 @@ mod tests {
             whisper_prompt_with(&[], &["Ship the notes to Priya tomorrow.".into()]).as_deref(),
             Some("Priya.")
         );
+        let bilingual = whisper_prompt_with(
+            &["Bolo".into()],
+            &["Send the note to احمد and WhatsApp Sara.".into()],
+        )
+        .unwrap();
+        assert!(bilingual.contains("Bolo"), "{bilingual}");
+        assert!(bilingual.contains("احمد") || bilingual.contains("WhatsApp") || bilingual.contains("Sara"), "{bilingual}");
         assert_eq!(
             strip_prompt_leak("Recent dictation:\"Hey, can you listen to me?\""),
             "Hey, can you listen to me?"

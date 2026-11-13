@@ -15,6 +15,11 @@ pub fn is_seed(word: &str) -> bool {
 pub const SEED_WORDS: &[&str] = &[
     "Bolo",
     "Bolo.com",
+    // Common bilingual spellings first so mixed Urdu/English takes keep them
+    // when the prompt budget is tight.
+    "WhatsApp",
+    "Plesk",
+    "MySQL",
     "RoomBoss",
     "Grok",
     "EasySSH",

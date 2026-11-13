@@ -1,10 +1,5 @@
 //! Offline text-stage gate. These tests always run in `cargo test` and in CI.
 //! They do not call Groq and they do not read a microphone.
-//!
-//! The four grammar cases below are already-correct sentences. `grammar::polish`
-//! rewrites them. Fixing `grammar.rs` is out of scope for this change, so the
-//! test records the current wrong text and fails if that text drifts or if the
-//! sentence is finally kept (remove the case from the known-failure list then).
 
 use crate::accuracy;
 use crate::grammar;
@@ -13,28 +8,18 @@ use crate::store::{self, Settings};
 use crate::transcribe::{self, PROMPT_TERM_BUDGET};
 use crate::vocab::{self, SEED_WORDS};
 
-/// input, text a correct grammar pass would keep, text polish emits today.
-const GRAMMAR_KNOWN: &[(&str, &str, &str)] = &[
-    ("travel ID", "Travel ID.", "Travel I'd."),
-    ("Does it have", "Does it have.", "Does it has."),
-    ("Let it go", "Let it go.", "Let it goes."),
-    ("If I were you", "If I were you.", "If I was you."),
+/// Correct English that grammar must keep (capitalization / period only).
+const GRAMMAR_MUST_KEEP: &[(&str, &str)] = &[
+    ("travel ID", "Travel ID."),
+    ("Does it have", "Does it have."),
+    ("Let it go", "Let it go."),
+    ("If I were you", "If I were you."),
 ];
 
 #[test]
-fn gate_grammar_known_failures_stay_visible() {
-    for (input, correct, current) in GRAMMAR_KNOWN {
-        let got = grammar::polish(input);
-        if got == *correct {
-            panic!(
-                "{input:?} is now kept. Remove it from GRAMMAR_KNOWN. Fixing grammar.rs was out of scope; this PR only measures it.\nGot: {got}"
-            );
-        }
-        assert_eq!(
-            got, *current,
-            "grammar.rs changed {input:?}. Update the known-failure note in accuracy_gate.rs and say whether the corruption is fixed. Got: {got}"
-        );
-        eprintln!("KNOWN FAILURE (grammar.rs, not fixed here): {input:?} -> {got:?}, correct would be {correct:?}");
+fn gate_grammar_keeps_correct_english() {
+    for (input, correct) in GRAMMAR_MUST_KEEP {
+        assert_eq!(grammar::polish(input), *correct, "{input}");
     }
 }
 
@@ -55,6 +40,22 @@ fn gate_grammar_still_keeps_sentences_it_already_handles() {
 }
 
 #[test]
+fn gate_grammar_leaves_urdu_and_mixed_roman_alone() {
+    assert_eq!(grammar::polish("میں ٹھیک ہوں"), "میں ٹھیک ہوں");
+    assert_eq!(grammar::polish("bolo kya haal hai"), "bolo kya haal hai");
+    assert_eq!(
+        grammar::polish("acha please karo yeh update"),
+        "acha please karo yeh update"
+    );
+    // Two Roman Urdu markers → skip English grammar entirely (no period / caps).
+    let mixed = "meeting kal hai please karo";
+    assert_eq!(grammar::polish(mixed), mixed);
+    let stages = accuracy::local_stages(mixed, &[], &[], true);
+    assert_eq!(stages.grammar, mixed);
+    assert!(!stages.grammar.contains("Meeting"));
+}
+
+#[test]
 fn gate_learned_spellings_fix_a_taught_word_and_leave_travel_id() {
     let words = vocab::protected(&[]);
     assert_eq!(
@@ -72,17 +73,18 @@ fn gate_learned_spellings_fix_a_taught_word_and_leave_travel_id() {
     );
     let stages = accuracy::local_stages("My travel ID is on the desk.", &[], &words, true);
     assert!(
-        stages.learned.to_lowercase().contains(" id ") || stages.learned.ends_with("ID"),
+        stages.learned.to_lowercase().contains(" id ") || stages.learned.contains("ID"),
         "learned spellings changed travel ID: {}",
         stages.learned
     );
     assert!(!stages.learned.contains("I'd"), "{}", stages.learned);
-    assert_ne!(
-        stages.grammar, stages.learned,
-        "grammar did not change travel ID; the known failure may be fixed"
+    assert!(
+        !stages.grammar.contains("I'd"),
+        "grammar must keep travel ID: {}",
+        stages.grammar
     );
     assert!(
-        stages.grammar.contains("I'd"),
+        stages.grammar.contains("ID"),
         "grammar output changed: {}",
         stages.grammar
     );
@@ -105,19 +107,17 @@ fn gate_prompt_keeps_seeds_when_the_list_is_short() {
 }
 
 #[test]
-fn gate_prompt_known_failure_mishearings_crowd_out_real_terms() {
-    // Same order prompt_words uses: ranked My words (here, auto-learned
-    // mishearings), then the seed run, then other real terms.
+fn gate_prompt_keeps_bilingual_seeds_when_mishearings_fill_the_list() {
+    // Ranked My words (here, auto-learned mishearings), then the seed run.
+    // Seeds keep a reserved slice so Plesk / WhatsApp / MySQL stay available
+    // for mixed Urdu/English takes.
     let mut words = Vec::new();
-    for n in 0..40 {
+    for n in 0..12 {
         words.push(format!("Hostfinger{n}"));
     }
     words.push("Volo".into());
     for seed in SEED_WORDS {
         words.push((*seed).to_string());
-    }
-    for term in ["Plesk", "WhatsApp", "MySQL"] {
-        words.push((*term).to_string());
     }
     let prompt = transcribe::whisper_prompt(&words).expect("prompt");
     assert!(
@@ -128,18 +128,11 @@ fn gate_prompt_known_failure_mishearings_crowd_out_real_terms() {
     let lower = prompt.to_lowercase();
     assert!(
         lower.contains("hostfinger") || lower.contains("volo"),
-        "mishearings no longer fill the prompt\n{prompt}"
+        "leading terms should still appear\n{prompt}"
     );
-    let missing: Vec<&str> = ["Plesk", "WhatsApp", "MySQL"]
-        .into_iter()
-        .filter(|term| !lower.contains(&term.to_lowercase()))
-        .collect();
-    if missing.is_empty() {
-        panic!("the prompt now includes Plesk, WhatsApp, and MySQL. Remove this known failure.\n{prompt}");
+    for term in ["plesk", "whatsapp", "mysql", "bolo"] {
+        assert!(lower.contains(term), "seed {term} missing from prompt\n{prompt}");
     }
-    eprintln!(
-        "KNOWN FAILURE (prompt truncated to ~{PROMPT_TERM_BUDGET} chars, not fixed here): missing {missing:?}"
-    );
 }
 
 #[test]

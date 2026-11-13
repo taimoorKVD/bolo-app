@@ -66,6 +66,7 @@ fn roman_markers(text: &str) -> usize {
     const MARKERS: &[&str] = &[
         "hai", "hain", "kya", "mein", "theek", "thik", "yaar", "bhai", "shukriya", "nahin", "nahi", "aaj",
         "mujhe", "hoon", "hun", "karo", "wala", "wali", "acha", "achha", "gya", "gayi",
+        "yeh", "woh", "aur", "haan", "ji", "kyun", "kyunki", "phir", "abhi", "jaldi", "kal",
     ];
     text.split_whitespace()
         .filter(|word| MARKERS.iter().any(|marker| core(word) == *marker))
@@ -73,26 +74,42 @@ fn roman_markers(text: &str) -> usize {
 }
 
 fn contractions(tokens: &mut [String]) {
-    for token in tokens.iter_mut() {
-        if is_protected_token(token) {
+    for index in 0..tokens.len() {
+        if is_protected_token(&tokens[index]) {
             continue;
         }
-        let next = match core(token).as_str() {
+        let word = core(&tokens[index]);
+        let next = match word.as_str() {
             "im" => "I'm",
             "dont" => "don't",
             "doesnt" => "doesn't",
             "cant" => "can't",
             "wont" => "won't",
             "ive" => "I've",
-            "id" => "I'd",
+            // Plain "id" is usually the acronym ID. Only expand a spoken
+            // contraction at a sentence start / after punctuation, and never
+            // when the speaker already capitalized ID.
+            "id" if looks_like_id_contraction(tokens, index) => "I'd",
             "isnt" => "isn't",
             "wasnt" => "wasn't",
             "arent" => "aren't",
             "werent" => "weren't",
             _ => continue,
         };
-        *token = splice(token, next);
+        tokens[index] = splice(&tokens[index], next);
     }
+}
+
+fn looks_like_id_contraction(tokens: &[String], index: usize) -> bool {
+    let raw = tokens[index]
+        .trim_matches(|c: char| !c.is_alphanumeric() && c != '\'');
+    if raw.chars().any(|c| c.is_ascii_uppercase()) {
+        return false;
+    }
+    if index == 0 {
+        return true;
+    }
+    tokens[index - 1].ends_with(['.', '?', '!', ',', ';', ':'])
 }
 
 fn agreement(tokens: &mut [String]) {
@@ -102,18 +119,28 @@ fn agreement(tokens: &mut [String]) {
         if !is_subject(&prev) || is_protected_token(&tokens[index]) {
             continue;
         }
+        let before_subject = index
+            .checked_sub(2)
+            .map(|i| core(&tokens[i]))
+            .unwrap_or_default();
+        // "Does it have", "Let it go", "to have" — leave the bare form alone.
+        if is_agreement_blocker(&before_subject) {
+            continue;
+        }
         let word = core(&tokens[index]);
         let next = match word.as_str() {
             "goes" | "go" | "went" if past => "went",
             "goes" if matches!(prev.as_str(), "i" | "we" | "they" | "you") => "go",
             "go" if matches!(prev.as_str(), "he" | "she" | "it") && !past => "goes",
             "is" | "are" | "am" | "was" | "were" if past && matches!(prev.as_str(), "we" | "they" | "you") => "were",
-            "is" | "are" | "am" | "was" | "were" if past => "was",
+            "is" | "are" | "am" | "was" | "were" if past && prev != "i" => "was",
+            // Past "I were yesterday" → "I was", but leave subjunctive "If I were".
+            "were" if past && prev == "i" && before_subject != "if" => "was",
             "is" | "are" if prev == "i" => "am",
             "are" if matches!(prev.as_str(), "he" | "she" | "it") => "is",
             "is" | "am" if matches!(prev.as_str(), "we" | "they" | "you") => "are",
             "was" if matches!(prev.as_str(), "we" | "they" | "you") => "were",
-            "were" if matches!(prev.as_str(), "he" | "she" | "it" | "i") => "was",
+            "were" if matches!(prev.as_str(), "he" | "she" | "it") => "was",
             "don't" | "dont" if matches!(prev.as_str(), "he" | "she" | "it") => "doesn't",
             "doesn't" | "doesnt" if matches!(prev.as_str(), "i" | "we" | "they" | "you") => "don't",
             "has" if matches!(prev.as_str(), "i" | "we" | "they" | "you") => "have",
@@ -124,6 +151,17 @@ fn agreement(tokens: &mut [String]) {
             tokens[index] = splice(&tokens[index], next);
         }
     }
+}
+
+fn is_agreement_blocker(word: &str) -> bool {
+    matches!(
+        word,
+        "do" | "does" | "did" | "don't" | "doesn't" | "dont" | "doesnt"
+            | "to" | "let" | "lets" | "make" | "makes" | "help" | "helps"
+            | "see" | "sees" | "hear" | "hears" | "watch" | "watches"
+            | "feel" | "feels" | "bid" | "bids" | "please"
+            | "if" | "as" | "though" | "unless"
+    )
 }
 
 fn articles(tokens: &mut [String]) {
@@ -158,6 +196,7 @@ fn acronyms(tokens: &mut [String]) {
             "http" => "HTTP",
             "https" => "HTTPS",
             "json" => "JSON",
+            "id" => "ID",
             "easyssh" => "EasySSH",
             _ => continue,
         };
@@ -204,7 +243,14 @@ fn is_subject(word: &str) -> bool {
 }
 
 fn is_protected_token(token: &str) -> bool {
-    token.contains('@') || looks_like_domain(token)
+    if token.contains('@') || looks_like_domain(token) {
+        return true;
+    }
+    let bare = token.trim_matches(|c: char| !c.is_alphanumeric() && c != '\'');
+    matches!(
+        bare,
+        "ID" | "API" | "PDF" | "SQL" | "URL" | "HTML" | "CSS" | "SSH" | "HTTP" | "HTTPS" | "JSON" | "EasySSH"
+    )
 }
 
 fn looks_like_domain(token: &str) -> bool {
@@ -268,7 +314,14 @@ mod tests {
             ("we need 3 api keys", "We need 3 API keys."),
             ("ssh into the server", "SSH into the server."),
             ("I wrote the email yesterday.", "I wrote the email yesterday."),
+            ("travel ID", "Travel ID."),
+            ("My travel ID is on the desk.", "My travel ID is on the desk."),
+            ("Does it have", "Does it have."),
+            ("Let it go", "Let it go."),
+            ("If I were you", "If I were you."),
+            ("id like to ship it", "I'd like to ship it."),
             ("bolo kya haal hai", "bolo kya haal hai"),
+            ("acha please karo yeh update", "acha please karo yeh update"),
             ("hello@taimoorhussain.com", "hello@taimoorhussain.com"),
             ("میں ٹھیک ہوں", "میں ٹھیک ہوں"),
         ];

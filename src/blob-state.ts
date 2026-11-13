@@ -97,7 +97,7 @@ export function shapeVoice(level: number, bands?: number[] | null): Voice {
 }
 
 /** Keep the newest words when a caption is longer than the pill. */
-export function tailWords(text: string, max = 42): string {
+export function tailWords(text: string, max = 72): string {
   const trimmed = text.replace(/\s+/g, " ").trim();
   const chars = Array.from(trimmed);
   if (chars.length <= max) return trimmed;
@@ -122,7 +122,8 @@ export function pillModel(
     return { line: "", status, detail: "", showLine: false, showStatus: true };
   }
   if (state === "done") {
-    const status = text || (phase === "typed" ? "Typed" : "Inserted");
+    // "typed" is still a success pose (check mark). Never label it "Typed".
+    const status = text || "Inserted";
     return { line: "", status, detail: "", showLine: false, showStatus: true };
   }
   if (state === "error") return errorPill(text);

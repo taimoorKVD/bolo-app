@@ -478,7 +478,8 @@ export function pillStatus(
     return { main: phase === "inserting" ? "Inserting…" : "Writing…", small: "", tone: "dim" };
   }
   if (state === "done") {
-    const main = text || (phase === "typed" ? "Typed" : "Inserted");
+    // Clipboard paste and typed delivery both show the check — not "Typed".
+    const main = text || "Inserted";
     const count = doneText ? doneText.split(/\s+/).filter(Boolean).length : 0;
     return { main, small: count ? `${count} ${count === 1 ? "word" : "words"}` : "", tone: "plain" };
   }
@@ -532,8 +533,8 @@ function previewEvent(demo: string | null): DictationEvent {
   }
   if (demo === "done" || demo === "typed") {
     return {
-      phase: demo === "typed" ? "typed" : "done",
-      message: demo === "typed" ? null : "Inserted into Notepad",
+      phase: "done",
+      message: "Inserted into Notepad",
       elapsedMs: 1800,
       level: 0,
       partial: "Let's move the design review to Thursday at three, and send the deck to Sara before lunch.",

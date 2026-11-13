@@ -838,11 +838,13 @@ pub fn paste_last(app: &AppHandle) {
                 schedule_hide(app.clone(), generation, hide_delay(&app));
             }
             Ok(_) => {
+                // Typing still delivered the text. Show the same done / check
+                // state as a clipboard paste — "Typed" felt like a failure.
                 publish(
                     &app,
                     &DictationEvent {
-                        phase: "typed".into(),
-                        message: None,
+                        phase: "done".into(),
+                        message: Some("Inserted".into()),
                         elapsed_ms: 0,
                         level: 0.0,
                         engine: None,
@@ -980,6 +982,9 @@ fn live_slot() -> &'static Mutex<String> {
     SLOT.get_or_init(|| Mutex::new(String::new()))
 }
 
+const LIVE_FALLBACK_NOTE: &str =
+    "Used the live preview because the final pass had nothing to insert.";
+
 fn clear_live() {
     if let Ok(mut slot) = live_slot().lock() {
         slot.clear();
@@ -1003,6 +1008,16 @@ fn current_live() -> Option<String> {
     }
 }
 
+/// Strong enough to paste when Whisper's final pass is empty.
+fn live_fallback_text() -> Option<String> {
+    let text = current_live()?;
+    if text.split_whitespace().count() >= 2 {
+        Some(text)
+    } else {
+        None
+    }
+}
+
 fn attach_live(event: &mut DictationEvent) {
     if matches!(event.phase.as_str(), "arming" | "recording" | "transcribing" | "inserting") {
         event.partial = current_live();
@@ -1019,16 +1034,40 @@ pub(crate) fn preview_due(
     attempted: bool,
 ) -> bool {
     let rate = usize::try_from(sample_rate.max(1)).unwrap_or(48_000);
-    if frames < rate * 45 / 100 {
+    // First caption after ~0.35 s. Then at most about one call per second with
+    // ~0.45 s of new audio — enough to feel live without starving the final
+    // Groq take (preview shares the async runtime via block_on).
+    if frames < rate * 35 / 100 {
         return false;
     }
-    if attempted && since_last < Duration::from_millis(1_000) {
+    if attempted && since_last < Duration::from_millis(900) {
         return false;
     }
-    if last_frames > 0 && frames.saturating_sub(last_frames) < rate * 50 / 100 {
+    if last_frames > 0 && frames.saturating_sub(last_frames) < rate * 45 / 100 {
         return false;
     }
     true
+}
+
+/// Prefer the longer coherent caption when a new preview is a shorter echo.
+pub(crate) fn merge_live(previous: &str, next: &str) -> String {
+    let prev = previous.trim();
+    let next = next.trim();
+    if prev.is_empty() {
+        return next.to_string();
+    }
+    if next.is_empty() {
+        return prev.to_string();
+    }
+    if next.len() >= prev.len() {
+        return next.to_string();
+    }
+    let prev_l = prev.to_ascii_lowercase();
+    let next_l = next.to_ascii_lowercase();
+    if prev_l.contains(&next_l) || prev_l.starts_with(&next_l) {
+        return prev.to_string();
+    }
+    next.to_string()
 }
 
 /// Keep the newest audio so a long hold does not re-upload the whole take.
@@ -1061,7 +1100,7 @@ fn spawn_live_words(app: AppHandle, preview: warm::PreviewMic) {
             if preview.stopped() {
                 break;
             }
-            std::thread::sleep(Duration::from_millis(180));
+            std::thread::sleep(Duration::from_millis(120));
             if preview.stopped() {
                 break;
             }
@@ -1073,11 +1112,15 @@ fn spawn_live_words(app: AppHandle, preview: warm::PreviewMic) {
             if !preview_due(frames, last_frames, audio.sample_rate, last_request.elapsed(), attempted) {
                 continue;
             }
-            let audio = preview_tail(audio, 16.0);
+            // Short tail: less encode + upload so captions stay cheap.
+            let audio = preview_tail(audio, 8.0);
             let encoded = match crate::audio::prepare_speech(&audio) {
-                Ok(encoded) if encoded.speech_secs >= 0.35 => encoded,
+                Ok(encoded) if encoded.speech_secs >= 0.3 => encoded,
                 _ => continue,
             };
+            if preview.stopped() {
+                break;
+            }
             attempted = true;
             last_request = Instant::now();
             let language = app
@@ -1088,7 +1131,8 @@ fn spawn_live_words(app: AppHandle, preview: warm::PreviewMic) {
                 .unwrap_or_else(|_| "auto".into());
             match transcribe::preview_transcript(&dir, encoded.bytes, &language) {
                 Ok(text) if !text.is_empty() => {
-                    set_live(&text);
+                    let merged = merge_live(current_live().as_deref().unwrap_or(""), &text);
+                    set_live(&merged);
                     last_frames = frames;
                 }
                 Ok(_) => {}
@@ -1096,6 +1140,11 @@ fn spawn_live_words(app: AppHandle, preview: warm::PreviewMic) {
                     if err != last_error {
                         last_error = err.clone();
                         log_line(&dir, "info", &format!("live preview: {err}"));
+                    }
+                    // Dead key / auth: stop hammering Groq for the rest of the hold
+                    // so the final take is not delayed on the shared runtime.
+                    if err.contains("401") || err.contains("403") || err.to_ascii_lowercase().contains("invalid api key") {
+                        break;
                     }
                 }
             }
@@ -1188,35 +1237,44 @@ async fn process(
     let (speech_language, speech_path) = speech_meta(&products);
     staged.speech_language = speech_language;
     staged.speech_path = speech_path;
-    let (stitched, partial_note) = match pipeline::stitch_partial(&products) {
+    let (mut stitched, mut partial_note) = match pipeline::stitch_partial(&products) {
         Ok(pair) => pair,
         Err(message) => {
-            let hint = products.iter().all(|product| product.silence || product.error.is_none())
-                && products.iter().any(|product| product.silence);
-            return Err(TakeError {
-                message,
-                hint: hint && products.iter().all(|product| product.error.is_none()),
-                staged,
-            });
+            if let Some(live) = live_fallback_text() {
+                (live, Some(LIVE_FALLBACK_NOTE.to_string()))
+            } else {
+                let hint = products.iter().all(|product| product.silence || product.error.is_none())
+                    && products.iter().any(|product| product.silence);
+                return Err(TakeError {
+                    message,
+                    hint: hint && products.iter().all(|product| product.error.is_none()),
+                    staged,
+                });
+            }
         }
     };
     if stitched.trim().is_empty() {
-        let only_silence = products.iter().all(|product| product.error.is_none());
-        return Err(TakeError {
-            message: if only_silence {
-                if let Some((silent, next)) = clock.mic_switch.as_ref().filter(|_| !clock.short_press) {
-                    crate::audio::silent_take_message(Some(silent), Some(next), "")
-                } else if !clock.short_press && crate::levels::health(None).mic_quiet {
-                    "Your microphone is turned down too low. Open Bolo and press \"Fix it\".".into()
+        if let Some(live) = live_fallback_text() {
+            stitched = live;
+            partial_note = Some(LIVE_FALLBACK_NOTE.to_string());
+        } else {
+            let only_silence = products.iter().all(|product| product.error.is_none());
+            return Err(TakeError {
+                message: if only_silence {
+                    if let Some((silent, next)) = clock.mic_switch.as_ref().filter(|_| !clock.short_press) {
+                        crate::audio::silent_take_message(Some(silent), Some(next), "")
+                    } else if !clock.short_press && crate::levels::health(None).mic_quiet {
+                        "Your microphone is turned down too low. Open Bolo and press \"Fix it\".".into()
+                    } else {
+                        silence_hint(clock.hint_held_ms, clock.short_press).into()
+                    }
                 } else {
-                    silence_hint(clock.hint_held_ms, clock.short_press).into()
-                }
-            } else {
-                "Nothing to insert.".into()
-            },
-            hint: true,
-            staged,
-        });
+                    "Nothing to insert.".into()
+                },
+                hint: true,
+                staged,
+            });
+        }
     }
     let tone = context::foreground_tone();
     staged.tone = tone.as_str().into();
@@ -1396,8 +1454,9 @@ async fn deliver(app: &AppHandle, mut outcome: Outcome, generation: u64) {
             return;
         }
     };
-    // "Inserted" only after the target accepted the paste. Typing is reported
-    // as Typed, including when the field can't be read back.
+    // Log still records clipboard vs typed. The overlay always shows the done
+    // check after a successful delivery — "Typed" read as a failure even when
+    // the words landed (common when the clipboard holds an image).
     let word = insert::status_word(inserted.method, inserted.verified);
     let verified_paste = word == "Inserted";
     debug_commit(app, &outcome, &pre_polish, &local, release_ms, Some(inserted), None);
@@ -1457,22 +1516,16 @@ async fn deliver(app: &AppHandle, mut outcome: Outcome, generation: u64) {
             log_line(&state.config_dir, "error", &format!("rating: {err}"));
         }
     }
-    let (phase, fallback) = if verified_paste {
-        ("done", "Inserted")
+    let phase = "done";
+    let message = if let Some(note) = outcome.note.clone().filter(|note| !note.trim().is_empty()) {
+        Some(note)
     } else {
-        ("typed", "Typed")
-    };
-    // "Typed" as both the phase and the message is the "Typed — Typed" row.
-    let message = outcome.note.clone().filter(|note| !(phase == "typed" && note.trim() == "Typed"));
-    let message = if message.is_none() && phase != "typed" {
         // "Inserted into Notepad", as in the v4 overlay. Plain "Inserted" when
         // the target app has no readable name.
         Some(match crate::context::app_label(insert::current_target()) {
-            Some(name) => format!("{fallback} into {name}"),
-            None => fallback.into(),
+            Some(name) => format!("Inserted into {name}"),
+            None => "Inserted".into(),
         })
-    } else {
-        message
     };
     publish(
         app,
@@ -2035,12 +2088,15 @@ mod tests {
     fn live_preview_waits_for_speech_and_does_not_restamp_the_same_audio() {
         let rate = 48_000u32;
         assert!(!preview_due(rate as usize / 5, 0, rate, Duration::from_secs(2), false));
+        assert!(!preview_due(rate as usize / 4, 0, rate, Duration::from_millis(0), false));
+        assert!(preview_due(rate as usize * 35 / 100, 0, rate, Duration::from_millis(0), false));
         assert!(preview_due(rate as usize, 0, rate, Duration::from_millis(0), false));
         assert!(!preview_due(rate as usize, 0, rate, Duration::from_millis(200), true));
-        assert!(preview_due(rate as usize, 0, rate, Duration::from_millis(1_100), true));
+        assert!(!preview_due(rate as usize, 0, rate, Duration::from_millis(800), true));
+        assert!(preview_due(rate as usize, 0, rate, Duration::from_millis(900), true));
         let have = rate as usize * 2;
-        assert!(!preview_due(have + rate as usize / 4, have, rate, Duration::from_millis(1_100), true));
-        assert!(preview_due(have + rate as usize, have, rate, Duration::from_millis(1_100), true));
+        assert!(!preview_due(have + rate as usize / 4, have, rate, Duration::from_millis(1_000), true));
+        assert!(preview_due(have + rate as usize / 2, have, rate, Duration::from_millis(1_000), true));
     }
 
     #[test]
@@ -2063,5 +2119,13 @@ mod tests {
             noise_rms: 0.0,
         };
         assert_eq!(preview_tail(short, 16.0).interleaved, vec![1.0, 2.0]);
+    }
+
+    #[test]
+    fn merge_live_prefers_longer_coherent_caption() {
+        assert_eq!(merge_live("", "hello there"), "hello there");
+        assert_eq!(merge_live("hello there friend", "hello there"), "hello there friend");
+        assert_eq!(merge_live("ship the", "ship the notes tomorrow"), "ship the notes tomorrow");
+        assert_eq!(merge_live("alpha", "beta gamma"), "beta gamma");
     }
 }

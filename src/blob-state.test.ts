@@ -79,14 +79,15 @@ assert(writingWords.line === "ship the notes to Sam" && writingWords.showLine, "
 assert(liveCaption("recording", null, "ship the notes to Sam") === "ship the notes to Sam", "classic shows the same words");
 assert(liveCaption("recording", null, null) === "", "classic stays quiet until words arrive");
 assert(liveCaption("idle", null, "leftover") === "", "a hidden overlay does not keep the caption");
-const long = "one two three four five six seven eight nine ten eleven twelve";
-assert(tailWords(long).startsWith("…") && tailWords(long).endsWith("twelve"), "a long caption keeps the newest words");
+const long =
+  "one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen";
+assert(tailWords(long).startsWith("…") && tailWords(long).endsWith("sixteen"), "a long caption keeps the newest words");
 for (const phase of ["recording", "arming", "transcribing", "inserting"]) {
   assert(liveCaption(phase, null, "ship it").includes("ship it"), `${phase} shows the words`);
 }
 assert(pillModel("inserting", null).status === "Inserting…", "inserting stays distinct");
 assert(pillModel("done", "Inserted").status === "Inserted", "done uses the app's word");
-assert(pillModel("typed", null).status === "Typed", "an unconfirmed paste says Typed");
+assert(pillModel("typed", null).status === "Inserted", "typed delivery still shows Inserted with the check");
 assert(pillModel("done", null).status === "Inserted", "a bare done still says Inserted");
 
 const missed = pillModel("error", "Didn't catch any speech. Speak a little louder and try again.");

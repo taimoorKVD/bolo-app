@@ -21,8 +21,9 @@ const PRE_ROLL_MS: u32 = 1000;
 const LOOP_SLICE: Duration = Duration::from_millis(30);
 /// Extra capture after key-up so the last word is kept. 160 ms cut endings
 /// off (0.1.19 diag.log: "...Why? Because that..."); people often release
-/// the key on the final syllable, so keep ~450 ms of tail audio.
-pub const RELEASE_TAIL_MS: u64 = 450;
+/// the key on the final syllable, so keep a short hangover. 300 ms is enough
+/// for most last consonants without making every paste feel half a second late.
+pub const RELEASE_TAIL_MS: u64 = 300;
 
 enum Cmd {
     Retarget(Option<String>),
