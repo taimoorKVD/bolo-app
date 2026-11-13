@@ -5,7 +5,7 @@
 use crate::cleanup::CLEANUP_MODEL;
 use crate::hotkey::{validate_hotkey, Hotkey};
 use crate::offline;
-use crate::transcribe::{normalize_language, normalize_model, normalize_output, WHISPER_TURBO};
+use crate::transcribe::{normalize_language, normalize_model, normalize_output, WHISPER_LARGE, WHISPER_TURBO};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::Write;
@@ -194,7 +194,7 @@ impl Default for Settings {
         Self {
             hotkey: Hotkey::default(),
             microphone: None,
-            model: WHISPER_TURBO.to_string(),
+            model: WHISPER_LARGE.to_string(),
             cleanup_enabled: true,
             language: "auto".into(),
             dictionary: Vec::new(),
@@ -319,7 +319,7 @@ fn cleanup_model_error(model: &str) -> Option<String> {
 
 pub fn normalize_settings(mut settings: Settings) -> Settings {
     settings.model = normalize_model(&settings.model)
-        .unwrap_or(WHISPER_TURBO)
+        .unwrap_or(WHISPER_LARGE)
         .to_string();
     if normalize_language(&settings.language).is_none() {
         settings.language = "auto".into();
@@ -505,7 +505,7 @@ mod tests {
         assert!(parsed.microphone.is_none());
         assert!(parsed.cleanup_enabled);
         assert!(parsed.history_enabled);
-        assert_eq!(parsed.model, WHISPER_TURBO);
+        assert_eq!(parsed.model, WHISPER_LARGE);
         let blank: Settings = serde_json::from_str(r#"{"microphone":"   "}"#).unwrap();
         assert!(normalize_settings(blank).microphone.is_none());
     }

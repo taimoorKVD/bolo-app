@@ -1123,13 +1123,28 @@ fn spawn_live_words(app: AppHandle, preview: warm::PreviewMic) {
             }
             attempted = true;
             last_request = Instant::now();
-            let language = app
-                .state::<AppState>()
+            let state = app.state::<AppState>();
+            let (language, model, dictionary) = state
                 .settings
                 .lock()
-                .map(|settings| settings.language.clone())
-                .unwrap_or_else(|_| "auto".into());
-            match transcribe::preview_transcript(&dir, encoded.bytes, &language) {
+                .map(|settings| {
+                    (
+                        settings.language.clone(),
+                        settings.model.clone(),
+                        settings.dictionary.clone(),
+                    )
+                })
+                .unwrap_or_else(|_| ("auto".into(), transcribe::WHISPER_LARGE.into(), Vec::new()));
+            let recent: Vec<String> = state
+                .history
+                .lock()
+                .map(|history| history.iter().take(2).map(|entry| entry.text.clone()).collect())
+                .unwrap_or_default();
+            let prompt = transcribe::whisper_prompt_with(
+                &pipeline::prompt_words(&dictionary, &language),
+                &recent,
+            );
+            match transcribe::preview_transcript(&dir, encoded.bytes, &language, &model, prompt) {
                 Ok(text) if !text.is_empty() => {
                     let merged = merge_live(current_live().as_deref().unwrap_or(""), &text);
                     set_live(&merged);

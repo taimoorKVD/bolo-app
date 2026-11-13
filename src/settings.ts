@@ -1024,18 +1024,18 @@ function enginePanel(draft: Draft): HTMLElement {
   const panel = panelEl(
     "engine",
     "Speech quality and offline mode",
-    "Whisper runs on Groq at temperature 0. Auto and Urdu already use Large v3 for accuracy. A low-confidence or empty result is tried once more without the prompt. The dictionary and your two most recent transcripts seed that prompt.",
+    "Whisper runs on Groq at temperature 0. New installs default to Large v3 for accuracy. Live captions use the same model and dictionary prompt as the final paste. A low-confidence or empty result is tried once more without the prompt.",
   );
   const models: Array<{ id: WhisperModel; title: string; body: string }> = [
     {
-      id: "whisper-large-v3-turbo",
-      title: "Whisper Large v3 Turbo",
-      body: "Faster. Best for English-only when you want the paste immediately. Auto and Urdu still upgrade to Large.",
-    },
-    {
       id: "whisper-large-v3",
       title: "Whisper Large v3",
-      body: "More accurate on names, noise, and mixed Urdu/English. Prefer this when accuracy matters most.",
+      body: "Recommended. Most accurate on names, noise, and mixed Urdu/English.",
+    },
+    {
+      id: "whisper-large-v3-turbo",
+      title: "Whisper Large v3 Turbo",
+      body: "Faster. Prefer only when you want the paste immediately on English-only takes.",
     },
   ];
   const grid = el("div", "choices");

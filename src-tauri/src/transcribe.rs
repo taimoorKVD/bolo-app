@@ -190,7 +190,13 @@ impl Drop for PreviewKey {
 /// the provider store) worked, so the overlay never showed words while
 /// speaking. A 401/403 moves on to the next ready key. The router state on
 /// disk is left alone; only the final take records successes and failures.
-pub fn preview_transcript(config_dir: &std::path::Path, bytes: Vec<u8>, language: &str) -> Result<String, String> {
+pub fn preview_transcript(
+    config_dir: &std::path::Path,
+    bytes: Vec<u8>,
+    language: &str,
+    model: &str,
+    prompt: Option<String>,
+) -> Result<String, String> {
     let keys: Vec<(PreviewKey, bool)> = match crate::provider::load_ready_keys(config_dir) {
         Ok((_store, keys)) if !keys.is_empty() => keys
             .iter()
@@ -206,6 +212,18 @@ pub fn preview_transcript(config_dir: &std::path::Path, bytes: Vec<u8>, language
         }
     };
     let language = language.to_string();
+    // Same rule as pipeline::effective_model: turbo stays for pinned English;
+    // auto / Urdu / other languages upgrade to large for accuracy.
+    let model = {
+        let base = normalize_model(model).unwrap_or(WHISPER_LARGE);
+        let code = normalize_language(&language).unwrap_or_default();
+        if base == WHISPER_TURBO && code != "en" {
+            WHISPER_LARGE
+        } else {
+            base
+        }
+    }
+    .to_string();
     // One key only: live captions must stay cheap. Walking every ready key on
     // each preview round-trip delayed the final paste when a stale key 401'd.
     tauri::async_runtime::block_on(async move {
@@ -217,16 +235,16 @@ pub fn preview_transcript(config_dir: &std::path::Path, bytes: Vec<u8>, language
             &api_key.0,
             bytes,
             TRANSCRIPTIONS,
-            WHISPER_TURBO,
+            &model,
             &language,
-            None,
+            prompt.as_deref(),
             0.0,
             using_builtin,
         )
         .await;
         drop(api_key);
         match result {
-            Ok(attempt) => Ok(attempt.text.trim().to_string()),
+            Ok(attempt) => Ok(scrub_hallucination(attempt.text.trim())),
             Err(failure) => Err(crate::builtin::redact_secrets(&failure.log_detail)),
         }
     })
@@ -818,14 +836,59 @@ pub fn stock_phrase(text: &str) -> bool {
     let t: String = text
         .to_lowercase()
         .chars()
-        .filter(|c| c.is_alphanumeric() || c.is_whitespace())
+        .filter(|c| c.is_alphanumeric() || c.is_whitespace() || *c == '\'')
         .collect();
     let t = t.split_whitespace().collect::<Vec<_>>().join(" ");
     matches!(
         t.as_str(),
-        "thank you" | "thanks" | "thank you very much" | "thanks for watching" | "thank you for watching"
-            | "you" | "bye" | "bye bye" | "please subscribe" | "subtitles by the amaraorg community" | "شکریہ"
+        "thank you"
+            | "thanks"
+            | "thank you very much"
+            | "thanks for watching"
+            | "thank you for watching"
+            | "right thank you"
+            | "thank you right"
+            | "okay thank you"
+            | "ok thank you"
+            | "all right thank you"
+            | "alright thank you"
+            | "sorry"
+            | "im sorry"
+            | "i'm sorry"
+            | "oh sorry"
+            | "you"
+            | "bye"
+            | "bye bye"
+            | "goodbye"
+            | "please subscribe"
+            | "subtitles by the amaraorg community"
+            | "haha"
+            | "ha ha"
+            | "hahaha"
+            | "hehe"
+            | "laughs"
+            | "laughter"
+            | "hmm"
+            | "uh"
+            | "um"
+            | "mbc"
+            | "music"
+            | "applause"
+            | "شکریہ"
     )
+}
+
+/// Drop a Whisper silence hallucination. Stock phrases alone are almost never
+/// real speech from a short quiet hold — clear them even without no_speech.
+pub fn scrub_hallucination(text: &str) -> String {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if stock_phrase(trimmed) {
+        return String::new();
+    }
+    trimmed.to_string()
 }
 
 pub fn should_retry(
@@ -873,10 +936,8 @@ pub async fn transcribe(
     )
     .await?;
     let mut first = first;
-    if stock_phrase(&first.text) && first.no_speech_prob.unwrap_or(0.0) > 0.25 {
-        // "Thank you." / "Thanks for watching." on a take that is mostly noise.
-        first.text.clear();
-    }
+    // Silence / noise often becomes "Thank you.", "Sorry", or laughs.
+    first.text = scrub_hallucination(&first.text);
     if !should_retry(&first.text, first.avg_logprob, first.no_speech_prob, first.compression_ratio) {
         let doubt = doubtful(&first.text, first.avg_logprob, first.no_speech_prob);
         return Ok(Transcript {
@@ -892,7 +953,8 @@ pub async fn transcribe(
     ));
     match request_audio(client, api_key, audio, TRANSCRIPTIONS, model, language, None, RETRY_TEMPERATURE, using_builtin).await {
         Ok(second) => {
-            let chosen = prefer_attempt(first, second);
+            let mut chosen = prefer_attempt(first, second);
+            chosen.text = scrub_hallucination(&chosen.text);
             let doubt = doubtful(&chosen.text, chosen.avg_logprob, chosen.no_speech_prob);
             Ok(Transcript {
                 text: chosen.text,
@@ -1494,7 +1556,15 @@ mod tests {
     fn stock_phrases_are_recognized() {
         assert!(stock_phrase(" Thank you. "));
         assert!(stock_phrase("Thanks for watching!"));
+        assert!(stock_phrase("Right, thank you."));
+        assert!(stock_phrase("Sorry"));
+        assert!(stock_phrase("I'm sorry."));
+        assert!(stock_phrase("haha"));
+        assert!(stock_phrase("laughs"));
         assert!(!stock_phrase("Thank you for the report."));
+        assert!(!stock_phrase("Sorry about the delay tomorrow"));
+        assert_eq!(scrub_hallucination("Thank you."), "");
+        assert_eq!(scrub_hallucination("Ship it tomorrow."), "Ship it tomorrow.");
     }
 
     #[test]

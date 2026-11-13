@@ -19,7 +19,7 @@ function previewParam(name: string): string | null {
 const settings: Settings = {
   hotkey: { ctrl: true, alt: false, shift: false, win: true, key: null },
   microphone: previewParam("mic"),
-  model: "whisper-large-v3-turbo",
+  model: "whisper-large-v3",
   cleanupEnabled: true,
   language: "auto",
   dictionary: ["Bolo", "Groq"],
@@ -50,7 +50,7 @@ let history: HistoryEntry[] = [
     id: "sample-1",
     text: "Move the standup to Thursday and send the notes to Priya.",
     createdUnixMs: Date.now() - 1000 * 60 * 42,
-    model: "whisper-large-v3-turbo",
+    model: "whisper-large-v3",
     cleaned: false,
     durationMs: 3100,
     audioId: "spool-1",

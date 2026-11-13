@@ -256,7 +256,10 @@ fn transcribe_one(index: usize, audio: FinishedAudio, env: &JobEnv) -> Product {
         encoded.speech_secs,
     )) {
         Ok(recognized) => {
-            product.text = transcribe::guard_short_take(&recognized.text, encoded.speech_secs);
+            product.text = transcribe::scrub_hallucination(&transcribe::guard_short_take(
+                &recognized.text,
+                encoded.speech_secs,
+            ));
             product.tries = recognized.tries;
             product.engine = recognized.engine;
             product.language = recognized.language.clone();
@@ -382,6 +385,7 @@ async fn recognize(bytes: Vec<u8>, env: &JobEnv, minutes: f64, _format: &str, sp
             if offline_ok {
                 match on_device_text(&env.config_dir, &offline_model, &language, &bytes).await {
                     Ok(text) => {
+                        let text = transcribe::scrub_hallucination(&text);
                         log_speech(env, "offline", "transcribe");
                         crate::measure::note_call("raw", &offline_model, "offline", None, "offline", &text);
                         return Ok(Recognized {
@@ -404,6 +408,7 @@ async fn recognize(bytes: Vec<u8>, env: &JobEnv, minutes: f64, _format: &str, sp
             }
             match on_device_text(&env.config_dir, &offline_model, &language, &bytes).await {
                 Ok(text) => {
+                    let text = transcribe::scrub_hallucination(&text);
                     log_speech(env, "offline", "transcribe");
                     crate::measure::note_call("raw", &offline_model, "offline", None, "offline", &text);
                     Ok(Recognized {
