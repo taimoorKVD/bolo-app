@@ -1082,15 +1082,17 @@ mod tests {
 
 /// The words list plus what the user's fixes taught (Fix last).
 /// My words and the built-in names come first, so they survive the prompt cap.
+/// Foreground window terms (file name, app) come next so Cursor / Gmail /
+/// dictation.rs spellings land without being continued as full sentences.
 pub(crate) fn prompt_words(dictionary: &[String], language: &str) -> Vec<String> {
     let memory = crate::memory::snapshot();
     let ranked = crate::memory::rank_my_words(&memory);
     let mut words = crate::vocab::protected(&ranked);
     crate::vocab::set_current(words.clone());
     let mut extra = 0usize;
-    for term in dictionary
-        .iter()
-        .cloned()
+    for term in crate::context::foreground_vocab()
+        .into_iter()
+        .chain(dictionary.iter().cloned())
         .chain(crate::memory::prompt_terms(&memory))
         .chain(crate::hints::starter_hints(language))
     {

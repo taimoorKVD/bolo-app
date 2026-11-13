@@ -18,7 +18,12 @@ const TARGET_RATE: u32 = 16_000;
 const FRAME_MS: u32 = 20;
 const PAD_MS: u32 = 160;
 /// Keep a short word. A hard 150 ms floor was rejecting quiet one-syllable takes.
-const MIN_SPEECH_SECS: f32 = 0.08;
+/// Shorter than this after trim is a click or breath, not a word. Whisper
+/// invents "thank you" / "sorry" on those clips; never upload them.
+const MIN_SPEECH_SECS: f32 = 0.16;
+/// After gain, speech this quiet is still noise. Real soft speech is boosted
+/// toward ~0.42 body level by `normalize_gain`.
+const MIN_BODY_AFTER_GAIN: f32 = 0.018;
 /// About three minutes of stereo 48 kHz, past the recording watchdog.
 pub(crate) const MAX_SAMPLES: usize = 48_000 * 2 * 180;
 
@@ -805,15 +810,78 @@ pub fn speech_samples(finished: &FinishedAudio) -> Result<Vec<f32>, SpeechError>
             trimmed = trim_silence_with(&mono, finished.sample_rate, threshold);
         }
     }
-    if trimmed.is_empty() || noise_only(&trimmed, finished.sample_rate) {
+    if trimmed.is_empty() {
         return Err(SpeechError::Silent);
     }
-    let duration = trimmed.len() as f32 / finished.sample_rate as f32;
-    if duration < MIN_SPEECH_SECS {
+    // A key-click or breath at the start opens the trim window; room tone in
+    // the middle then stays (trim only cuts edges). Gain turns that hiss into
+    // fake speech and Whisper invents a sentence. Pull back to the loud island.
+    trimmed = tighten_sparse_speech(&trimmed, finished.sample_rate);
+    if trimmed.is_empty() {
+        return Err(SpeechError::Silent);
+    }
+    // Trim pads edges for Whisper; a key-click still looks "long" with pad.
+    // Gate on the core (no pad / hangover) so clicks never upload.
+    let pad = ((finished.sample_rate as usize) * PAD_MS as usize) / 1000;
+    let hangover = ((finished.sample_rate as usize) * FRAME_MS as usize * 3) / 1000;
+    let core = trimmed
+        .len()
+        .saturating_sub(pad.saturating_mul(2).saturating_add(hangover));
+    if (core as f32 / finished.sample_rate as f32) < MIN_SPEECH_SECS {
         return Err(SpeechError::Silent);
     }
     let gained = normalize_gain(&trimmed);
+    if too_quiet_for_asr(&gained) {
+        return Err(SpeechError::Silent);
+    }
+    // After gain: quiet-mic vowels clear the energy floor; steady hiss still
+    // has no vowel-like frames and is dropped before Whisper.
+    if noise_only(&gained, finished.sample_rate) {
+        return Err(SpeechError::Silent);
+    }
     Ok(resample(&gained, finished.sample_rate, TARGET_RATE))
+}
+
+/// When speech is a short island inside a long quiet hold, drop the quiet.
+///
+/// Edge trim keeps everything between the first and last voiced frame. A soft
+/// click at t=0.2s and a real phrase at t=8s therefore uploads ~8s of room
+/// tone; after gain Whisper hears that as words ("Is your card in time?").
+/// Dense speech (most frames near the peak) is left alone so quiet mics and
+/// soft consonants stay.
+pub fn tighten_sparse_speech(samples: &[f32], sample_rate: u32) -> Vec<f32> {
+    let frame = ((sample_rate as usize) * FRAME_MS as usize) / 1000;
+    if frame == 0 || samples.len() < frame * 12 {
+        return samples.to_vec();
+    }
+    let levels: Vec<f32> = samples.chunks(frame).map(rms).collect();
+    let peak = levels.iter().copied().fold(0.0f32, f32::max);
+    // Overall quiet takes (laptop array) need the relative floor, not this.
+    if peak < 0.02 {
+        return samples.to_vec();
+    }
+    let loud_floor = (peak * 0.18).max(0.012);
+    let loud = levels.iter().filter(|&&level| level >= loud_floor).count();
+    // Speech fills the buffer — keep soft gaps between words.
+    if loud.saturating_mul(4) >= levels.len() {
+        return samples.to_vec();
+    }
+    let tightened = trim_silence_with(samples, sample_rate, loud_floor);
+    if tightened.is_empty() {
+        samples.to_vec()
+    } else {
+        tightened
+    }
+}
+
+/// Near-silence that survived trim: not worth a Whisper round trip.
+pub fn too_quiet_for_asr(samples: &[f32]) -> bool {
+    if samples.is_empty() {
+        return true;
+    }
+    let peak = samples.iter().fold(0.0f32, |peak, sample| peak.max(sample.abs()));
+    let body = percentile_abs(samples, 0.90);
+    peak < 0.04 && body < MIN_BODY_AFTER_GAIN
 }
 
 /// Lift the body of the speech, not whatever single sample is loudest.
@@ -929,10 +997,12 @@ pub fn relative_threshold(samples: &[f32], sample_rate: u32) -> Option<f32> {
     levels.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let floor = levels[levels.len() / 5].max(0.00002);
     let loud = levels[(levels.len() * 95) / 100];
-    if loud < 0.0004 || loud < floor * 6.0 {
+    // Stricter than before: a lone click or flat hiss must not invent a
+    // relative floor that lets silence through to Whisper.
+    if loud < 0.0008 || loud < floor * 8.0 {
         return None;
     }
-    Some((floor * 3.0).max(loud * 0.08).max(0.0002))
+    Some((floor * 3.0).max(loud * 0.08).max(0.0003))
 }
 
 /// Steady hiss or room noise: energy with no vowel-like (low zero-crossing)
@@ -964,12 +1034,19 @@ pub fn noise_only(samples: &[f32], sample_rate: u32) -> bool {
             noisy += 1;
         }
     }
-    if !(frames >= 8 && vowelish == 0 && noisy * 2 >= frames) {
-        return false;
+    if frames >= 8 && vowelish == 0 && noisy * 2 >= frames {
+        // A spoken "ssh" is a short loud burst with quiet edges. Steady hiss is
+        // flat from the first sample to the last, and that is what we drop.
+        return !fricative_burst(samples, sample_rate);
     }
-    // A spoken "ssh" is a short loud burst with quiet edges. Steady hiss is
-    // flat from the first sample to the last, and that is what we drop.
-    !fricative_burst(samples, sample_rate)
+    // No vowel-like frame and almost no energy: room tone / open mic, not speech.
+    if frames >= 8 && vowelish == 0 {
+        let energetic = samples.chunks(frame).filter(|chunk| rms(chunk) >= 0.006).count();
+        if energetic * 4 < frames {
+            return true;
+        }
+    }
+    false
 }
 
 fn fricative_burst(samples: &[f32], sample_rate: u32) -> bool {
@@ -1591,9 +1668,21 @@ mod tests {
         let mut quiet = vec![0.00005f32; rate as usize / 2];
         quiet.extend((0..rate as usize).map(|i| (i as f32 * 0.05).sin() * 0.003));
         quiet.extend(vec![0.00005f32; rate as usize / 2]);
-        let finished = FinishedAudio { interleaved: quiet, channels: 1, sample_rate: rate, elapsed_ms: 2000, noise_rms: 0.0 };
+        let finished = FinishedAudio {
+            interleaved: quiet,
+            channels: 1,
+            sample_rate: rate,
+            elapsed_ms: 2000,
+            noise_rms: 0.0,
+        };
         assert!(speech_samples(&finished).is_ok(), "quiet speech must survive");
-        let flat = FinishedAudio { interleaved: vec![0.0003f32; rate as usize * 2], channels: 1, sample_rate: rate, elapsed_ms: 2000, noise_rms: 0.0 };
+        let flat = FinishedAudio {
+            interleaved: vec![0.0003f32; rate as usize * 2],
+            channels: 1,
+            sample_rate: rate,
+            elapsed_ms: 2000,
+            noise_rms: 0.0,
+        };
         assert!(matches!(speech_samples(&flat), Err(SpeechError::Silent)));
     }
 
@@ -1717,6 +1806,56 @@ mod tests {
         assert!(encoded.bytes.len() > 42);
         assert_eq!(&encoded.bytes[0..4], b"fLaC");
         assert_eq!(encoded.format, "flac");
+    }
+
+    #[test]
+    fn sparse_hold_keeps_the_spoken_island_not_the_room() {
+        let rate = 16_000u32;
+        // Soft early noise that used to open the trim window, then seconds of
+        // room tone, then the real phrase — the shape of the bad "card in time" take.
+        let mut samples = vec![0.0f32; rate as usize * 2];
+        for sample in samples.iter_mut().skip(rate as usize / 5).take(rate as usize / 8) {
+            *sample = 0.03;
+        }
+        samples.extend(vec![0.0f32; rate as usize * 5]);
+        samples.extend(tone(rate, 800, 0.45));
+        samples.extend(vec![0.0f32; rate as usize / 2]);
+        let finished = FinishedAudio {
+            interleaved: samples,
+            channels: 1,
+            sample_rate: rate,
+            elapsed_ms: 9_000,
+            noise_rms: 0.0,
+        };
+        let out = speech_samples(&finished).expect("spoken island must survive");
+        let secs = out.len() as f32 / TARGET_RATE as f32;
+        assert!(
+            secs < 2.5,
+            "room tone between a click and speech must not upload, got {secs:.2}s"
+        );
+        assert!(secs > 0.5, "the spoken island must survive, got {secs:.2}s");
+    }
+
+    #[test]
+    fn short_click_and_near_silence_never_reach_whisper() {
+        let rate = 16_000u32;
+        // ~40 ms click — under MIN_SPEECH_SECS.
+        let mut click = vec![0.0f32; rate as usize / 10];
+        click.extend(tone(rate, 40, 0.5));
+        click.extend(vec![0.0f32; rate as usize / 10]);
+        let click_take = FinishedAudio {
+            interleaved: click,
+            channels: 1,
+            sample_rate: rate,
+            elapsed_ms: 180,
+            noise_rms: 0.0,
+        };
+        assert!(
+            matches!(prepare_speech(&click_take), Err(SpeechError::Silent)),
+            "a key-click must not upload"
+        );
+        assert!(too_quiet_for_asr(&[0.001f32; 1600]));
+        assert!(!too_quiet_for_asr(&tone(rate, 300, 0.3)));
     }
 
     #[test]

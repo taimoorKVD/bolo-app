@@ -33,6 +33,80 @@ pub fn foreground_tone() -> Tone {
     }
 }
 
+/// Rare spellings from the focused window for the Whisper prompt: app name,
+/// file names, and TitleCase tokens from the title. Never full sentences —
+/// Whisper would continue those as if the user said them.
+pub fn foreground_vocab() -> Vec<String> {
+    #[cfg(windows)]
+    {
+        windows_foreground_vocab()
+    }
+    #[cfg(not(windows))]
+    {
+        Vec::new()
+    }
+}
+
+/// Split a window title into prompt terms. Pure for tests.
+pub fn title_vocab(exe: &str, title: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(label) = label_from(exe, title) {
+        // Generic browser names add little; keep chat / editors / mail brands.
+        if !matches!(label.as_str(), "Chrome" | "Edge" | "Firefox" | "Brave") {
+            push_term(&mut out, &label);
+        }
+    }
+    for part in title.split(['-', '|', '—', '·', '–']) {
+        for token in part.split_whitespace() {
+            let bare = bare_token(token);
+            if is_prompt_term(&bare) {
+                push_term(&mut out, &bare);
+            }
+        }
+    }
+    out
+}
+
+fn bare_token(token: &str) -> String {
+    token
+        .trim_matches(|c: char| !(c.is_alphanumeric() || c == '.' || c == '_' || c == '-' || c == '\''))
+        .to_string()
+}
+
+fn is_prompt_term(bare: &str) -> bool {
+    if bare.chars().count() < 3 || bare.chars().count() > 48 {
+        return false;
+    }
+    let lower = bare.to_ascii_lowercase();
+    if SKIP_TITLE_WORDS.contains(&lower.as_str()) {
+        return false;
+    }
+    if bare.contains('.') || bare.contains('_') {
+        return bare.chars().any(|c| c.is_ascii_alphabetic());
+    }
+    let chars: Vec<char> = bare.chars().collect();
+    let head_upper = chars[0].is_uppercase();
+    let has_lower = chars.iter().any(|c| c.is_lowercase());
+    let has_inner_upper = chars.iter().skip(1).any(|c| c.is_uppercase());
+    let acronym = chars.len() <= 6 && chars.iter().all(|c| c.is_ascii_uppercase());
+    (head_upper && has_lower) || has_inner_upper || acronym
+}
+
+fn push_term(out: &mut Vec<String>, term: &str) {
+    if term.is_empty() || out.iter().any(|have| have.eq_ignore_ascii_case(term)) {
+        return;
+    }
+    if out.len() >= 10 {
+        return;
+    }
+    out.push(term.to_string());
+}
+
+const SKIP_TITLE_WORDS: &[&str] = &[
+    "the", "and", "for", "with", "from", "untitled", "new", "tab", "inbox", "home", "page", "document",
+    "microsoft", "google", "application", "window", "chrome", "edge", "firefox", "brave",
+];
+
 /// Short name of the app a take went into, for the overlay's
 /// "Inserted into Notepad". None when the window has no usable name.
 pub fn app_label(target: Option<isize>) -> Option<String> {
@@ -130,12 +204,24 @@ const FORMAL_EXE: &[&str] = &["winword", "outlook", "powerpnt", "onenote"];
 
 #[cfg(windows)]
 fn windows_foreground() -> Tone {
+    let (exe, title) = foreground_exe_title();
+    classify(&exe, &title)
+}
+
+#[cfg(windows)]
+fn windows_foreground_vocab() -> Vec<String> {
+    let (exe, title) = foreground_exe_title();
+    title_vocab(&exe, &title)
+}
+
+#[cfg(windows)]
+fn foreground_exe_title() -> (String, String) {
     use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
 
     unsafe {
         let hwnd = GetForegroundWindow();
         if hwnd.is_invalid() {
-            return Tone::Plain;
+            return (String::new(), String::new());
         }
         let mut pid = 0u32;
         GetWindowThreadProcessId(hwnd, Some(&mut pid));
@@ -145,7 +231,7 @@ fn windows_foreground() -> Tone {
         } else {
             process_image(pid)
         };
-        classify(&exe, &title)
+        (exe, title)
     }
 }
 
@@ -199,6 +285,22 @@ mod tests {
         assert_eq!(label_from(r"C:\x\foo.exe", "Report - Foo Editor").as_deref(), Some("Foo Editor"));
         assert_eq!(label_from(r"C:\x\foo.exe", "Untitled"), None);
         assert_eq!(label_from("", ""), None);
+    }
+
+    #[test]
+    fn title_vocab_keeps_file_and_app_names() {
+        let terms = title_vocab(
+            r"C:\Users\a\AppData\Local\Programs\cursor\Cursor.exe",
+            "dictation.rs — bolo-app — Cursor",
+        );
+        assert!(terms.iter().any(|t| t == "Cursor"), "{terms:?}");
+        assert!(terms.iter().any(|t| t == "dictation.rs"), "{terms:?}");
+        assert!(!terms.iter().any(|t| t.eq_ignore_ascii_case("untitled")), "{terms:?}");
+        let mail = title_vocab(
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            "Inbox (2) - Gmail",
+        );
+        assert!(mail.iter().any(|t| t == "Gmail"), "{mail:?}");
     }
 
     #[test]
