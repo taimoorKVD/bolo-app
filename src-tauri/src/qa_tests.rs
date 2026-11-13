@@ -180,7 +180,7 @@ fn hand_edited_bad_values_self_heal_on_load() {
     )
     .unwrap();
     let s = load_settings(&dir);
-    assert_eq!(s.model, WHISPER_TURBO);
+    assert_eq!(s.model, WHISPER_LARGE);
     assert_eq!(s.language, "auto");
     assert_eq!(s.hotkey, Hotkey::default());
     assert_eq!(s.paste_hotkey, Hotkey::paste_again());
