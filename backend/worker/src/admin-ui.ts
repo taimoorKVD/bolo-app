@@ -102,6 +102,8 @@ const CFG=window.__BOLO_OFFICE__||{mock:false,apiBase:"/admin/api",home:"/admin"
 const API=()=>CFG.apiBase||"/admin/api";
 function h(tag,attrs,...kids){const e=document.createElement(tag);for(const[k,v]of Object.entries(attrs||{})){if(k==="on")for(const[ev,f]of Object.entries(v))e.addEventListener(ev,f);else if(v!==false&&v!=null)e.setAttribute(k,v===true?"":v)}for(const c of kids.flat())if(c!=null&&c!==false)e.append(c instanceof Node?c:document.createTextNode(String(c)));return e}
 function toast(m){const t=$("#toast");t.textContent=m;t.style.display="block";setTimeout(()=>t.style.display="none",3500)}
+function loader(label){return h("div",{class:"card loader",role:"status","aria-live":"polite","aria-busy":"true"},h("div",{class:"row"},h("span",{class:"spin","aria-hidden":"true"}),h("span",{class:"mute"},label||"Loading")),h("div",{class:"skel"}),h("div",{class:"skel mid"}),h("div",{class:"skel short"}))}
+function paintLoading(label){const app=$("#app");if(app)app.replaceChildren(loader(label))}
 function showGate(){$("#shell").hidden=true;$("#gate").hidden=false}
 function showApp(){$("#gate").hidden=true;$("#shell").hidden=false}
 async function api(p,o={}){const r=await fetch(API()+p,{...o,headers:{"content-type":"application/json",...(T?{authorization:"Bearer "+T}:{})}});const j=await r.json().catch(()=>({}));if(r.status===401&&j.code==="admin_unauthenticated"){T="";sessionStorage.removeItem("bolo_admin");showGate();login();throw new Error("signed out")}if(!r.ok)throw Object.assign(new Error(j.error||"Sign-in failed."),{code:j.code});return j}
@@ -247,7 +249,7 @@ $("#m2fa").onclick=async()=>{
   }catch(e){toast(e.message)}
 };
 function closeDrawer(){const d=$("#drawer");if(!d)return;d.classList.remove("open");d.hidden=true}
-function show(v){location.hash=v;const app=$("#app");app.classList.remove("rise");void app.offsetWidth;app.classList.add("rise");app.replaceChildren(h("div",{class:"card"},h("div",{class:"skel"})));document.querySelectorAll("#nav button[data-v]").forEach(b=>b.classList.toggle("on",b.dataset.v===v.split("/")[0]));if(!String(v).startsWith("user/"))closeDrawer();if(String(v).startsWith("user/")){users();return userView(v.slice(5))}({dash,users,audit,team,health,devices,limits,releases,keys,errors,feedback,settings}[v]||dash)()}
+function show(v){location.hash=v;const app=$("#app");app.classList.remove("rise");void app.offsetWidth;app.classList.add("rise");app.replaceChildren(loader("Loading"));document.querySelectorAll("#nav button[data-v]").forEach(b=>b.classList.toggle("on",b.dataset.v===v.split("/")[0]));if(!String(v).startsWith("user/"))closeDrawer();if(String(v).startsWith("user/")){users();return userView(v.slice(5))}({dash,users,audit,team,health,devices,limits,releases,keys,errors,feedback,settings}[v]||dash)()}
 const stat=(k,v,extra)=>h("div",{class:"card stat"},h("div",{class:"k"},k),h("div",{class:"v"},v),extra||"");
 function askSecret(title,text,mode){
   return new Promise((resolve)=>{
@@ -271,11 +273,11 @@ async function ensureRecent(){
     ME.recentAuthUntil=j.recentAuthUntil; return true;
   }catch(e){toast(e.message);return false}
 }
-function confirmAction(title,text,extra,run){const del=/^Delete/.test(title);$("#dok").classList.toggle("solid-danger",del);$("#dtitle").textContent=title;$("#dtext").textContent=text;$("#dextra").replaceChildren(extra||"");$("#dreason").value="";$("#dconfirm").value="";$("#dconfirmwrap").hidden=!del;$("#dconfirm").hidden=!del;const d=$("#dlg");d.showModal();d.onclose=async()=>{if(d.returnValue!=="ok")return;if(del&&$("#dconfirm").value!=="DELETE"){toast("Type DELETE to confirm.");return}if(!(await ensureRecent()))return;try{await run($("#dreason").value);toast("Done. Recorded in the audit log.");show(location.hash.slice(1)||"dash")}catch(e){toast(e.message)}}}
+function confirmAction(title,text,extra,run){const del=/^Delete/.test(title);$("#dok").classList.toggle("solid-danger",del);$("#dtitle").textContent=title;$("#dtext").textContent=text;$("#dextra").replaceChildren(extra||"");$("#dreason").value="";$("#dconfirm").value="";$("#dconfirmwrap").hidden=!del;$("#dconfirm").hidden=!del;const d=$("#dlg");return new Promise((resolve)=>{d.onclose=async()=>{if(d.returnValue!=="ok"){resolve(false);return}if(del&&$("#dconfirm").value!=="DELETE"){toast("Type DELETE to confirm.");resolve(false);return}if(!(await ensureRecent())){resolve(false);return}paintLoading("Working");try{await run($("#dreason").value);toast("Done. Recorded in the audit log.");show(location.hash.slice(1)||"dash");resolve(true)}catch(e){toast(e.message);show(location.hash.slice(1)||"dash");resolve(false)}};d.showModal()})}
 function empty(text){return h("p",{class:"empty"},text)}
 function stop(fn){return (e)=>{e.stopPropagation();fn()}}
 function go(title,text,path,body){return stop(()=>confirmAction(title,text,null,(r)=>api(path,{method:"POST",body:JSON.stringify(Object.assign({reason:r},body||{}))})))}
-function btn(label,cls,fn){return h("button",{type:"button",class:"btn "+(cls||"ghost"),on:{click:fn}},label)}
+function btn(label,cls,fn){const b=h("button",{type:"button",class:cls?"btn "+cls:"btn"});const rest=()=>{b.replaceChildren(document.createTextNode(label))};rest();b.addEventListener("click",async(e)=>{if(b.dataset.busy==="1")return;b.dataset.busy="1";b.disabled=true;b.setAttribute("aria-busy","true");b.replaceChildren(h("span",{class:"spin","aria-hidden":"true"}),document.createTextNode(" "+label));try{await fn(e)}finally{b.disabled=false;b.removeAttribute("aria-busy");delete b.dataset.busy;if(b.isConnected)rest()}});return b}
 function initials(email){const p=String(email||"?").split("@")[0];const bits=p.split(/[.\s_-]/).filter(Boolean);return (((bits[0]||p)[0]||"?")+((bits[1]||"")[0]||"")).toUpperCase()}
 function chip(text,kind){return h("span",{class:"chip "+(kind||"")},text)}
 function meter(pct){return h("div",{class:"meter"},h("i",{style:"width:"+Math.max(0,Math.min(100,pct))+"%"}))}
@@ -498,7 +500,7 @@ async function users(){
   function bulkBar(){
     bulk.replaceChildren(picked.size?btn("Suspend "+picked.size,"sec",()=>confirmAction("Suspend selected","Managed dictation stops for the selected users.",null,async(r)=>{for(const id of picked)await api("/users/"+id+"/suspend",{method:"POST",body:JSON.stringify({suspended:true,reason:r})})})):"");
   }
-  async function load(){const j=await api("/users?q="); all=j.users||[]; draw();}
+  async function load(){box.replaceChildren(loader("Loading users"));const j=await api("/users?q="); all=j.users||[]; draw();}
   q.oninput=()=>{page=0;draw()};
   app.replaceChildren(h("h2",{style:"margin-top:0"},"Users"),h("div",{class:"toolbar"},q,filters,count,bulk),box,foot);
   load();
@@ -538,6 +540,7 @@ async function team(){
   if(!allowed("manage_team")){toast("Owner only");return show("dash")}
   const app=$("#app"), box=h("div",{class:"card"}), created=h("div",{});
   async function load(){
+    box.replaceChildren(loader("Loading staff"));
     const j=await api("/team");
     box.replaceChildren(j.staff&&j.staff.length?h("table",{},
       h("tr",{},h("th",{},"Email"),h("th",{},"Name"),h("th",{},"Role"),h("th",{},"Status"),h("th",{},"Email codes"),h("th",{},"Actions")),
@@ -546,27 +549,27 @@ async function team(){
         h("td",{},h("span",{class:"tag "+(st.enabled?"active":"disabled")},st.enabled?"enabled":"disabled")),
         h("td",{},st.email2fa?"on":"off"),
         h("td",{},h("div",{class:"row"},
-          h("select",{id:"role-"+st.email,style:"width:auto"},...["owner","admin","support","viewer"].map(r=>h("option",{value:r,selected:r===st.role},r))),
-          h("button",{class:"btn ghost",style:"width:auto",on:{click:()=>{const sel=document.getElementById("role-"+st.email);confirmAction("Change role","Set "+st.email+" to "+sel.value+".",null,(r)=>api("/team/"+encodeURIComponent(st.email)+"/role",{method:"POST",body:JSON.stringify({role:sel.value,reason:r})}))}}},"Save role"),
-          h("button",{class:"btn ghost",style:"width:auto",on:{click:()=>confirmAction("Resend invite","Records the invite. Office does not email their password.",null,(r)=>api("/team/"+encodeURIComponent(st.email)+"/invite",{method:"POST",body:JSON.stringify({reason:r})}))}},"Resend invite"),
-          h("button",{class:"btn ghost",style:"width:auto",on:{click:()=>confirmAction(st.email2fa?"Turn email codes off":"Turn email codes on",(st.email2fa?"Stop":"Start")+" emailing sign-in codes to "+st.email+".",null,(r)=>api("/team/"+encodeURIComponent(st.email)+"/email-2fa",{method:"POST",body:JSON.stringify({enabled:!st.email2fa,reason:r})}))}},st.email2fa?"Codes off":"Codes on"),
-          h("button",{class:"btn "+(st.enabled?"bad":"ghost"),style:"width:auto",on:{click:()=>confirmAction(st.enabled?"Remove account":"Enable account",(st.enabled?"Disable":"Enable")+" Office access for "+st.email+".",null,(r)=>api("/team/"+encodeURIComponent(st.email)+"/enabled",{method:"POST",body:JSON.stringify({enabled:!st.enabled,reason:r})}))}},st.enabled?"Remove":"Enable")
+          h("select",{id:"role-"+st.email,name:"staff-role",autocomplete:"off",style:"width:auto"},...["owner","admin","support","viewer"].map(r=>h("option",{value:r,selected:r===st.role},r))),
+          btn("Save role","sec",()=>{const sel=document.getElementById("role-"+st.email);return confirmAction("Change role","Set "+st.email+" to "+sel.value+".",null,(r)=>api("/team/"+encodeURIComponent(st.email)+"/role",{method:"POST",body:JSON.stringify({role:sel.value,reason:r})}))}),
+          btn("Resend invite","sec",()=>confirmAction("Resend invite","Records the invite. Office does not email their password.",null,(r)=>api("/team/"+encodeURIComponent(st.email)+"/invite",{method:"POST",body:JSON.stringify({reason:r})}))),
+          btn(st.email2fa?"Codes off":"Codes on","sec",()=>confirmAction(st.email2fa?"Turn email codes off":"Turn email codes on",(st.email2fa?"Stop":"Start")+" emailing sign-in codes to "+st.email+".",null,(r)=>api("/team/"+encodeURIComponent(st.email)+"/email-2fa",{method:"POST",body:JSON.stringify({enabled:!st.email2fa,reason:r})}))),
+          btn(st.enabled?"Remove":"Enable",st.enabled?"bad":"sec",()=>confirmAction(st.enabled?"Remove account":"Enable account",(st.enabled?"Disable":"Enable")+" Office access for "+st.email+".",null,(r)=>api("/team/"+encodeURIComponent(st.email)+"/enabled",{method:"POST",body:JSON.stringify({enabled:!st.enabled,reason:r})})))
         ))
       ))):h("p",{class:"empty"},"No staff accounts yet."));
   }
-  const form=h("div",{class:"card"},
+  const form=h("form",{class:"card",autocomplete:"off",on:{submit:(e)=>e.preventDefault()}},
     h("h3",{style:"margin-top:0"},"Add staff"),
     h("div",{class:"grid"},
-      h("div",{},h("label",{class:"k",for:"te"},"Email"),h("input",{id:"te",type:"email"})),
-      h("div",{},h("label",{class:"k",for:"tn"},"Name"),h("input",{id:"tn"})),
-      h("div",{},h("label",{class:"k",for:"tr"},"Role"),h("select",{id:"tr"},h("option",{value:"admin"},"admin"),h("option",{value:"support"},"support"),h("option",{value:"viewer"},"viewer"),h("option",{value:"owner"},"owner"))),
-      h("div",{},h("label",{class:"k",for:"tp"},"Password (14+ characters)"),h("input",{id:"tp",type:"password"}))
+      h("div",{},h("label",{class:"k",for:"te"},"Email"),h("input",{id:"te",type:"email",name:"staff-email",autocomplete:"off"})),
+      h("div",{},h("label",{class:"k",for:"tn"},"Name"),h("input",{id:"tn",name:"staff-label",autocomplete:"off"})),
+      h("div",{},h("label",{class:"k",for:"tr"},"Role"),h("select",{id:"tr",name:"staff-role",autocomplete:"off"},h("option",{value:"admin"},"admin"),h("option",{value:"support"},"support"),h("option",{value:"viewer"},"viewer"),h("option",{value:"owner"},"owner"))),
+      h("div",{},h("label",{class:"k",for:"tp"},"Password (14+ characters)"),h("input",{id:"tp",type:"password",name:"staff-new-password",autocomplete:"new-password"}))
     ),
-    h("button",{class:"btn",style:"width:auto",on:{click:()=>confirmAction("Create staff account","They can sign in with the password. Email codes stay off until turned on.",null,async(r)=>{
+    btn("Create account","",()=>confirmAction("Create staff account","They can sign in with the password. Email codes stay off until turned on.",null,async(r)=>{
       const j=await api("/team",{method:"POST",body:JSON.stringify({email:$("#te").value,label:$("#tn").value,role:$("#tr").value,password:$("#tp").value,reason:r})});
       created.replaceChildren(h("div",{class:"card"},h("h3",{style:"margin-top:0"},"Optional authenticator"),h("p",{class:"mute"},"Share this once with "+j.staff.email+" if they want an authenticator as well as email codes."),...enrollBlock(j.enrollment)));
       $("#te").value="";$("#tn").value="";$("#tp").value="";load();
-    })}},"Create account")
+    }))
   );
   app.replaceChildren(h("h2",{style:"margin-top:0"},"Team"),h("p",{class:"mute"},"Owners can create staff, change access, and turn email codes on or off. A person can also turn their own email codes on."),form,created,h("h2",{},"Staff"),box);
   load();
